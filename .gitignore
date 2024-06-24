@@ -21,3 +21,4 @@
 go.work
 .history
 .env
+firebase.json

@@ -2,6 +2,7 @@ package openapi
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -58,6 +59,28 @@ func (s *FirestoreService) AuthenticateUser(ctx context.Context, username, passw
 	}
 
 	return id, nil
+}
+
+func (s *FirestoreService) GetUserPasswordHash(ctx context.Context, userID string) (string, error) {
+	doc, err := s.client.Collection("users").Doc(userID).Get(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	passwordHash, ok := doc.Data()["password_hash"].(string)
+	if !ok {
+		return "", errors.New("password hash not found")
+	}
+
+	return passwordHash, nil
+}
+
+func (s *FirestoreService) GetPasswordHashFromSession(ctx context.Context, sessionToken string) (string, error) {
+	userID, err := s.ValidateSession(ctx, sessionToken)
+	if err != nil {
+		return "", err
+	}
+	return s.GetUserPasswordHash(ctx, userID)
 }
 
 func (s *FirestoreService) CreateSession(ctx context.Context, userID string) (string, error) {

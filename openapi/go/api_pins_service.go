@@ -36,9 +36,9 @@ func NewPinsAPIService(firestoreService *FirestoreService, ipfsAPI *ipfsrpc.Http
 }
 
 func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, error) {
-	balance, err := s.checkBlockchainBalance(pin.Cid)
+	balance, err := s.checkBlockchainBalance(ctx, pin.Cid)
 	if err != nil || balance < 9999999999999 {
-		_, err := s.setBlockchainBalance(s.masterSeed, 999999999999999999, pin.Cid)
+		_, err := s.setBlockchainBalance(ctx, s.masterSeed, pin.Cid, 999999999999999999)
 		if err != nil {
 			return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
 		}
@@ -65,9 +65,9 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 }
 
 func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {
-	balance, err := s.checkBlockchainBalance(requestid)
+	balance, err := s.checkBlockchainBalance(ctx, requestid)
 	if err != nil || balance < 9999999999999 {
-		_, err := s.setBlockchainBalance(s.masterSeed, 999999999999999999, requestid)
+		_, err := s.setBlockchainBalance(ctx, s.masterSeed, requestid, 999999999999999999)
 		if err != nil {
 			return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
 		}
@@ -154,7 +154,17 @@ func (s *PinsAPIService) getPinByRequestID(ctx context.Context, requestid string
 	return PinStatus{}, errors.New("pin status not found")
 }
 
-func (s *PinsAPIService) checkBlockchainBalance(account string) (int64, error) {
+func (s *PinsAPIService) checkBlockchainBalance(ctx context.Context, account string) (int64, error) {
+	sessionToken, err := extractSessionTokenFromContext(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	_, err = s.firestoreService.GetPasswordHashFromSession(ctx, sessionToken)
+	if err != nil {
+		return 0, err
+	}
+
 	resp, err := http.Get(s.blockchainAPIEndpoint + "/account/balance?account=" + account)
 	if err != nil {
 		return 0, err
@@ -171,7 +181,17 @@ func (s *PinsAPIService) checkBlockchainBalance(account string) (int64, error) {
 	return result.Amount, nil
 }
 
-func (s *PinsAPIService) setBlockchainBalance(seed string, amount int64, account string) (bool, error) {
+func (s *PinsAPIService) setBlockchainBalance(ctx context.Context, seed, account string, amount int64) (bool, error) {
+	sessionToken, err := extractSessionTokenFromContext(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	_, err = s.firestoreService.GetPasswordHashFromSession(ctx, sessionToken)
+	if err != nil {
+		return false, err
+	}
+
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"seed":   seed,
 		"amount": amount,
@@ -192,6 +212,14 @@ func (s *PinsAPIService) setBlockchainBalance(seed string, amount int64, account
 	}
 
 	return true, nil
+}
+
+func extractSessionTokenFromContext(ctx context.Context) (string, error) {
+	sessionToken, ok := ctx.Value("sessionToken").(string)
+	if !ok || sessionToken == "" {
+		return "", errors.New("session token not found in context")
+	}
+	return sessionToken, nil
 }
 
 func (s *PinsAPIService) pinToIPFSCluster(ctx context.Context, cid string) error {

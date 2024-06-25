@@ -35,6 +35,21 @@ func NewPinsAPIService(firestoreService *FirestoreService, ipfsAPI *ipfsrpc.Http
 	}
 }
 
+func (s *FirestoreService) GetUserIDFromToken(ctx context.Context, token string) (string, error) {
+	docs, err := s.client.Collection("sessions").Where("session_token", "==", token).Documents(ctx).GetAll()
+	if err != nil || len(docs) == 0 {
+		return "", errors.New("invalid or expired session token")
+	}
+
+	var userID string
+	for _, doc := range docs {
+		userID = doc.Data()["user_id"].(string)
+		break
+	}
+
+	return userID, nil
+}
+
 func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, error) {
 	// Check if the CID already exists in IPFS
 	exists, err := s.cidExistsInIPFS(ctx, pin.Cid)

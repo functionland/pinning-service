@@ -71,8 +71,9 @@
  
 	 // Initialize router
 	 router := openapi.NewRouter(pinsAPIController)
+	 authRouter := openapi.AuthMiddleware(firestoreService)(router)
  
 	 // Start the server
-	 log.Fatal(http.ListenAndServe(":6000", openapi.InjectRequestIntoContext(router)))
+	 log.Fatal(http.ListenAndServe(":6000", openapi.InjectRequestIntoContext(authRouter)))
  }
  

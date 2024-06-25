@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -262,6 +263,8 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 	if err != nil {
 		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
 	}
+	log.Printf("This is pinned object for request: %s ------------>", requestid)
+	log.Println(pin)
 
 	// Remove the manifest from the blockchain
 	err = s.removeManifestFromChain(ctx, passwordHash, pin.Pin.Cid)

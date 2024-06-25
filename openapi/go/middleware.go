@@ -32,25 +32,29 @@ func GetRequestFromContext(ctx context.Context) (*http.Request, error) {
 }
 
 // AuthMiddleware checks for a valid auth token in the request and validates it
+// AuthMiddleware checks for a valid auth token in the request and validates it
 func AuthMiddleware(firestoreService *FirestoreService) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
-				createErrorResponseJSON(w, http.StatusUnauthorized, "UNAUTHORIZED", "no authorization header provided")
+				resp := createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", "no authorization header provided")
+				createErrorResponseJSON(w, resp)
 				return
 			}
 
 			token := strings.TrimPrefix(authHeader, "Bearer ")
 			if token == authHeader {
-				createErrorResponseJSON(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid token format")
+				resp := createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", "invalid token format")
+				createErrorResponseJSON(w, resp)
 				return
 			}
 
 			ctx := r.Context()
 			_, err := firestoreService.GetUserIDFromToken(ctx, token)
 			if err != nil {
-				createErrorResponseJSON(w, http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
+				resp := createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
+				createErrorResponseJSON(w, resp)
 				return
 			}
 
@@ -70,13 +74,8 @@ func createErrorResponse(statusCode int, reason, details string) ImplResponse {
 	})
 }
 
-func createErrorResponseJSON(w http.ResponseWriter, statusCode int, reason, details string) {
+func createErrorResponseJSON(w http.ResponseWriter, resp ImplResponse) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(Failure{
-		Error: FailureError{
-			Reason:  reason,
-			Details: details,
-		},
-	})
+	w.WriteHeader(resp.Code)
+	json.NewEncoder(w).Encode(resp.Body)
 }

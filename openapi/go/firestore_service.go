@@ -17,7 +17,7 @@ type FirestoreService struct {
 }
 
 func NewFirestoreService(ctx context.Context, credentialsFile string) (*FirestoreService, error) {
-	client, err := firestore.NewClient(ctx, "your-project-id", option.WithCredentialsFile(credentialsFile))
+	client, err := firestore.NewClient(ctx, "fula-explorer", option.WithCredentialsFile(credentialsFile))
 	if err != nil {
 		return nil, err
 	}

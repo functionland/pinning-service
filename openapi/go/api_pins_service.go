@@ -36,6 +36,16 @@ func NewPinsAPIService(firestoreService *FirestoreService, ipfsAPI *ipfsrpc.Http
 }
 
 func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, error) {
+	// Check if the CID already exists in IPFS
+	exists, err := s.cidExistsInIPFS(ctx, pin.Cid)
+	if err != nil {
+		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+	}
+	if !exists {
+		return Response(http.StatusBadRequest, Failure{Error: FailureError{Reason: "CID does not exist in IPFS"}}), nil
+	}
+
+	// Check blockchain balance
 	balance, err := s.checkBlockchainBalance(ctx, pin.Cid)
 	if err != nil || balance < 9999999999999 {
 		_, err := s.setBlockchainBalance(ctx, s.masterSeed, pin.Cid, 999999999999999999)
@@ -62,6 +72,22 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 		Created:   time.Now(),
 		Pin:       pin,
 	}), nil
+}
+
+// cidExistsInIPFS checks if a CID exists in IPFS
+func (s *PinsAPIService) cidExistsInIPFS(ctx context.Context, cid string) (bool, error) {
+	pinList, err := s.ipfsAPI.Pin().Ls(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	for p := range pinList {
+		if p.Path().String() == cid {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {

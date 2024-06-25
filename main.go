@@ -48,7 +48,7 @@
 
 	 nodeMultiAddr, err := ma.NewMultiaddr("/ip4/127.0.0.1/tcp/5001")
 	if err != nil {
-		log.Fatalf("invalid multiaddress: %w", err)
+		log.Fatalf("invalid multiaddress: %v", err)
 		panic(err)
 	}
 	ipfsAPI, err := rpc.NewApi(nodeMultiAddr)
@@ -59,7 +59,7 @@
 	ipfsClusterConfig := ipfsCluster.Config{}
 	ipfsClusterApi, err := ipfsCluster.NewDefaultClient(&ipfsClusterConfig)
 	if err != nil {
-		log.Fatalf("Error in setting ipfs cluster api %w", err)
+		log.Fatalf("Error in setting ipfs cluster api %v", err)
 		panic(err)
 	}
  

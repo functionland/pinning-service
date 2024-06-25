@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -184,18 +185,24 @@ func (s *PinsAPIService) verifyManifestOnChain(ctx context.Context, passwordHash
 
 // cidExistsInIPFS checks if a CID exists in IPFS
 func (s *PinsAPIService) cidExistsInIPFS(ctx context.Context, cid string) (bool, error) {
-	pinList, err := s.ipfsAPI.Pin().Ls(ctx)
+	// Convert string to ipfspath.Path
+	p, err := ipfspath.NewPath(cid)
 	if err != nil {
 		return false, err
 	}
 
-	for p := range pinList {
-		if p.Path().String() == cid {
-			return true, nil
+	// Try to stat the block to see if it exists
+	_, err = s.ipfsAPI.Block().Stat(ctx, p)
+	if err != nil {
+		// If the error is not "not found", then it is a real error
+		if !strings.Contains(err.Error(), "not found") {
+			return false, err
 		}
+		// The block does not exist
+		return false, nil
 	}
-
-	return false, nil
+	// The block exists
+	return true, nil
 }
 
 func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {

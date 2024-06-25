@@ -32,7 +32,6 @@ func GetRequestFromContext(ctx context.Context) (*http.Request, error) {
 }
 
 // AuthMiddleware checks for a valid auth token in the request and validates it
-// AuthMiddleware checks for a valid auth token in the request and validates it
 func AuthMiddleware(firestoreService *FirestoreService) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,5 +76,11 @@ func createErrorResponse(statusCode int, reason, details string) ImplResponse {
 func createErrorResponseJSON(w http.ResponseWriter, resp ImplResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.Code)
-	json.NewEncoder(w).Encode(resp.Body)
+	// Use json.Marshal instead of json.NewEncoder to avoid adding new line
+	jsonData, err := json.Marshal(resp.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Write(jsonData)
 }

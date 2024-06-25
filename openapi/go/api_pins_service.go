@@ -151,8 +151,8 @@ func (s *PinsAPIService) verifyManifestOnChain(ctx context.Context, passwordHash
 	}
 
 	reqBody, err := json.Marshal(map[string]interface{}{
-		"pool_id":  []int{s.poolId},
-		"uploader": []string{account},
+		"pool_id":  s.poolId,
+		"uploader": account,
 		"cids":     []string{cid},
 	})
 	if err != nil {

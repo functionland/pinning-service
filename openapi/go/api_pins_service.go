@@ -186,7 +186,7 @@ func (s *PinsAPIService) verifyManifestOnChain(ctx context.Context, passwordHash
 // cidExistsInIPFS checks if a CID exists in IPFS
 func (s *PinsAPIService) cidExistsInIPFS(ctx context.Context, cid string) (bool, error) {
 	// Convert string to ipfspath.Path
-	p, err := ipfspath.NewPath(cid)
+	p, err := ipfspath.NewPath("/ipfs/" + cid)
 	if err != nil {
 		return false, err
 	}

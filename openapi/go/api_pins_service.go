@@ -45,6 +45,11 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 		return Response(http.StatusBadRequest, Failure{Error: FailureError{Reason: "CID does not exist in IPFS"}}), nil
 	}
 
+	userID, err := s.extractUserIDFromAuth(ctx)
+	if err != nil {
+		return Response(http.StatusUnauthorized, Failure{Error: FailureError{Reason: err.Error()}}), err
+	}
+
 	// Check blockchain balance
 	balance, err := s.checkBlockchainBalance(ctx, pin.Cid)
 	if err != nil || balance < 9999999999999 {
@@ -61,7 +66,7 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	}
 
 	// Store pin in Firestore
-	err = s.firestoreService.AddPin(ctx, pin)
+	err = s.firestoreService.AddPin(ctx, userID, pin)
 	if err != nil {
 		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
 	}
@@ -138,8 +143,13 @@ func (s *PinsAPIService) GetPinByRequestId(ctx context.Context, requestid string
 }
 
 func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string, match TextMatchingStrategy, status []Status, before time.Time, after time.Time, limit int32, meta map[string]string) (ImplResponse, error) {
+	userID, err := s.extractUserIDFromAuth(ctx)
+	if err != nil {
+		return Response(http.StatusUnauthorized, Failure{Error: FailureError{Reason: err.Error()}}), err
+	}
+
 	// Query pins from Firestore
-	pins, err := s.firestoreService.GetPins(ctx, int(limit))
+	pins, err := s.firestoreService.GetPins(ctx, userID, int(limit))
 	if err != nil {
 		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
 	}
@@ -155,6 +165,15 @@ func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string,
 	}
 
 	return Response(http.StatusOK, PinResults{Results: pinStatuses}), nil
+}
+
+func (s *PinsAPIService) extractUserIDFromAuth(ctx context.Context) (string, error) {
+	authToken, err := extractAuthTokenFromContext(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	return s.firestoreService.GetUserIDFromAuthToken(ctx, authToken)
 }
 
 func (s *PinsAPIService) ReplacePinByRequestId(ctx context.Context, requestid string, pin Pin) (ImplResponse, error) {

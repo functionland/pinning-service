@@ -27,3 +27,5 @@
 # shellcheck disable=SC1008
 #!docs/README.md
 api_pins_service.go
+middleware.go
+firestore_service.go

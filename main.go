@@ -73,6 +73,6 @@
 	 router := openapi.NewRouter(pinsAPIController)
  
 	 // Start the server
-	 log.Fatal(http.ListenAndServe(":6000", router))
+	 log.Fatal(http.ListenAndServe(":6000", openapi.InjectRequestIntoContext(router)))
  }
  

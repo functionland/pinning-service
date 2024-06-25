@@ -3,13 +3,13 @@ package openapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/api/option"
-	"google.golang.org/grpc/metadata"
 )
 
 type FirestoreService struct {
@@ -93,17 +93,21 @@ func (s *FirestoreService) GetUserPasswordHash(ctx context.Context, userID strin
 }
 
 func extractAuthTokenFromContext(ctx context.Context) (string, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return "", errors.New("no metadata found in context")
+	req, err := GetRequestFromContext(ctx)
+	if err != nil {
+		return "", err
 	}
 
-	authHeader, ok := md["authorization"]
-	if !ok || len(authHeader) == 0 {
+	authHeader := req.Header.Get("Authorization")
+	if authHeader == "" {
 		return "", errors.New("authorization token not found in context")
 	}
 
-	token := strings.TrimPrefix(authHeader[0], "Bearer ")
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	if token == authHeader {
+		return "", errors.New("malformed authorization token")
+	}
+
 	return token, nil
 }
 
@@ -135,8 +139,9 @@ func (s *FirestoreService) ValidateSession(ctx context.Context, sessionToken str
 	return userID, nil
 }
 
-func (s *FirestoreService) AddPin(ctx context.Context, pin Pin) error {
+func (s *FirestoreService) AddPin(ctx context.Context, userID string, pin Pin) error {
 	_, _, err := s.client.Collection("pins").Add(ctx, map[string]interface{}{
+		"user_id":    userID,
 		"cid":        pin.Cid,
 		"status":     "queued",
 		"requestid":  generateRequestID(pin),
@@ -187,8 +192,8 @@ func (s *FirestoreService) GetPinByRequestID(ctx context.Context, requestID stri
 	return pinStatus, nil
 }
 
-func (s *FirestoreService) GetPins(ctx context.Context, limit int) ([]Pin, error) {
-	docs, err := s.client.Collection("pins").Limit(limit).Documents(ctx).GetAll()
+func (s *FirestoreService) GetPins(ctx context.Context, userID string, limit int) ([]Pin, error) {
+	docs, err := s.client.Collection("pins").Where("user_id", "==", userID).Limit(limit).Documents(ctx).GetAll()
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +210,21 @@ func (s *FirestoreService) GetPins(ctx context.Context, limit int) ([]Pin, error
 	}
 
 	return pins, nil
+}
+
+func (s *FirestoreService) GetUserIDFromAuthToken(ctx context.Context, authToken string) (string, error) {
+	docs, err := s.client.Collection("sessions").Where("session_token", "==", authToken).Documents(ctx).GetAll()
+	if err != nil || len(docs) == 0 {
+		return "", fmt.Errorf("invalid or expired session token: %s", authToken)
+	}
+
+	var userID string
+	for _, doc := range docs {
+		userID = doc.Data()["user_id"].(string)
+		break
+	}
+
+	return userID, nil
 }
 
 func generateSessionToken() string {

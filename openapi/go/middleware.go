@@ -9,6 +9,8 @@ import (
 
 type contextKey string
 
+const authTokenKey = contextKey("authToken")
+
 const requestContextKey contextKey = "httpRequest"
 
 // InjectRequestIntoContext is a middleware to inject the http.Request into the context
@@ -52,7 +54,7 @@ func AuthMiddleware(firestoreService *FirestoreService) func(http.Handler) http.
 			}
 
 			// Pass the request context with user ID down the chain
-			ctx = context.WithValue(ctx, "authToken", token)
+			ctx = context.WithValue(ctx, authTokenKey, token)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

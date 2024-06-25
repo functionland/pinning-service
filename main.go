@@ -21,6 +21,7 @@
 	 ipfsCluster "github.com/ipfs-cluster/ipfs-cluster/api/rest/client"
 	 "github.com/ipfs/kubo/client/rpc"
 	 ma "github.com/multiformats/go-multiaddr"
+	 "github.com/gorilla/mux"
  )
  
  func main() {
@@ -45,6 +46,12 @@
 		log.Fatalf("Error initializing Firestore service: %v", err)
 		panic(err)
 	 }
+	 userService, err := openapi.NewUserService(firestoreService.Client)
+	if err != nil {
+		log.Fatalf("Error initializing User service: %v", err)
+		panic(err)
+	}
+	userAPIController := openapi.NewUserAPIController(userService)
 
 	 nodeMultiAddr, err := ma.NewMultiaddr("/ip4/127.0.0.1/tcp/5001")
 	if err != nil {
@@ -63,17 +70,22 @@
 		panic(err)
 	}
  
-	 // Initialize PinsAPIService
-	 pinsAPIService := openapi.NewPinsAPIService(firestoreService, ipfsAPI, ipfsClusterApi, blockchainAPIEndpoint, masterSeed, poolSeed)
+	// Initialize PinsAPIService
+	pinsAPIService := openapi.NewPinsAPIService(firestoreService, userService, ipfsAPI, ipfsClusterApi, blockchainAPIEndpoint, masterSeed, poolSeed)
  
-	 // Create PinsAPIController
-	 pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)
+	// Create PinsAPIController
+	pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)
  
-	 // Initialize router
-	 router := openapi.NewRouter(pinsAPIController)
-	 authRouter := openapi.AuthMiddleware(firestoreService)(router)
+	// Initialize router
+	mainRouter := openapi.NewRouter(pinsAPIController)
+	additionalRouter := openapi.NewAdditionalRouter(pinsAPIController, userAPIController)
+	router := mux.NewRouter()
+	router.PathPrefix("/").Handler(mainRouter)
+	router.PathPrefix("/").Handler(additionalRouter)
+
+	authRouter := openapi.AuthMiddleware(firestoreService)(router)
  
-	 // Start the server
-	 log.Fatal(http.ListenAndServe(":6000", openapi.InjectRequestIntoContext(authRouter)))
+	// Start the server
+	log.Fatal(http.ListenAndServe(":6000", openapi.InjectRequestIntoContext(authRouter)))
  }
  

@@ -89,8 +89,8 @@ import (
 	mainRouter := openapi.NewRouter(pinsAPIController)
 	additionalRouter := openapi.NewAdditionalRouter(pinsAPIController, userAPIController)
 	router := mux.NewRouter()
+	router.PathPrefix("/auth/").Handler(additionalRouter)
 	router.PathPrefix("/").Handler(mainRouter)
-	router.PathPrefix("/").Handler(additionalRouter)
 
 	authRouter := openapi.AuthMiddleware(firestoreService)(router)
  

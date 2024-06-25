@@ -36,6 +36,12 @@ func GetRequestFromContext(ctx context.Context) (*http.Request, error) {
 func AuthMiddleware(firestoreService *FirestoreService) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Allow unauthenticated access to /auth/token endpoint
+			if r.Method == http.MethodPost && r.URL.Path == "/auth/token" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Wrap the ResponseWriter
 			wrappedWriter := &responseCaptureWriter{ResponseWriter: w, body: &bytes.Buffer{}}
 

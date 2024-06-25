@@ -43,15 +43,15 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	// Check if the CID already exists in IPFS
 	exists, err := s.cidExistsInIPFS(ctx, pin.Cid)
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 	if !exists {
-		return Response(http.StatusBadRequest, Failure{Error: FailureError{Reason: "CID does not exist in IPFS"}}), nil
+		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "CID does not exist in IPFS"), nil
 	}
 
 	userID, err := s.extractUserIDFromAuth(ctx)
 	if err != nil {
-		return Response(http.StatusUnauthorized, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
 	// Check blockchain balance
@@ -59,35 +59,35 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	if err != nil || balance < 9999999999999 {
 		_, err := s.setBlockchainBalance(ctx, s.masterSeed, 999999999999999999)
 		if err != nil {
-			return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 		}
 	}
 
 	// Create a manifest on the blockchain
 	err = s.createManifestOnChain(ctx, passwordHash, pin.Cid)
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
 	// Verify the manifest exists on the blockchain
 	exists, err = s.verifyManifestOnChain(ctx, passwordHash, pin.Cid)
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 	if !exists {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: "Manifest creation failed on blockchain"}}), nil
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Manifest creation failed on blockchain"), nil
 	}
 
 	// Interact with IPFS to add pin
 	err = s.pinToIPFSCluster(ctx, pin.Cid)
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
 	// Store pin in Firestore
 	err = s.firestoreService.AddPin(ctx, userID, pin)
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
 	return Response(http.StatusAccepted, PinStatus{
@@ -204,41 +204,41 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 	if err != nil || balance < 9999999999999 {
 		_, err := s.setBlockchainBalance(ctx, s.masterSeed, 999999999999999999)
 		if err != nil {
-			return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 		}
 	}
 
 	// Get the pin by request ID
 	pin, err := s.getPinByRequestID(ctx, requestid)
 	if err != nil {
-		return Response(http.StatusNotFound, Failure{Error: FailureError{Reason: "Pin not found"}}), err
+		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
 	}
 
 	// Remove the manifest from the blockchain
 	err = s.removeManifestFromChain(ctx, passwordHash, pin.Pin.Cid)
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
 	// Verify the manifest has been removed from the blockchain
 	exists, err := s.verifyManifestOnChain(ctx, passwordHash, pin.Pin.Cid)
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 	if exists {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: "Manifest removal failed on blockchain"}}), nil
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Manifest removal failed on blockchain"), nil
 	}
 
 	// Remove pin from IPFS
 	err = s.unpinFromIPFSCluster(ctx, pin.Pin.Cid)
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
 	// Remove pin from Firestore
 	err = s.firestoreService.DeletePin(ctx, requestid)
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
 	return Response(http.StatusAccepted, nil), nil
@@ -284,12 +284,12 @@ func (s *PinsAPIService) removeManifestFromChain(ctx context.Context, passwordHa
 func (s *PinsAPIService) GetPinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {
 	pin, err := s.firestoreService.GetPinByRequestID(ctx, requestid)
 	if err != nil {
-		return Response(http.StatusNotFound, Failure{Error: FailureError{Reason: "Pin not found"}}), err
+		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
 	}
 
 	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, []string{pin.Pin.Cid})
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
 	if len(pinStatuses) > 0 {
@@ -302,13 +302,13 @@ func (s *PinsAPIService) GetPinByRequestId(ctx context.Context, requestid string
 func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string, match TextMatchingStrategy, status []Status, before time.Time, after time.Time, limit int32, meta map[string]string) (ImplResponse, error) {
 	userID, err := s.extractUserIDFromAuth(ctx)
 	if err != nil {
-		return Response(http.StatusUnauthorized, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
 	// Query pins from Firestore
 	pins, err := s.firestoreService.GetPins(ctx, userID, int(limit))
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
 	cids := make([]string, len(pins))
@@ -318,7 +318,7 @@ func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string,
 
 	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, cids)
 	if err != nil {
-		return Response(http.StatusInternalServerError, Failure{Error: FailureError{Reason: err.Error()}}), err
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
 	return Response(http.StatusOK, PinResults{Results: pinStatuses}), nil

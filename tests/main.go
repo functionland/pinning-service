@@ -132,6 +132,6 @@ func main() {
 		json.NewEncoder(w).Encode(response)
 	})
 
-	fmt.Println("Mock blockchain server is running on port 8080")
+	fmt.Println("Mock blockchain server is running on port 4000")
 	http.ListenAndServe(":4000", nil)
 }

@@ -98,7 +98,7 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	}
 
 	// Call IPFS Cluster status endpoint to get additional details
-	pinStatus, err := s.ipfsClusterAPI.Status(ctx, c)
+	pinStatus, err := s.ipfsClusterAPI.Status(ctx, c, true)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}

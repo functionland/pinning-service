@@ -3,11 +3,13 @@ package openapi
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/metadata"
 )
 
 type FirestoreService struct {
@@ -61,6 +63,21 @@ func (s *FirestoreService) AuthenticateUser(ctx context.Context, username, passw
 	return id, nil
 }
 
+func (s *FirestoreService) GetPasswordHashFromAuthToken(ctx context.Context, authToken string) (string, error) {
+	docs, err := s.client.Collection("sessions").Where("session_token", "==", authToken).Documents(ctx).GetAll()
+	if err != nil || len(docs) == 0 {
+		return "", errors.New("invalid or expired session token")
+	}
+
+	var userID string
+	for _, doc := range docs {
+		userID = doc.Data()["user_id"].(string)
+		break
+	}
+
+	return s.GetUserPasswordHash(ctx, userID)
+}
+
 func (s *FirestoreService) GetUserPasswordHash(ctx context.Context, userID string) (string, error) {
 	doc, err := s.client.Collection("users").Doc(userID).Get(ctx)
 	if err != nil {
@@ -75,12 +92,19 @@ func (s *FirestoreService) GetUserPasswordHash(ctx context.Context, userID strin
 	return passwordHash, nil
 }
 
-func (s *FirestoreService) GetPasswordHashFromSession(ctx context.Context, sessionToken string) (string, error) {
-	userID, err := s.ValidateSession(ctx, sessionToken)
-	if err != nil {
-		return "", err
+func extractAuthTokenFromContext(ctx context.Context) (string, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return "", errors.New("no metadata found in context")
 	}
-	return s.GetUserPasswordHash(ctx, userID)
+
+	authHeader, ok := md["authorization"]
+	if !ok || len(authHeader) == 0 {
+		return "", errors.New("authorization token not found in context")
+	}
+
+	token := strings.TrimPrefix(authHeader[0], "Bearer ")
+	return token, nil
 }
 
 func (s *FirestoreService) CreateSession(ctx context.Context, userID string) (string, error) {

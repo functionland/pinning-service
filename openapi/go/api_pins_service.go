@@ -155,16 +155,17 @@ func (s *PinsAPIService) getPinByRequestID(ctx context.Context, requestid string
 }
 
 func (s *PinsAPIService) checkBlockchainBalance(ctx context.Context, account string) (int64, error) {
-	sessionToken, err := extractSessionTokenFromContext(ctx)
+	authToken, err := extractAuthTokenFromContext(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	_, err = s.firestoreService.GetPasswordHashFromSession(ctx, sessionToken)
+	_, err = s.firestoreService.GetPasswordHashFromAuthToken(ctx, authToken)
 	if err != nil {
 		return 0, err
 	}
 
+	// Use the passwordHash for further processing if needed
 	resp, err := http.Get(s.blockchainAPIEndpoint + "/account/balance?account=" + account)
 	if err != nil {
 		return 0, err
@@ -182,12 +183,12 @@ func (s *PinsAPIService) checkBlockchainBalance(ctx context.Context, account str
 }
 
 func (s *PinsAPIService) setBlockchainBalance(ctx context.Context, seed, account string, amount int64) (bool, error) {
-	sessionToken, err := extractSessionTokenFromContext(ctx)
+	authToken, err := extractAuthTokenFromContext(ctx)
 	if err != nil {
 		return false, err
 	}
 
-	_, err = s.firestoreService.GetPasswordHashFromSession(ctx, sessionToken)
+	_, err = s.firestoreService.GetPasswordHashFromAuthToken(ctx, authToken)
 	if err != nil {
 		return false, err
 	}

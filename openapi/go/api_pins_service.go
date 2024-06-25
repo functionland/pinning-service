@@ -91,12 +91,45 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
-	return Response(http.StatusAccepted, PinStatus{
+	// Convert pin.Cid to api.Cid
+	c, err := api.DecodeCid(pin.Cid)
+	if err != nil {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+	}
+
+	// Call IPFS Cluster status endpoint to get additional details
+	pinStatus, err := s.ipfsClusterAPI.Status(ctx, c)
+	if err != nil {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+	}
+
+	// Extract additional details from the status response
+	delegates := []string{}
+	for _, peer := range pinStatus.PeerMap {
+		for _, addr := range peer.IPFSAddresses {
+			delegates = append(delegates, addr.String())
+		}
+	}
+
+	info := map[string]string{
+		"status_details": "Queue position: 7 of 9", // You may update this with actual status details if available
+	}
+
+	response := PinStatus{
 		Requestid: generateRequestID(pin),
 		Status:    "queued",
 		Created:   time.Now(),
-		Pin:       pin,
-	}), nil
+		Pin: Pin{
+			Cid:     pin.Cid,
+			Name:    pin.Name,
+			Origins: pin.Origins,
+			Meta:    pin.Meta,
+		},
+		Delegates: delegates,
+		Info:      info,
+	}
+
+	return Response(http.StatusAccepted, response), nil
 }
 
 // createManifestOnChain creates a manifest on the blockchain

@@ -42,13 +42,13 @@ func NewPinsAPIService(firestoreService *FirestoreService, userService *UserServ
 
 func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, error) {
 	// Check if the CID already exists in IPFS
-	exists, err := s.cidExistsInIPFS(ctx, pin.Cid)
+	/*ipfsExists, err := s.cidExistsInIPFS(ctx, pin.Cid)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
-	if !exists {
+	if !ipfsExists {
 		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "CID does not exist in IPFS"), nil
-	}
+	}*/
 
 	userID, err := s.extractUserIDFromAuth(ctx)
 	if err != nil {
@@ -71,7 +71,7 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	}
 
 	// Verify the manifest exists on the blockchain
-	exists, err = s.verifyManifestOnChain(ctx, passwordHash, pin.Cid)
+	exists, err := s.verifyManifestOnChain(ctx, passwordHash, pin.Cid)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}

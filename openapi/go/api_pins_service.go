@@ -185,6 +185,10 @@ func (s *PinsAPIService) verifyManifestOnChain(ctx context.Context, passwordHash
 
 // cidExistsInIPFS checks if a CID exists in IPFS
 func (s *PinsAPIService) cidExistsInIPFS(ctx context.Context, cid string) (bool, error) {
+	// Create a new context with a 20-second timeout
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
 	// Convert string to ipfspath.Path
 	p, err := ipfspath.NewPath("/ipfs/" + cid)
 	if err != nil {
@@ -194,6 +198,11 @@ func (s *PinsAPIService) cidExistsInIPFS(ctx context.Context, cid string) (bool,
 	// Try to stat the block to see if it exists
 	_, err = s.ipfsAPI.Block().Stat(ctx, p)
 	if err != nil {
+		// If the error is context.DeadlineExceeded, it means the operation timed out
+		if err == context.DeadlineExceeded {
+			return false, nil
+		}
+
 		// If the error is not "not found", then it is a real error
 		if !strings.Contains(err.Error(), "not found") {
 			return false, err

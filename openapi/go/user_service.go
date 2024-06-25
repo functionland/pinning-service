@@ -58,14 +58,15 @@ func (s *UserService) AuthenticateUser(ctx context.Context, username, password s
 }
 
 func (s *UserService) GetUserPasswordHash(ctx context.Context, username string) (string, error) {
-	doc, err := s.client.Collection("users").Doc(username).Get(ctx)
-	if err != nil {
-		return "", err
+	docs, err := s.client.Collection("users").Where("username", "==", username).Documents(ctx).GetAll()
+	if err != nil || len(docs) == 0 {
+		return "", errors.New("invalid username: " + username)
 	}
 
-	passwordHash, ok := doc.Data()["password_hash"].(string)
-	if !ok {
-		return "", errors.New("password hash not found")
+	var passwordHash string
+	for _, doc := range docs {
+		passwordHash = doc.Data()["password_hash"].(string)
+		break
 	}
 
 	return passwordHash, nil
@@ -74,7 +75,7 @@ func (s *UserService) GetUserPasswordHash(ctx context.Context, username string) 
 func (s *UserService) GetPasswordHashFromAuthToken(ctx context.Context, authToken string) (string, error) {
 	docs, err := s.client.Collection("sessions").Where("session_token", "==", authToken).Documents(ctx).GetAll()
 	if err != nil || len(docs) == 0 {
-		return "", errors.New("invalid or expired session token")
+		return "", errors.New("invalid or expired session token: " + authToken)
 	}
 
 	var username string

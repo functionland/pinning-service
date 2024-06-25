@@ -479,19 +479,40 @@ func (s *PinsAPIService) getAccountFromPasswordHash(ctx context.Context, passwor
 }
 
 func (s *PinsAPIService) pinToIPFSCluster(ctx context.Context, cid string) error {
-	p, err := ipfspath.NewPath(cid)
+	// Decode the CID
+	c, err := api.DecodeCid(cid)
 	if err != nil {
 		return err
 	}
-	return s.ipfsAPI.Pin().Add(ctx, p)
+
+	// Set pin options (if any are needed)
+	pinOptions := api.PinOptions{
+		Mode: 0,
+	}
+
+	// Pin the CID to the IPFS Cluster
+	_, err = s.ipfsClusterAPI.Pin(ctx, c, pinOptions)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (s *PinsAPIService) unpinFromIPFSCluster(ctx context.Context, cid string) error {
-	p, err := ipfspath.NewPath(cid)
+	// Decode the CID
+	c, err := api.DecodeCid(cid)
 	if err != nil {
 		return err
 	}
-	return s.ipfsAPI.Pin().Rm(ctx, p)
+
+	// Unpin the CID from the IPFS Cluster
+	_, err = s.ipfsClusterAPI.Unpin(ctx, c)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cids []string) ([]PinStatus, error) {

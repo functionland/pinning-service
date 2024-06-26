@@ -81,8 +81,11 @@ func (s *FirestoreService) DeletePin(ctx context.Context, requestID string) erro
 
 func (s *FirestoreService) GetPinByRequestID(ctx context.Context, requestID string) (PinStatus, string, error) {
 	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
-	if err != nil || len(docs) == 0 {
+	if err != nil {
 		return PinStatus{}, "", err
+	}
+	if len(docs) == 0 {
+		return PinStatus{}, "", errors.New("document not found")
 	}
 
 	var pinStatus PinStatus
@@ -107,6 +110,7 @@ func (s *FirestoreService) GetPinByRequestID(ctx context.Context, requestID stri
 
 	return pinStatus, username, nil
 }
+
 func toStringSlice(input interface{}) []string {
 	if input == nil {
 		return nil

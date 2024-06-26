@@ -135,8 +135,46 @@ func toStringMap(input interface{}) map[string]string {
 	return stringMap
 }
 
-func (s *FirestoreService) GetPins(ctx context.Context, username string, limit int) ([]Pin, error) {
-	docs, err := s.Client.Collection("pins").Where("username", "==", username).Limit(limit).Documents(ctx).GetAll()
+func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, status []Status, before time.Time, after time.Time, limit int, meta map[string]string) ([]Pin, error) {
+	query := s.Client.Collection("pins").Where("username", "==", username)
+
+	// Apply filters to the query
+	if len(cid) > 0 {
+		query = query.Where("cid", "in", cid)
+	}
+
+	if name != "" {
+		switch match {
+		case "exact":
+			query = query.Where("name", "==", name)
+		case "iexact":
+			query = query.Where("name_lowercase", "==", strings.ToLower(name))
+		case "partial":
+			query = query.Where("name", ">=", name).Where("name", "<=", name+"\uf8ff")
+		case "ipartial":
+			query = query.Where("name_lowercase", ">=", strings.ToLower(name)).Where("name_lowercase", "<=", strings.ToLower(name)+"\uf8ff")
+		}
+	}
+
+	if len(status) > 0 {
+		query = query.Where("status", "in", status)
+	} else {
+		query = query.Where("status", "==", "pinned")
+	}
+
+	if !before.IsZero() {
+		query = query.Where("created_at", "<", before)
+	}
+
+	if !after.IsZero() {
+		query = query.Where("created_at", ">", after)
+	}
+
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+
+	docs, err := query.Documents(ctx).GetAll()
 	if err != nil {
 		return nil, err
 	}

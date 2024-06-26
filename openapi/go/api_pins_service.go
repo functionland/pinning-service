@@ -43,13 +43,14 @@ func NewPinsAPIService(firestoreService *FirestoreService, userService *UserServ
 
 func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, error) {
 	// Check if the CID already exists in IPFS
-	/*ipfsExists, err := s.cidExistsInIPFS(ctx, pin.Cid)
+	ipfsExists := true
+	ipfsExists, err := s.cidExistsInIPFS(ctx, pin.Cid)
 	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+		ipfsExists = false
 	}
 	if !ipfsExists {
-		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "CID does not exist in IPFS"), nil
-	}*/
+		ipfsExists = false
+	}
 
 	userID, err := s.extractUserIDFromAuth(ctx)
 	if err != nil {
@@ -65,19 +66,21 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 		}
 	}
 
-	// Create a manifest on the blockchain
-	err = s.createManifestOnChain(ctx, passwordHash, pin.Cid)
-	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
-	}
+	if ipfsExists {
+		// Create a manifest on the blockchain
+		err = s.createManifestOnChain(ctx, passwordHash, pin.Cid)
+		if err != nil {
+			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+		}
 
-	// Verify the manifest exists on the blockchain
-	exists, err := s.verifyManifestOnChain(ctx, passwordHash, pin.Cid)
-	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
-	}
-	if !exists {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Manifest creation failed on blockchain"), nil
+		// Verify the manifest exists on the blockchain
+		exists, err := s.verifyManifestOnChain(ctx, passwordHash, pin.Cid)
+		if err != nil {
+			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+		}
+		if !exists {
+			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Manifest creation failed on blockchain"), nil
+		}
 	}
 
 	// Interact with IPFS to add pin
@@ -372,8 +375,8 @@ func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string,
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
-	// Query pins from Firestore
-	pins, err := s.firestoreService.GetPins(ctx, userID, int(limit))
+	// Query pins from Firestore with filtering criteria
+	pins, err := s.firestoreService.GetPins(ctx, userID, cid, name, match, status, before, after, int(limit), meta)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}

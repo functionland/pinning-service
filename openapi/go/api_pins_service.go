@@ -374,6 +374,7 @@ func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string,
 	if err != nil {
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
+	log.Printf("GetPins with parameters: userID=%s, cid=%s, name=%s, match=%s, before=%s, after=%s, limit=%d", userID, cid, name, match, before, after, int(limit))
 
 	// Query pins from Firestore with filtering criteria
 	pins, err := s.firestoreService.GetPins(ctx, userID, cid, name, match, status, before, after, int(limit), meta)
@@ -381,17 +382,21 @@ func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string,
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
+	if len(pins) == 0 {
+		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), nil
+	}
+
 	cids := make([]string, len(pins))
 	for i, pin := range pins {
 		cids[i] = pin.Cid
 	}
-
+	log.Printf("fetched: %v ", cids)
 	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, cids)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
-	return Response(http.StatusOK, PinResults{Results: pinStatuses}), nil
+	return Response(http.StatusOK, PinResults{Results: pinStatuses, Count: int32(len(cids))}), nil
 }
 
 func (s *PinsAPIService) extractUserIDFromAuth(ctx context.Context) (string, error) {

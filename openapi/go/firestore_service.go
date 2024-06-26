@@ -158,8 +158,6 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 
 	if len(status) > 0 {
 		query = query.Where("status", "in", status)
-	} else {
-		query = query.Where("status", "==", "pinned")
 	}
 
 	if !before.IsZero() {

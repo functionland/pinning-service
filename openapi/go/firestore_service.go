@@ -148,18 +148,12 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 		query = query.Where("cid", "in", cid)
 	}
 
-	if name != "" {
+	if name != "" && (match == "exact" || match == "iexact") {
 		switch match {
 		case "exact":
 			query = query.Where("name", "==", name)
 		case "iexact":
-			// For iexact, perform case-insensitive comparison on the server side
-			query = query.Where("name", ">=", strings.ToLower(name)).Where("name", "<=", strings.ToLower(name)+"\uf8ff")
-		case "partial":
-			query = query.Where("name", ">=", name).Where("name", "<=", name+"\uf8ff")
-		case "ipartial":
-			// For ipartial, perform case-insensitive partial match on the server side
-			query = query.Where("name", ">=", strings.ToLower(name)).Where("name", "<=", strings.ToLower(name)+"\uf8ff")
+			query = query.Where("name_lowercase", "==", strings.ToLower(name))
 		}
 	}
 
@@ -175,7 +169,8 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 		query = query.Where("created_at", ">", after)
 	}
 
-	if limit > 0 {
+	// Apply limit if we're not doing partial or ipartial matches
+	if limit > 0 && (match == "exact" || match == "iexact") {
 		query = query.Limit(limit)
 	}
 
@@ -209,7 +204,27 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 			},
 			RequestId: doc.Data()["requestid"].(string),
 		}
+
+		// Perform post-query filtering for partial and ipartial matches
+		if name != "" {
+			switch match {
+			case "partial":
+				if !strings.Contains(pin.Pin.Name, name) {
+					continue
+				}
+			case "ipartial":
+				if !strings.Contains(strings.ToLower(pin.Pin.Name), strings.ToLower(name)) {
+					continue
+				}
+			}
+		}
+
 		pins = append(pins, pin)
+
+		// Apply limit after filtering
+		if limit > 0 && len(pins) >= limit {
+			break
+		}
 	}
 
 	return pins, nil

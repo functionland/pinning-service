@@ -87,7 +87,7 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	}
 
 	// Store pin in Firestore
-	_, err = s.firestoreService.AddPin(ctx, userID, pin)
+	requestId, err := s.firestoreService.AddPin(ctx, userID, pin)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
@@ -113,11 +113,11 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	}
 
 	info := map[string]string{
-		"status_details": "Queue position: 7 of 9", // You may update this with actual status details if available
+		"status_details": "Queue position: 0 of 0", // You may update this with actual status details if available
 	}
 
 	response := PinStatus{
-		Requestid: generateRequestID(pin),
+		Requestid: requestId,
 		Status:    "queued",
 		Created:   time.Now(),
 		Pin: Pin{

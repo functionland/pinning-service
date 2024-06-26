@@ -20,6 +20,12 @@ import (
 type CidWithRequestId struct {
 	Cid       string
 	RequestId string
+	Name      string
+}
+
+type RequestIdWithName struct {
+	RequestId string
+	Name      string
 }
 
 type PinsAPIService struct {
@@ -362,7 +368,7 @@ func (s *PinsAPIService) GetPinByRequestId(ctx context.Context, requestid string
 		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
 	}
 
-	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, []CidWithRequestId{{Cid: pin.Pin.Cid, RequestId: requestid}})
+	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, []CidWithRequestId{{Cid: pin.Pin.Cid, RequestId: requestid, Name: pin.Pin.Name}})
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
@@ -396,6 +402,7 @@ func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string,
 		cidsWithRequestId[i] = CidWithRequestId{
 			Cid:       pin.Pin.Cid,
 			RequestId: pin.RequestId,
+			Name:      pin.Pin.Name,
 		}
 	}
 	log.Printf("fetched: %v ", cidsWithRequestId)
@@ -444,7 +451,7 @@ func (s *PinsAPIService) getPinByRequestID(ctx context.Context, requestid string
 		return PinStatus{}, "", err
 	}
 
-	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, []CidWithRequestId{{Cid: pin.Pin.Cid, RequestId: requestid}})
+	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, []CidWithRequestId{{Cid: pin.Pin.Cid, RequestId: requestid, Name: pin.Pin.Name}})
 	if err != nil {
 		return PinStatus{}, "", err
 	}
@@ -614,8 +621,8 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 	var pinStatuses []PinStatus
 	var apiCids []api.Cid
 
-	// Create a map to store the mapping between CID and request ID
-	cidToRequestId := make(map[string]string)
+	// Create a map to store the mapping between CID and RequestIdWithName
+	cidToRequestId := make(map[string]RequestIdWithName)
 	for _, cidWithRequestId := range cidsWithRequestId {
 		cidStr := cidWithRequestId.Cid
 		c, err := api.DecodeCid(cidStr)
@@ -623,7 +630,10 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 			return nil, err
 		}
 		apiCids = append(apiCids, c)
-		cidToRequestId[c.String()] = cidWithRequestId.RequestId
+		cidToRequestId[c.String()] = RequestIdWithName{
+			RequestId: cidWithRequestId.RequestId,
+			Name:      cidWithRequestId.Name,
+		}
 	}
 
 	statusChan := make(chan api.GlobalPinInfo)
@@ -640,15 +650,23 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 
 	for status := range statusChan {
 		if pinInfo, ok := status.PeerMap[ipfsClusterID.ID.String()]; ok {
-			// Get the corresponding request ID from the map
-			requestId := cidToRequestId[status.Cid.String()]
+			// Get the corresponding RequestIdWithName from the map
+			requestIdWithName := cidToRequestId[status.Cid.String()]
+			requestId := requestIdWithName.RequestId
+			name := requestIdWithName.Name
+
+			// Use the name from the status if it's not empty, otherwise use the name from the map
+			if status.Name != "" {
+				name = status.Name
+			}
+
 			pinStatuses = append(pinStatuses, PinStatus{
 				Requestid: requestId,
 				Status:    Status(pinInfo.Status.String()), // Convert TrackerStatus to string
 				Created:   status.Created,
 				Pin: Pin{
 					Cid:     status.Cid.String(),
-					Name:    status.Name,
+					Name:    name,
 					Origins: multiaddrToStringSlice(status.Origins), // Convert []api.Multiaddr to []string
 					Meta:    status.Metadata,
 				},

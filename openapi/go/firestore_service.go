@@ -153,11 +153,13 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 		case "exact":
 			query = query.Where("name", "==", name)
 		case "iexact":
-			query = query.Where("name_lowercase", "==", strings.ToLower(name))
+			// For iexact, perform case-insensitive comparison on the server side
+			query = query.Where("name", ">=", strings.ToLower(name)).Where("name", "<=", strings.ToLower(name)+"\uf8ff")
 		case "partial":
 			query = query.Where("name", ">=", name).Where("name", "<=", name+"\uf8ff")
 		case "ipartial":
-			query = query.Where("name_lowercase", ">=", strings.ToLower(name)).Where("name_lowercase", "<=", strings.ToLower(name)+"\uf8ff")
+			// For ipartial, perform case-insensitive partial match on the server side
+			query = query.Where("name", ">=", strings.ToLower(name)).Where("name", "<=", strings.ToLower(name)+"\uf8ff")
 		}
 	}
 

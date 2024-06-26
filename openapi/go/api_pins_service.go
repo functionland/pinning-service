@@ -87,7 +87,7 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	}
 
 	// Store pin in Firestore
-	err = s.firestoreService.AddPin(ctx, userID, pin)
+	_, err = s.firestoreService.AddPin(ctx, userID, pin)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
@@ -344,7 +344,7 @@ func (s *PinsAPIService) removeManifestFromChain(ctx context.Context, passwordHa
 }
 
 func (s *PinsAPIService) GetPinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {
-	pin, err := s.firestoreService.GetPinByRequestID(ctx, requestid)
+	pin, _, err := s.firestoreService.GetPinByRequestID(ctx, requestid)
 	if err != nil {
 		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
 	}
@@ -400,22 +400,22 @@ func (s *PinsAPIService) ReplacePinByRequestId(ctx context.Context, requestid st
 	return Response(http.StatusNotImplemented, nil), errors.New("ReplacePinByRequestId method not implemented")
 }
 
-func (s *PinsAPIService) getPinByRequestID(ctx context.Context, requestid string) (PinStatus, error) {
-	pin, err := s.firestoreService.GetPinByRequestID(ctx, requestid)
+func (s *PinsAPIService) getPinByRequestID(ctx context.Context, requestid string) (PinStatus, string, error) {
+	pin, username, err := s.firestoreService.GetPinByRequestID(ctx, requestid)
 	if err != nil {
-		return PinStatus{}, err
+		return PinStatus{}, "", err
 	}
 
 	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, []string{pin.Pin.Cid})
 	if err != nil {
-		return PinStatus{}, err
+		return PinStatus{}, "", err
 	}
 
 	if len(pinStatuses) > 0 {
-		return pinStatuses[0], nil
+		return pinStatuses[0], username, nil
 	}
 
-	return PinStatus{}, errors.New("pin status not found")
+	return pin, username, nil
 }
 
 func (s *PinsAPIService) checkBlockchainBalance(ctx context.Context) (int64, string, error) {

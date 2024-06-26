@@ -112,24 +112,25 @@ func main() {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-
-		cidList, ok := request["cid"].([]interface{})
-		if !ok || len(cidList) == 0 {
-			http.Error(w, "Invalid CID list", http.StatusBadRequest)
-			return
-		}
-		cid := cidList[0].(string)
-
-		manifestsLock.Lock()
-		delete(manifests, cid)
-		manifestsLock.Unlock()
-
 		response := map[string]string{
 			"message":     "Success",
 			"description": "Manifest removed",
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+
+		cidList, ok := request["cid"].([]interface{})
+		if !ok || len(cidList) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(response)
+		} else {
+			cid := cidList[0].(string)
+
+			manifestsLock.Lock()
+			delete(manifests, cid)
+			manifestsLock.Unlock()
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(response)
+		}
 	})
 
 	fmt.Println("Mock blockchain server is running on port 4000")

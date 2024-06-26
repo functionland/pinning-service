@@ -273,14 +273,14 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 		}
 	}
 
-	log.Printf("This is pinned object for request: %s ------------>", requestid)
-	log.Println(pin)
+	log.Printf("This is pinned object for request: %s: %s ------------", requestid, pin.Pin.Cid)
 
 	// Remove the manifest from the blockchain
 	err = s.removeManifestFromChain(ctx, passwordHash, pin.Pin.Cid)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
+	log.Printf("Manifest removed")
 
 	// Verify the manifest has been removed from the blockchain
 	exists, err := s.verifyManifestOnChain(ctx, passwordHash, pin.Pin.Cid)
@@ -290,6 +290,7 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 	if exists {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Manifest removal failed on blockchain"), nil
 	}
+	log.Printf("Manifest is actually removed")
 
 	// Remove pin from IPFS
 	err = s.unpinFromIPFSCluster(ctx, pin.Pin.Cid)
@@ -308,6 +309,7 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 
 // removeManifestFromChain removes a manifest from the blockchain
 func (s *PinsAPIService) removeManifestFromChain(ctx context.Context, passwordHash, cid string) error {
+	log.Printf("Creating blockchain request with hash: %s", passwordHash)
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"seed":    "//" + passwordHash,
 		"cid":     cid,
@@ -316,7 +318,7 @@ func (s *PinsAPIService) removeManifestFromChain(ctx context.Context, passwordHa
 	if err != nil {
 		return err
 	}
-
+	log.Printf("Created blockchain request")
 	req, err := http.NewRequestWithContext(ctx, "POST", s.blockchainAPIEndpoint+"/fula/manifest/remove", bytes.NewBuffer(reqBody))
 	if err != nil {
 		return err

@@ -45,15 +45,21 @@ func extractAuthTokenFromContext(ctx context.Context) (string, error) {
 	return token, nil
 }
 
-func (s *FirestoreService) AddPin(ctx context.Context, username string, pin Pin) error {
-	_, _, err := s.Client.Collection("pins").Add(ctx, map[string]interface{}{
+func (s *FirestoreService) AddPin(ctx context.Context, username string, pin Pin) (string, error) {
+	doc, _, err := s.Client.Collection("pins").Add(ctx, map[string]interface{}{
 		"username":   username,
 		"cid":        pin.Cid,
+		"name":       pin.Name,
+		"origins":    pin.Origins,
+		"meta":       pin.Meta,
 		"status":     "queued",
 		"requestid":  generateRequestID(pin),
 		"created_at": time.Now(),
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+	return doc.ID, nil
 }
 
 func (s *FirestoreService) DeletePin(ctx context.Context, requestID string) error {
@@ -72,30 +78,56 @@ func (s *FirestoreService) DeletePin(ctx context.Context, requestID string) erro
 	return nil
 }
 
-func (s *FirestoreService) GetPinByRequestID(ctx context.Context, requestID string) (PinStatus, error) {
+func (s *FirestoreService) GetPinByRequestID(ctx context.Context, requestID string) (PinStatus, string, error) {
 	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
 	if err != nil || len(docs) == 0 {
-		return PinStatus{}, err
+		return PinStatus{}, "", err
 	}
 
 	var pinStatus PinStatus
+	var username string
 	for _, doc := range docs {
+		data := doc.Data()
+		username = data["username"].(string)
 		pinStatus = PinStatus{
 			Requestid: requestID,
-			Status:    Status(doc.Data()["status"].(string)),
-			Created:   doc.Data()["created_at"].(time.Time),
+			Status:    Status(data["status"].(string)),
+			Created:   data["created_at"].(time.Time),
 			Pin: Pin{
-				Cid:     doc.Data()["cid"].(string),
-				Name:    doc.Data()["name"].(string),
-				Origins: doc.Data()["origins"].([]string),
-				Meta:    doc.Data()["meta"].(map[string]string),
+				Cid:     data["cid"].(string),
+				Name:    data["name"].(string),
+				Origins: toStringSlice(data["origins"]),
+				Meta:    toStringMap(data["meta"]),
 			},
-			Delegates: doc.Data()["delegates"].([]string),
-			Info:      doc.Data()["info"].(map[string]string),
+			Delegates: toStringSlice(data["delegates"]),
+			Info:      toStringMap(data["info"]),
 		}
 	}
 
-	return pinStatus, nil
+	return pinStatus, username, nil
+}
+func toStringSlice(input interface{}) []string {
+	if input == nil {
+		return nil
+	}
+	interfaceSlice := input.([]interface{})
+	stringSlice := make([]string, len(interfaceSlice))
+	for i, v := range interfaceSlice {
+		stringSlice[i] = v.(string)
+	}
+	return stringSlice
+}
+
+func toStringMap(input interface{}) map[string]string {
+	if input == nil {
+		return nil
+	}
+	interfaceMap := input.(map[string]interface{})
+	stringMap := make(map[string]string)
+	for k, v := range interfaceMap {
+		stringMap[k] = v.(string)
+	}
+	return stringMap
 }
 
 func (s *FirestoreService) GetPins(ctx context.Context, username string, limit int) ([]Pin, error) {

@@ -249,6 +249,21 @@ func (s *PinsAPIService) cidExistsInIPFS(ctx context.Context, cid string) (bool,
 }
 
 func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {
+	userID, err := s.extractUserIDFromAuth(ctx)
+	if err != nil {
+		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
+	}
+
+	// Get the pin by request ID and check ownership
+	pin, username, err := s.getPinByRequestID(ctx, requestid)
+	if err != nil {
+		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
+	}
+
+	if userID != username {
+		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", "You do not have permission to delete this pin"), nil
+	}
+
 	// Check blockchain balance
 	balance, passwordHash, err := s.checkBlockchainBalance(ctx)
 	if err != nil || balance < 9999999999999 {
@@ -258,11 +273,6 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 		}
 	}
 
-	// Get the pin by request ID
-	pin, err := s.getPinByRequestID(ctx, requestid)
-	if err != nil {
-		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
-	}
 	log.Printf("This is pinned object for request: %s ------------>", requestid)
 	log.Println(pin)
 

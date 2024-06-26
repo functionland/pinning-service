@@ -401,8 +401,25 @@ func (s *PinsAPIService) extractUserIDFromAuth(ctx context.Context) (string, err
 }
 
 func (s *PinsAPIService) ReplacePinByRequestId(ctx context.Context, requestid string, pin Pin) (ImplResponse, error) {
-	// Replace pin logic
-	return Response(http.StatusNotImplemented, nil), errors.New("ReplacePinByRequestId method not implemented")
+	// First, remove the existing pin
+	deleteResp, err := s.DeletePinByRequestId(ctx, requestid)
+	if err != nil {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to remove existing pin"), err
+	}
+
+	// Check if delete response was successful
+	if deleteResp.Code != http.StatusAccepted {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to remove existing pin"), nil
+	}
+
+	// Now, add the new pin
+	addResp, err := s.AddPin(ctx, pin)
+	if err != nil {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to add new pin"), err
+	}
+
+	// Return the response from the AddPin method
+	return addResp, nil
 }
 
 func (s *PinsAPIService) getPinByRequestID(ctx context.Context, requestid string) (PinStatus, string, error) {

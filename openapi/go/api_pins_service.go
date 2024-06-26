@@ -17,6 +17,11 @@ import (
 	ipfsrpc "github.com/ipfs/kubo/client/rpc"
 )
 
+type CidWithRequestId struct {
+	Cid       string
+	RequestId string
+}
+
 type PinsAPIService struct {
 	firestoreService      *FirestoreService
 	userService           *UserService
@@ -357,7 +362,7 @@ func (s *PinsAPIService) GetPinByRequestId(ctx context.Context, requestid string
 		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
 	}
 
-	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, []string{pin.Pin.Cid})
+	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, []CidWithRequestId{{Cid: pin.Pin.Cid, RequestId: requestid}})
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
@@ -386,17 +391,20 @@ func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string,
 		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), nil
 	}
 
-	cids := make([]string, len(pins))
+	cidsWithRequestId := make([]CidWithRequestId, len(pins))
 	for i, pin := range pins {
-		cids[i] = pin.Cid
+		cidsWithRequestId[i] = CidWithRequestId{
+			Cid:       pin.Pin.Cid,
+			RequestId: pin.RequestId,
+		}
 	}
-	log.Printf("fetched: %v ", cids)
-	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, cids)
+	log.Printf("fetched: %v ", cidsWithRequestId)
+	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, cidsWithRequestId)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
-	return Response(http.StatusOK, PinResults{Results: pinStatuses, Count: int32(len(cids))}), nil
+	return Response(http.StatusOK, PinResults{Results: pinStatuses, Count: int32(len(pins))}), nil
 }
 
 func (s *PinsAPIService) extractUserIDFromAuth(ctx context.Context) (string, error) {
@@ -436,7 +444,7 @@ func (s *PinsAPIService) getPinByRequestID(ctx context.Context, requestid string
 		return PinStatus{}, "", err
 	}
 
-	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, []string{pin.Pin.Cid})
+	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, []CidWithRequestId{{Cid: pin.Pin.Cid, RequestId: requestid}})
 	if err != nil {
 		return PinStatus{}, "", err
 	}
@@ -591,16 +599,31 @@ func (s *PinsAPIService) unpinFromIPFSCluster(ctx context.Context, cid string) e
 	return nil
 }
 
-func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cids []string) ([]PinStatus, error) {
+func multiaddrToStringSlice(addresses []api.Multiaddr) []string {
+	if addresses == nil {
+		return nil
+	}
+	stringSlice := make([]string, len(addresses))
+	for i, addr := range addresses {
+		stringSlice[i] = addr.String()
+	}
+	return stringSlice
+}
+
+func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWithRequestId []CidWithRequestId) ([]PinStatus, error) {
 	var pinStatuses []PinStatus
 	var apiCids []api.Cid
 
-	for _, cidStr := range cids {
+	// Create a map to store the mapping between CID and request ID
+	cidToRequestId := make(map[string]string)
+	for _, cidWithRequestId := range cidsWithRequestId {
+		cidStr := cidWithRequestId.Cid
 		c, err := api.DecodeCid(cidStr)
 		if err != nil {
 			return nil, err
 		}
 		apiCids = append(apiCids, c)
+		cidToRequestId[c.String()] = cidWithRequestId.RequestId
 	}
 
 	statusChan := make(chan api.GlobalPinInfo)
@@ -617,12 +640,17 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cids [
 
 	for status := range statusChan {
 		if pinInfo, ok := status.PeerMap[ipfsClusterID.ID.String()]; ok {
+			// Get the corresponding request ID from the map
+			requestId := cidToRequestId[status.Cid.String()]
 			pinStatuses = append(pinStatuses, PinStatus{
-				Requestid: status.Cid.String(),
+				Requestid: requestId,
 				Status:    Status(pinInfo.Status.String()), // Convert TrackerStatus to string
 				Created:   status.Created,
 				Pin: Pin{
-					Cid: status.Cid.String(),
+					Cid:     status.Cid.String(),
+					Name:    status.Name,
+					Origins: multiaddrToStringSlice(status.Origins), // Convert []api.Multiaddr to []string
+					Meta:    status.Metadata,
 				},
 			})
 		}

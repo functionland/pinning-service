@@ -14,6 +14,11 @@ type FirestoreService struct {
 	Client *firestore.Client
 }
 
+type PinWithRequest struct {
+	Pin       Pin
+	RequestId string
+}
+
 func NewFirestoreService(ctx context.Context, credentialsFile string) (*FirestoreService, error) {
 	client, err := firestore.NewClient(ctx, "fula-explorer", option.WithCredentialsFile(credentialsFile))
 	if err != nil {
@@ -135,7 +140,7 @@ func toStringMap(input interface{}) map[string]string {
 	return stringMap
 }
 
-func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, status []Status, before time.Time, after time.Time, limit int, meta map[string]string) ([]Pin, error) {
+func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, status []Status, before time.Time, after time.Time, limit int, meta map[string]string) ([]PinWithRequest, error) {
 	query := s.Client.Collection("pins").Where("username", "==", username)
 
 	// Apply filters to the query
@@ -177,7 +182,7 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 		return nil, err
 	}
 
-	var pins []Pin
+	var pins []PinWithRequest
 	for _, doc := range docs {
 		var origins []string
 		if doc.Data()["origins"] != nil {
@@ -193,11 +198,14 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 			}
 		}
 
-		pin := Pin{
-			Cid:     doc.Data()["cid"].(string),
-			Name:    doc.Data()["name"].(string),
-			Origins: origins,
-			Meta:    meta,
+		pin := PinWithRequest{
+			Pin: Pin{
+				Cid:     doc.Data()["cid"].(string),
+				Name:    doc.Data()["name"].(string),
+				Origins: origins,
+				Meta:    meta,
+			},
+			RequestId: doc.Data()["requestid"].(string),
 		}
 		pins = append(pins, pin)
 	}

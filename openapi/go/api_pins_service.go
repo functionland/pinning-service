@@ -184,6 +184,7 @@ func (s *PinsAPIService) verifyManifestOnChain(ctx context.Context, passwordHash
 	if err != nil {
 		return false, err
 	}
+	log.Printf("blockchain account was created from seed: %s", account)
 
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"pool_id":  s.poolId,
@@ -212,6 +213,8 @@ func (s *PinsAPIService) verifyManifestOnChain(ctx context.Context, passwordHash
 
 	if len(result.Manifests) == 0 {
 		return false, nil
+	} else {
+		log.Println(result)
 	}
 
 	return true, nil

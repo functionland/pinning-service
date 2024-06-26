@@ -144,11 +144,20 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, limit i
 			origins = doc.Data()["origins"].([]string)
 		}
 
+		var meta map[string]string
+		if doc.Data()["meta"] != nil {
+			metaInterface := doc.Data()["meta"].(map[string]interface{})
+			meta = make(map[string]string, len(metaInterface))
+			for k, v := range metaInterface {
+				meta[k] = v.(string)
+			}
+		}
+
 		pin := Pin{
 			Cid:     doc.Data()["cid"].(string),
 			Name:    doc.Data()["name"].(string),
 			Origins: origins,
-			Meta:    doc.Data()["meta"].(map[string]string),
+			Meta:    meta,
 		}
 		pins = append(pins, pin)
 	}

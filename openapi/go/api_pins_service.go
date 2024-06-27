@@ -388,7 +388,7 @@ func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string,
 	log.Printf("GetPins with parameters: userID=%s, cid=%s, name=%s, match=%s, before=%s, after=%s, limit=%d", userID, cid, name, match, before, after, int(limit))
 
 	// Query pins from Firestore with filtering criteria
-	pins, err := s.firestoreService.GetPins(ctx, userID, cid, name, match, status, before, after, int(limit), meta)
+	pins, err := s.firestoreService.GetPins(ctx, userID, cid, name, match, nil, before, after, int(limit), meta) // Exclude status filter here
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
@@ -409,6 +409,20 @@ func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string,
 	pinStatuses, err := s.getPinStatusFromIPFSCluster(ctx, cidsWithRequestId)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+	}
+
+	// Filter the pinStatuses based on the provided status filter
+	if len(status) > 0 {
+		filteredPinStatuses := []PinStatus{}
+		for _, pinStatus := range pinStatuses {
+			for _, s := range status {
+				if pinStatus.Status == s {
+					filteredPinStatuses = append(filteredPinStatuses, pinStatus)
+					break
+				}
+			}
+		}
+		pinStatuses = filteredPinStatuses
 	}
 
 	return Response(http.StatusOK, PinResults{Results: pinStatuses, Count: int32(len(pins))}), nil

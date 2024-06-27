@@ -142,17 +142,19 @@ func toStringMap(input interface{}) map[string]string {
 }
 
 func roundToTopSecond(t time.Time) time.Time {
-	if t.Nanosecond() > 0 || t.Second() > 0 {
+	/*if t.Nanosecond() > 0 || t.Second() > 0 {
 		return t.Truncate(time.Minute).Add(time.Minute)
 	}
-	return t.Truncate(time.Minute)
+	return t.Truncate(time.Minute)*/
+	return t
 }
 
 func roundToBottomSecond(t time.Time) time.Time {
-	return t.Truncate(time.Second)
+	//return t.Truncate(time.Second)
+	return t
 }
 
-func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, status []Status, before time.Time, after time.Time, limit int, meta map[string]string) ([]PinWithRequest, error) {
+func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, _ []Status, before time.Time, after time.Time, limit int, meta map[string]string) ([]PinWithRequest, error) {
 	query := s.Client.Collection("pins").Where("username", "==", username)
 
 	// Apply filters to the query
@@ -169,10 +171,6 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 		}
 	}
 
-	if len(status) > 0 {
-		query = query.Where("status", "in", status)
-	}
-
 	if !before.IsZero() {
 		roundedBefore := roundToTopSecond(before)
 		query = query.Where("created_at", "<", roundedBefore)
@@ -183,10 +181,11 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 		query = query.Where("created_at", ">", roundedAfter)
 	}
 
-	// Apply limit if we're not doing partial or ipartial matches
-	if limit > 0 && (match == "exact" || match == "iexact") {
-		query = query.Limit(limit)
+	// Apply limit if specified, otherwise default to 10
+	if limit <= 0 {
+		limit = 10
 	}
+	query = query.OrderBy("created_at", firestore.Desc).Limit(limit)
 
 	docs, err := query.Documents(ctx).GetAll()
 	if err != nil {

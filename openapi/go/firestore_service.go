@@ -154,7 +154,7 @@ func roundToBottomSecond(t time.Time) time.Time {
 	return t
 }
 
-func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, _ []Status, before time.Time, after time.Time, limit int, meta map[string]string) ([]PinWithRequest, error) {
+func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, _ []Status, before time.Time, after time.Time, limit int, meta map[string]string) ([]PinWithRequest, int, error) {
 	query := s.Client.Collection("pins").Where("username", "==", username)
 
 	// Apply filters to the query
@@ -181,6 +181,14 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 		query = query.Where("created_at", ">", roundedAfter)
 	}
 
+	// Get the count of all matching documents
+	countQuery := query
+	countDocs, err := countQuery.Documents(ctx).GetAll()
+	if err != nil {
+		return nil, 0, err
+	}
+	count := len(countDocs)
+
 	// Apply limit if specified, otherwise default to 10
 	if limit <= 0 {
 		limit = 10
@@ -189,7 +197,7 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 
 	docs, err := query.Documents(ctx).GetAll()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var pins []PinWithRequest
@@ -223,24 +231,21 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 			switch match {
 			case "partial":
 				if !strings.Contains(pin.Pin.Name, name) {
+					count = count - 1
 					continue
 				}
 			case "ipartial":
 				if !strings.Contains(strings.ToLower(pin.Pin.Name), strings.ToLower(name)) {
+					count = count - 1
 					continue
 				}
 			}
 		}
 
 		pins = append(pins, pin)
-
-		// Apply limit after filtering
-		if limit > 0 && len(pins) >= limit {
-			break
-		}
 	}
 
-	return pins, nil
+	return pins, count, nil
 }
 
 func (s *FirestoreService) GetUserIDFromToken(ctx context.Context, token string) (string, error) {

@@ -496,7 +496,16 @@ func (s *PinsAPIService) checkBlockchainBalance(ctx context.Context) (int64, str
 	}
 	log.Printf("account is %s", account)
 
-	resp, err := http.Get(s.blockchainAPIEndpoint + "/account/balance?account=" + account)
+	// Create the request body
+	reqBody, err := json.Marshal(map[string]string{
+		"account": account,
+	})
+	if err != nil {
+		return 0, "", err
+	}
+
+	// Make the POST request to get the balance
+	resp, err := http.Post(s.blockchainAPIEndpoint+"/account/balance", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
 		return 0, "", err
 	}

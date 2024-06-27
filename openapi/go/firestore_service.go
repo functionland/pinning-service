@@ -258,14 +258,13 @@ func (s *FirestoreService) GetUserIDFromToken(ctx context.Context, token string)
 		return "", fmt.Errorf("GetUserIDFromToken: no documents found for session token: %s", token)
 	}
 
-	var username string
 	for _, doc := range docs {
 		username, ok := doc.Data()["username"].(string)
 		if !ok {
 			return "", fmt.Errorf("GetUserIDFromToken: error casting username to string for session token: %s", token)
 		}
-		break
+		return username, nil
 	}
 
-	return username, nil
+	return "", nil
 }

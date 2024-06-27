@@ -441,11 +441,13 @@ func (s *PinsAPIService) extractUserIDFromAuth(ctx context.Context) (string, err
 		return "", err
 	}
 
+	log.Printf("extractUserIDFromAuth extracted authToken: %s", authToken)
 	return s.firestoreService.GetUserIDFromToken(ctx, authToken)
 }
 
 func (s *PinsAPIService) ReplacePinByRequestId(ctx context.Context, requestid string, pin Pin) (ImplResponse, error) {
 	// First, remove the existing pin
+	log.Printf("Removing current pin: %s", requestid)
 	deleteResp, err := s.DeletePinByRequestId(ctx, requestid)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to remove existing pin"), err
@@ -456,6 +458,7 @@ func (s *PinsAPIService) ReplacePinByRequestId(ctx context.Context, requestid st
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to remove existing pin"), nil
 	}
 
+	log.Printf("Adding new pin: %s", pin.Cid)
 	// Now, add the new pin
 	addResp, err := s.AddPin(ctx, pin)
 	if err != nil {

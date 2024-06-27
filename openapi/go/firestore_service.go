@@ -53,14 +53,15 @@ func extractAuthTokenFromContext(ctx context.Context) (string, error) {
 func (s *FirestoreService) AddPin(ctx context.Context, username string, pin Pin) (string, error) {
 	requestId := generateRequestID(pin)
 	_, _, err := s.Client.Collection("pins").Add(ctx, map[string]interface{}{
-		"username":   username,
-		"cid":        pin.Cid,
-		"name":       pin.Name,
-		"origins":    pin.Origins,
-		"meta":       pin.Meta,
-		"status":     "queued",
-		"requestid":  requestId,
-		"created_at": time.Now(),
+		"username":       username,
+		"cid":            pin.Cid,
+		"name":           pin.Name,
+		"name_lowercase": strings.ToLower(pin.Name),
+		"origins":        pin.Origins,
+		"meta":           pin.Meta,
+		"status":         "queued",
+		"requestid":      requestId,
+		"created_at":     time.Now(),
 	})
 	if err != nil {
 		return "", err

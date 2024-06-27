@@ -76,7 +76,7 @@ func (s *UserService) GetUserPasswordHash(ctx context.Context, username string) 
 func (s *UserService) GetPasswordHashFromAuthToken(ctx context.Context, authToken string) (string, error) {
 	docs, err := s.client.Collection("sessions").Where("session_token", "==", authToken).Documents(ctx).GetAll()
 	if err != nil || len(docs) == 0 {
-		return "", errors.New("invalid or expired session token: " + authToken)
+		return "", errors.New("GetPasswordHashFromAuthToken: invalid or expired session token: " + authToken)
 	}
 
 	var username string
@@ -139,7 +139,7 @@ func (s *UserService) GetUserPoolFromSession(ctx context.Context, authToken stri
 	// Query the sessions collection to find the user by auth token
 	docs, err := s.client.Collection("sessions").Where("session_token", "==", authToken).Documents(ctx).GetAll()
 	if err != nil || len(docs) == 0 {
-		return defaultPoolID, errors.New("invalid or expired session token: " + authToken)
+		return defaultPoolID, errors.New("GetUserPoolFromSession: invalid or expired session token: " + authToken)
 	}
 
 	var username string

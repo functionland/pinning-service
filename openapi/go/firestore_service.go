@@ -251,7 +251,7 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 func (s *FirestoreService) GetUserIDFromToken(ctx context.Context, token string) (string, error) {
 	docs, err := s.Client.Collection("sessions").Where("session_token", "==", token).Documents(ctx).GetAll()
 	if err != nil || len(docs) == 0 {
-		return "", errors.New("invalid or expired session token: " + token)
+		return "", errors.New("GetUserIDFromToken: invalid or expired session token: " + token)
 	}
 
 	var username string

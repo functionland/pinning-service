@@ -252,6 +252,9 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 func (s *FirestoreService) GetUserIDFromToken(ctx context.Context, token string) (string, error) {
 	docs, err := s.Client.Collection("sessions").Where("session_token", "==", token).Documents(ctx).GetAll()
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return "", fmt.Errorf("GetUserIDFromToken: context canceled: %v", err)
+		}
 		return "", fmt.Errorf("GetUserIDFromToken: error querying Firestore: %v", err)
 	}
 	if len(docs) == 0 {

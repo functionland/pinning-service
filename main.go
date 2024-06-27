@@ -48,10 +48,7 @@ func main() {
     }
 
     // Initialize FirestoreService (assuming you have a function to create this)
-    baseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-    defer cancel()
-
-    firestoreService, err := openapi.NewFirestoreService(baseCtx, credentialsFile)
+    firestoreService, err := openapi.NewFirestoreService(context.Background(), credentialsFile)
     if err != nil {
         log.Fatalf("Error initializing Firestore service: %v", err)
         panic(err)

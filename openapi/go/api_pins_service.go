@@ -482,16 +482,19 @@ func (s *PinsAPIService) checkBlockchainBalance(ctx context.Context) (int64, str
 	if err != nil {
 		return 0, "", err
 	}
+	log.Printf("auth token is: %s", authToken)
 
 	passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, authToken)
 	if err != nil {
 		return 0, "", err
 	}
+	log.Printf("Password hash is: %s", passwordHash)
 
 	account, err := s.getAccountFromPasswordHash(ctx, passwordHash)
 	if err != nil {
 		return 0, "", err
 	}
+	log.Printf("account is %s", account)
 
 	resp, err := http.Get(s.blockchainAPIEndpoint + "/account/balance?account=" + account)
 	if err != nil {

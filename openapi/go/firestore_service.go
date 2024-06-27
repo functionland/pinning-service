@@ -141,6 +141,17 @@ func toStringMap(input interface{}) map[string]string {
 	return stringMap
 }
 
+func roundToTopSecond(t time.Time) time.Time {
+	if t.Nanosecond() > 0 || t.Second() > 0 {
+		return t.Truncate(time.Minute).Add(time.Minute)
+	}
+	return t.Truncate(time.Minute)
+}
+
+func roundToBottomSecond(t time.Time) time.Time {
+	return t.Truncate(time.Second)
+}
+
 func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, status []Status, before time.Time, after time.Time, limit int, meta map[string]string) ([]PinWithRequest, error) {
 	query := s.Client.Collection("pins").Where("username", "==", username)
 
@@ -163,11 +174,13 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 	}
 
 	if !before.IsZero() {
-		query = query.Where("created_at", "<=", before)
+		roundedBefore := roundToTopSecond(before)
+		query = query.Where("created_at", "<", roundedBefore)
 	}
 
 	if !after.IsZero() {
-		query = query.Where("created_at", ">=", after)
+		roundedAfter := roundToBottomSecond(after)
+		query = query.Where("created_at", ">", roundedAfter)
 	}
 
 	// Apply limit if we're not doing partial or ipartial matches

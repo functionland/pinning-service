@@ -30,17 +30,18 @@ func ReverseProxyHandler(userService *openapi.UserService) http.Handler {
 	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 	proxy.OnRequest().DoFunc(
 		func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+			var poolId int
 			authToken, err := extractAuthTokenFromRequest(req)
 			if err != nil {
 				log.Printf("Error extracting the auth token: %v", err)
-				return req, goproxy.NewResponse(req, goproxy.ContentTypeText, http.StatusUnauthorized, "Unauthorized")
+				poolId = 1
 			}
 			log.Printf("auth token: %s", authToken)
 
-			poolId, err := userService.GetUserPoolFromSession(req.Context(), authToken)
+			poolId, err = userService.GetUserPoolFromSession(req.Context(), authToken)
 			if err != nil {
 				log.Printf("Error getting user pool: %v", err)
-				return req, goproxy.NewResponse(req, goproxy.ContentTypeText, http.StatusUnauthorized, "Unauthorized")
+				poolId = 1
 			}
 			log.Printf("pool_id: %d", poolId)
 
@@ -68,19 +69,18 @@ func ReverseProxyHandler(userService *openapi.UserService) http.Handler {
 	// Handle non-proxy requests
 	proxy.NonproxyHandler = http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			var poolId int
 			authToken, err := extractAuthTokenFromRequest(r)
 			if err != nil {
 				log.Printf("Error extracting the auth token: %v", err)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
+				poolId = 1
 			}
 			log.Printf("auth token: %s", authToken)
 
-			poolId, err := userService.GetUserPoolFromSession(r.Context(), authToken)
+			poolId, err = userService.GetUserPoolFromSession(r.Context(), authToken)
 			if err != nil {
 				log.Printf("Error getting user pool: %v", err)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
+				poolId = 1
 			}
 			log.Printf("poolId: %d", poolId)
 

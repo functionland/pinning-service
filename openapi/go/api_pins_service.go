@@ -296,9 +296,9 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 	// Remove the manifest from the blockchain
 	err = s.removeManifestFromChain(ctx, passwordHash, pin.Pin.Cid)
 	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+		log.Printf("Removing manifest from chain was unsuccessful %v", err.Error())
 	}
-	log.Printf("Manifest removed")
+	log.Printf("Manifest remove call done")
 
 	// Verify the manifest has been removed from the blockchain
 	exists, err := s.verifyManifestOnChain(ctx, passwordHash, pin.Pin.Cid)

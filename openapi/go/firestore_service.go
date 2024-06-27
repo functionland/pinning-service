@@ -3,6 +3,7 @@ package openapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -250,13 +251,19 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 
 func (s *FirestoreService) GetUserIDFromToken(ctx context.Context, token string) (string, error) {
 	docs, err := s.Client.Collection("sessions").Where("session_token", "==", token).Documents(ctx).GetAll()
-	if err != nil || len(docs) == 0 {
-		return "", errors.New("GetUserIDFromToken: invalid or expired session token: " + token)
+	if err != nil {
+		return "", fmt.Errorf("GetUserIDFromToken: error querying Firestore: %v", err)
+	}
+	if len(docs) == 0 {
+		return "", fmt.Errorf("GetUserIDFromToken: no documents found for session token: %s", token)
 	}
 
 	var username string
 	for _, doc := range docs {
-		username = doc.Data()["username"].(string)
+		username, ok := doc.Data()["username"].(string)
+		if !ok {
+			return "", fmt.Errorf("GetUserIDFromToken: error casting username to string for session token: %s", token)
+		}
 		break
 	}
 

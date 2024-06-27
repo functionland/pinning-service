@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -109,8 +110,37 @@ func ReverseProxyHandler(userService *openapi.UserService) http.Handler {
 			r.URL.Host = proxyURL.Host
 			r.Host = proxyURL.Host
 
-			proxy := goproxy.NewProxyHttpServer()
-			proxy.ServeHTTP(w, r)
+			// Forward the request to the backend server
+			client := &http.Client{}
+			req, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+			if err != nil {
+				http.Error(w, "Failed to create request", http.StatusInternalServerError)
+				return
+			}
+
+			// Copy headers from the original request
+			for key, values := range r.Header {
+				for _, value := range values {
+					req.Header.Add(key, value)
+				}
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				http.Error(w, "Failed to forward request", http.StatusInternalServerError)
+				return
+			}
+			defer resp.Body.Close()
+
+			// Copy headers from the response
+			for key, values := range resp.Header {
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, resp.Body)
 		},
 	)
 	return proxy

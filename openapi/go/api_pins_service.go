@@ -291,6 +291,7 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 	}
 
 	log.Printf("This is pinned object for request: %s: %s ------------", requestid, pin.Pin.Cid)
+	log.Printf("password hash: %s", passwordHash)
 
 	// Remove the manifest from the blockchain
 	err = s.removeManifestFromChain(ctx, passwordHash, pin.Pin.Cid)
@@ -325,8 +326,8 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 }
 
 // removeManifestFromChain removes a manifest from the blockchain
-func (s *PinsAPIService) removeManifestFromChain(ctx context.Context, passwordHash, cid string) error {
-	log.Printf("Creating blockchain request with hash: %s", passwordHash)
+func (s *PinsAPIService) removeManifestFromChain(ctx context.Context, passwordHash string, cid string) error {
+	log.Printf("Creating blockchain request with hash: //%s", passwordHash)
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"seed":    "//" + passwordHash,
 		"cid":     cid,

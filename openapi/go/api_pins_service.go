@@ -289,9 +289,9 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 		}
 	}
+	log.Printf("password hash: %s", passwordHash)
 
 	log.Printf("This is pinned object for request: %s: %s ------------", requestid, pin.Pin.Cid)
-	log.Printf("password hash: %s", passwordHash)
 
 	// Remove the manifest from the blockchain
 	err = s.removeManifestFromChain(ctx, passwordHash, pin.Pin.Cid)
@@ -489,7 +489,6 @@ func (s *PinsAPIService) checkBlockchainBalance(ctx context.Context) (int64, str
 	if err != nil {
 		return 0, "", err
 	}
-	log.Printf("Password hash is: %s", passwordHash)
 
 	account, err := s.getAccountFromPasswordHash(ctx, passwordHash)
 	if err != nil {
@@ -509,6 +508,7 @@ func (s *PinsAPIService) checkBlockchainBalance(ctx context.Context) (int64, str
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return 0, "", err
 	}
+	log.Printf("Password hash is: %s", passwordHash)
 
 	return result.Amount, passwordHash, nil
 }

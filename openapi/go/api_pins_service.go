@@ -73,31 +73,37 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	if err != nil || balance < 9999999999999 {
 		_, err := s.setBlockchainBalance(ctx, s.masterSeed, 999999999999999999)
 		if err != nil {
-			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+			return createErrorResponse(http.StatusConflict, "INSUFFICIENT_FUNDS", err.Error()), err
 		}
 	}
 
 	if ipfsExists {
-		// Create a manifest on the blockchain
-		err = s.createManifestOnChain(ctx, passwordHash, pin.Cid)
+		exists, err := s.verifyManifestOnChain(ctx, passwordHash, pin.Cid)
 		if err != nil {
-			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+			return createErrorResponse(http.StatusInsufficientStorage, "INTERNAL_SERVER_ERROR", err.Error()), err
+		}
+		if !exists {
+			// Create a manifest on the blockchain
+			err = s.createManifestOnChain(ctx, passwordHash, pin.Cid)
+			if err != nil {
+				return createErrorResponse(http.StatusInsufficientStorage, "INTERNAL_SERVER_ERROR", err.Error()), err
+			}
 		}
 
 		// Verify the manifest exists on the blockchain
-		exists, err := s.verifyManifestOnChain(ctx, passwordHash, pin.Cid)
+		exists, err = s.verifyManifestOnChain(ctx, passwordHash, pin.Cid)
 		if err != nil {
-			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+			return createErrorResponse(http.StatusInsufficientStorage, "INTERNAL_SERVER_ERROR", err.Error()), err
 		}
 		if !exists {
-			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Manifest creation failed on blockchain"), nil
+			return createErrorResponse(http.StatusInsufficientStorage, "INTERNAL_SERVER_ERROR", "Manifest creation failed on blockchain"), nil
 		}
 	}
 
 	// Interact with IPFS to add pin
 	err = s.pinToIPFSCluster(ctx, pin.Cid)
 	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+		return createErrorResponse(http.StatusFailedDependency, "PIN_TO_CLUSTER_FAILED", err.Error()), err
 	}
 
 	// Store pin in Firestore

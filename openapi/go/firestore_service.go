@@ -163,11 +163,11 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 	}
 
 	if !before.IsZero() {
-		query = query.Where("created_at", "<", before)
+		query = query.Where("created_at", "<=", before)
 	}
 
 	if !after.IsZero() {
-		query = query.Where("created_at", ">", after)
+		query = query.Where("created_at", ">=", after)
 	}
 
 	// Apply limit if we're not doing partial or ipartial matches

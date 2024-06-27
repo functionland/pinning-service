@@ -608,7 +608,7 @@ func (s *PinsAPIService) unpinFromIPFSCluster(ctx context.Context, cid string) e
 
 func multiaddrToStringSlice(addresses []api.Multiaddr) []string {
 	if addresses == nil {
-		return nil
+		return []string{}
 	}
 	stringSlice := make([]string, len(addresses))
 	for i, addr := range addresses {
@@ -630,7 +630,7 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 			return nil, err
 		}
 		apiCids = append(apiCids, c)
-		cidToRequestId[c.String()] = RequestIdWithName{
+		cidToRequestId[cidStr] = RequestIdWithName{
 			RequestId: cidWithRequestId.RequestId,
 			Name:      cidWithRequestId.Name,
 		}
@@ -654,6 +654,7 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 			requestIdWithName := cidToRequestId[status.Cid.String()]
 			requestId := requestIdWithName.RequestId
 			name := requestIdWithName.Name
+			customStatus := mapStatus(string(Status(pinInfo.Status.String())))
 
 			// Use the name from the status if it's not empty, otherwise use the name from the map
 			if status.Name != "" {
@@ -662,7 +663,7 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 
 			pinStatuses = append(pinStatuses, PinStatus{
 				Requestid: requestId,
-				Status:    Status(pinInfo.Status.String()), // Convert TrackerStatus to string
+				Status:    customStatus, // Convert TrackerStatus to string
 				Created:   status.Created,
 				Pin: Pin{
 					Cid:     status.Cid.String(),
@@ -679,6 +680,16 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 	}
 
 	return pinStatuses, nil
+}
+func mapStatus(ipfsStatus string) Status {
+	switch ipfsStatus {
+	case "pin_error":
+		return "failed"
+	case "pin_queued":
+		return "queued"
+	default:
+		return Status(ipfsStatus) // Use the original status if no custom mapping is required
+	}
 }
 
 func generateRequestID(_ Pin) string {

@@ -25,76 +25,76 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
  
- func main() {
-	 log.Printf("Server started")
- 
-	 // Load environment variables from .env file
-	 err := godotenv.Load()
-	 if err != nil {
-		 log.Fatalf("Error loading .env file")
-		 panic("no env found")
-	 }
- 
-	 // Get the environment variables
-	 masterSeed := os.Getenv("MASTER_SEED")
-	 poolSeed := os.Getenv("POOL_SEED")
-	 blockchainAPIEndpoint := os.Getenv("BLOCKCHAIN_API_ENDPOINT")
-	 credentialsFile := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
-	 poolIdStr := os.Getenv("POOL_ID")
-	 poolId, err := strconv.Atoi(poolIdStr)
-	if err != nil {
-		log.Fatalf("Error converting POOL_ID to integer: %v", err)
-		panic(err)
-	}
+func main() {
+    log.Printf("Server started")
 
- 
-	 // Initialize FirestoreService (assuming you have a function to create this)
-	 ctx := context.Background()
-	 firestoreService, err := openapi.NewFirestoreService(ctx, credentialsFile)
-	 if err != nil {
-		log.Fatalf("Error initializing Firestore service: %v", err)
-		panic(err)
-	 }
-	 userService, err := openapi.NewUserService(firestoreService.Client)
-	if err != nil {
-		log.Fatalf("Error initializing User service: %v", err)
-		panic(err)
-	}
-	userAPIController := openapi.NewUserAPIController(userService)
+    // Load environment variables from .env file
+    err := godotenv.Load()
+    if err != nil {
+        log.Fatalf("Error loading .env file")
+        panic("no env found")
+    }
 
-	 nodeMultiAddr, err := ma.NewMultiaddr("/ip4/127.0.0.1/tcp/5001")
-	if err != nil {
-		log.Fatalf("invalid multiaddress: %v", err)
-		panic(err)
-	}
-	ipfsAPI, err := rpc.NewApi(nodeMultiAddr)
-	if err != nil {
-		panic(err)
-	}
+    // Get the environment variables
+    masterSeed := os.Getenv("MASTER_SEED")
+    poolSeed := os.Getenv("POOL_SEED")
+    blockchainAPIEndpoint := os.Getenv("BLOCKCHAIN_API_ENDPOINT")
+    credentialsFile := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    poolIdStr := os.Getenv("POOL_ID")
+    poolId, err := strconv.Atoi(poolIdStr)
+    if err != nil {
+        log.Fatalf("Error converting POOL_ID to integer: %v", err)
+        panic(err)
+    }
 
-	ipfsClusterConfig := ipfsCluster.Config{}
-	ipfsClusterApi, err := ipfsCluster.NewDefaultClient(&ipfsClusterConfig)
-	if err != nil {
-		log.Fatalf("Error in setting ipfs cluster api %v", err)
-		panic(err)
-	}
- 
-	// Initialize PinsAPIService
-	pinsAPIService := openapi.NewPinsAPIService(firestoreService, userService, ipfsAPI, ipfsClusterApi, blockchainAPIEndpoint, masterSeed, poolSeed, poolId)
- 
-	// Create PinsAPIController
-	pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)
- 
-	// Initialize router
-	mainRouter := openapi.NewRouter(pinsAPIController)
-	additionalRouter := openapi.NewAdditionalRouter(pinsAPIController, userAPIController)
-	router := mux.NewRouter()
-	router.PathPrefix("/auth/").Handler(additionalRouter)
-	router.PathPrefix("/").Handler(mainRouter)
+    // Initialize FirestoreService (assuming you have a function to create this)
+    baseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+    defer cancel()
 
-	authRouter := openapi.AuthMiddleware(firestoreService)(router)
- 
-	// Start the server
-	log.Fatal(http.ListenAndServe(":6000", openapi.InjectRequestIntoContext(authRouter)))
- }
- 
+    firestoreService, err := openapi.NewFirestoreService(baseCtx, credentialsFile)
+    if err != nil {
+        log.Fatalf("Error initializing Firestore service: %v", err)
+        panic(err)
+    }
+    userService, err := openapi.NewUserService(firestoreService.Client)
+    if err != nil {
+        log.Fatalf("Error initializing User service: %v", err)
+        panic(err)
+    }
+    userAPIController := openapi.NewUserAPIController(userService)
+
+    nodeMultiAddr, err := ma.NewMultiaddr("/ip4/127.0.0.1/tcp/5001")
+    if err != nil {
+        log.Fatalf("invalid multiaddress: %v", err)
+        panic(err)
+    }
+    ipfsAPI, err := rpc.NewApi(nodeMultiAddr)
+    if err != nil {
+        panic(err)
+    }
+
+    ipfsClusterConfig := ipfsCluster.Config{}
+    ipfsClusterApi, err := ipfsCluster.NewDefaultClient(&ipfsClusterConfig)
+    if err != nil {
+        log.Fatalf("Error in setting ipfs cluster api %v", err)
+        panic(err)
+    }
+
+    // Initialize PinsAPIService
+    pinsAPIService := openapi.NewPinsAPIService(firestoreService, userService, ipfsAPI, ipfsClusterApi, blockchainAPIEndpoint, masterSeed, poolSeed, poolId)
+
+    // Create PinsAPIController
+    pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)
+
+    // Initialize router
+    mainRouter := openapi.NewRouter(pinsAPIController)
+    additionalRouter := openapi.NewAdditionalRouter(pinsAPIController, userAPIController)
+    router := mux.NewRouter()
+    router.PathPrefix("/auth/").Handler(additionalRouter)
+    router.PathPrefix("/").Handler(mainRouter)
+
+    authRouter := openapi.AuthMiddleware(firestoreService)(router)
+
+    // Start the server
+    log.Fatal(http.ListenAndServe(":6000", openapi.InjectRequestIntoContext(authRouter)))
+}

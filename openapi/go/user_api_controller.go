@@ -1,8 +1,10 @@
 package openapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 type UserAPIController struct {
@@ -23,7 +25,10 @@ func (c *UserAPIController) CreateSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	ctx := r.Context()
+	// Set a timeout for the context
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
 	response, err := c.service.CreateSession(ctx, credentials.Username)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
@@ -40,7 +45,10 @@ func (c *UserAPIController) DeleteSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	ctx := r.Context()
+	// Set a timeout for the context
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
 	err := c.service.DeleteSession(ctx, token)
 	if err != nil {
 		http.Error(w, err.Error(), 400)

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type contextKey string
@@ -18,7 +19,11 @@ const requestContextKey contextKey = "httpRequest"
 // InjectRequestIntoContext is a middleware to inject the http.Request into the context
 func InjectRequestIntoContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), requestContextKey, r)
+		// Set a timeout of 30 seconds for each request
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+
+		ctx = context.WithValue(ctx, requestContextKey, r)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

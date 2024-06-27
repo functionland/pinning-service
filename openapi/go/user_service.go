@@ -3,6 +3,7 @@ package openapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -129,6 +130,47 @@ func (s *UserService) DeleteSession(ctx context.Context, sessionToken string) er
 	}
 
 	return nil
+}
+
+func (s *UserService) GetUserPoolFromSession(ctx context.Context, authToken string) (int, error) {
+	// Default pool ID in case of error or not found
+	defaultPoolID := 1
+
+	// Query the sessions collection to find the user by auth token
+	docs, err := s.client.Collection("sessions").Where("session_token", "==", authToken).Documents(ctx).GetAll()
+	if err != nil || len(docs) == 0 {
+		return defaultPoolID, errors.New("invalid or expired session token: " + authToken)
+	}
+
+	var username string
+	for _, doc := range docs {
+		username = doc.Data()["username"].(string)
+		break // We only need the first document
+	}
+
+	// Query the users collection to find the user's pool ID by username
+	userDocs, err := s.client.Collection("users").Where("username", "==", username).Documents(ctx).GetAll()
+	if err != nil || len(userDocs) == 0 {
+		return defaultPoolID, err
+	}
+
+	var poolId int
+	for _, doc := range userDocs {
+		poolIdValue := doc.Data()["pool_id"]
+		switch v := poolIdValue.(type) {
+		case int64:
+			poolId = int(v)
+		case float64:
+			poolId = int(v)
+		case int:
+			poolId = v
+		default:
+			return defaultPoolID, errors.New("pool_id is not of a type that can be converted to int, actual type: " + fmt.Sprintf("%T", v))
+		}
+		return poolId, nil
+	}
+
+	return defaultPoolID, nil
 }
 
 func generateSessionToken() string {

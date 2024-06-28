@@ -19,8 +19,8 @@ const requestContextKey contextKey = "httpRequest"
 // InjectRequestIntoContext is a middleware to inject the http.Request into the context
 func InjectRequestIntoContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set a timeout of 60 seconds for each request
-		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		// Set a timeout of 90 seconds for each request
+		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
 
 		ctx = context.WithValue(ctx, requestContextKey, r)
@@ -66,8 +66,9 @@ func AuthMiddleware(firestoreService *FirestoreService) func(http.Handler) http.
 				return
 			}
 
-			ctx := r.Context()
-			_, err := firestoreService.GetUserIDFromToken(ctx, token, "middleware")
+			firestoreCtx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+			_, err := firestoreService.GetUserIDFromToken(firestoreCtx, token, "middleware")
 			if err != nil {
 				resp := createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
 				createErrorResponseJSON(wrappedWriter, resp)
@@ -76,7 +77,7 @@ func AuthMiddleware(firestoreService *FirestoreService) func(http.Handler) http.
 			}
 
 			// Pass the request context with user ID down the chain
-			ctx = context.WithValue(ctx, authTokenKey, token)
+			ctx := context.WithValue(r.Context(), authTokenKey, token)
 			next.ServeHTTP(wrappedWriter, r.WithContext(ctx))
 
 			// Log the response after serving the request

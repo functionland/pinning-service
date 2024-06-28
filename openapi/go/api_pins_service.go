@@ -74,6 +74,7 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 		// Interact with IPFS to add pin
 		err = s.pinToIPFSCluster(ctx, pin.Cid)
 		if err != nil {
+			s.DeletePinByRequestId(ctx, requestId)
 			return createErrorResponse(http.StatusFailedDependency, "PIN_TO_CLUSTER_FAILED", err.Error()), err
 		}
 

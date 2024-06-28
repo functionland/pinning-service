@@ -1,0 +1,1 @@
+This is the repository for the code that runs on the api endpoint at https://api1.cloud.fx.land and serves the pinning service. The requests are distributed to this server through https://api.cloud.fx.land which runs the code inside `pool-server`

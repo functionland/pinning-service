@@ -64,21 +64,24 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
+	// Store pin in Firestore and mark blockchain upload as pending
+	requestId, err := s.firestoreService.AddPin(ctx, userID, pin, "pending")
+	if err != nil {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+	}
+
 	if ipfsExists {
-		// Store pin in Firestore and mark blockchain upload as pending
-		requestId, err := s.firestoreService.AddPin(ctx, userID, pin, "pending")
+		// Interact with IPFS to add pin
+		err = s.pinToIPFSCluster(ctx, pin.Cid)
 		if err != nil {
-			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+			return createErrorResponse(http.StatusFailedDependency, "PIN_TO_CLUSTER_FAILED", err.Error()), err
 		}
 
 		// Queue the blockchain operation
 		go s.handleUploadManifest(ctx, pin.Cid, requestId)
-
-		// Return response
-		return Response(http.StatusAccepted, map[string]string{"requestId": requestId}), nil
 	}
 
-	return createErrorResponse(http.StatusNotFound, "CID_NOT_FOUND", "CID does not exist in IPFS"), nil
+	return Response(http.StatusAccepted, map[string]string{"requestId": requestId}), nil
 }
 
 func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {
@@ -98,6 +101,12 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 
 	// Mark pin as deleted in Firestore and set remove_manifest as pending
 	err = s.firestoreService.MarkPinAsDeleted(ctx, requestid)
+	if err != nil {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+	}
+
+	// Remove pin from IPFS
+	err = s.unpinFromIPFSCluster(ctx, pin.Pin.Cid)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}

@@ -71,6 +71,22 @@ func (s *FirestoreService) AddPin(ctx context.Context, username string, pin Pin,
 	return requestId, nil
 }
 
+func (s *FirestoreService) DeletePin(ctx context.Context, requestID string) error {
+	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
+	if err != nil || len(docs) == 0 {
+		return err
+	}
+
+	for _, doc := range docs {
+		_, err := doc.Ref.Delete(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (s *FirestoreService) MarkPinAsDeleted(ctx context.Context, requestID string) error {
 	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
 	if err != nil || len(docs) == 0 {
@@ -109,7 +125,7 @@ func (s *FirestoreService) UpdatePinStatus(ctx context.Context, requestID, statu
 }
 
 func (s *FirestoreService) GetPinByRequestID(ctx context.Context, requestID string) (PinStatus, string, error) {
-	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
+	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Where("status", "!=", "deleted").Documents(ctx).GetAll()
 	if err != nil {
 		return PinStatus{}, "", err
 	}

@@ -26,7 +26,7 @@ func (c *UserAPIController) CreateSession(w http.ResponseWriter, r *http.Request
 	}
 
 	// Set a timeout for the context
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 80*time.Second)
 	defer cancel()
 
 	response, err := c.service.CreateSession(ctx, credentials.Username)
@@ -46,7 +46,7 @@ func (c *UserAPIController) DeleteSession(w http.ResponseWriter, r *http.Request
 	}
 
 	// Set a timeout for the context
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 80*time.Second)
 	defer cancel()
 
 	err := c.service.DeleteSession(ctx, token)

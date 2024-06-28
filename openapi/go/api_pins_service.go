@@ -70,7 +70,7 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 
 	// Check blockchain balance
 	balance, passwordHash, err := s.checkBlockchainBalance(ctx)
-	if err != nil || balance < 9999999999999 {
+	if err != nil || balance < 999999999999 {
 		_, err := s.setBlockchainBalance(ctx, s.masterSeed, 999999999999999999)
 		if err != nil {
 			return createErrorResponse(http.StatusConflict, "INSUFFICIENT_FUNDS", err.Error()), err
@@ -289,10 +289,10 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 
 	// Check blockchain balance
 	balance, passwordHash, err := s.checkBlockchainBalance(ctx)
-	if err != nil || balance < 9999999999999 {
+	if err != nil || balance < 999999999999 {
 		_, err := s.setBlockchainBalance(ctx, s.masterSeed, 999999999999999999)
 		if err != nil {
-			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+			return createErrorResponse(http.StatusConflict, "INSUFFICIENT_FUNDS", err.Error()), err
 		}
 	}
 	log.Printf("password hash: %s", passwordHash)

@@ -156,7 +156,12 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 	// Remove pin from IPFS
 	err = s.unpinFromIPFSCluster(ctx, pin.Pin.Cid)
 	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+		if err.Error() != "pin is not part of the pinset (404)" {
+			log.Printf("ipfscluster unpin errored: %s", err.Error())
+			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+		} else {
+			log.Printf("ipfscluster unpin said: %s", err.Error())
+		}
 	}
 
 	// Queue the blockchain operation

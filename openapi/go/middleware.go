@@ -68,7 +68,7 @@ func AuthMiddleware(firestoreService *FirestoreService) func(http.Handler) http.
 
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
-			_, err := firestoreService.GetUserIDFromToken(ctx, token)
+			_, err := firestoreService.GetUserIDFromToken(ctx, token, "middleware")
 			if err != nil {
 				resp := createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
 				createErrorResponseJSON(wrappedWriter, resp)

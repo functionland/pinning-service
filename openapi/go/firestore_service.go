@@ -249,16 +249,16 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 	return pins, count, nil
 }
 
-func (s *FirestoreService) GetUserIDFromToken(ctx context.Context, token string) (string, error) {
+func (s *FirestoreService) GetUserIDFromToken(ctx context.Context, token string, tag string) (string, error) {
 	docs, err := s.Client.Collection("sessions").Where("session_token", "==", token).Documents(ctx).GetAll()
 	if err != nil {
 		if ctx.Err() == context.Canceled {
-			return "", fmt.Errorf("GetUserIDFromToken: context canceled: %v", err)
+			return "", fmt.Errorf("GetUserIDFromToken: context canceled in %s: %v", tag, err)
 		}
-		return "", fmt.Errorf("GetUserIDFromToken: error querying Firestore: %v", err)
+		return "", fmt.Errorf("GetUserIDFromToken: error querying Firestore in %s: %v", tag, err)
 	}
 	if len(docs) == 0 {
-		return "", fmt.Errorf("GetUserIDFromToken: no documents found for session token: %s", token)
+		return "", fmt.Errorf("GetUserIDFromToken: no documents found for session token in %s: %s", tag, token)
 	}
 
 	for _, doc := range docs {

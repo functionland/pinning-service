@@ -442,7 +442,7 @@ func (s *PinsAPIService) extractUserIDFromAuth(ctx context.Context) (string, err
 	}
 
 	log.Printf("extractUserIDFromAuth extracted authToken: %s", authToken)
-	return s.firestoreService.GetUserIDFromToken(ctx, authToken)
+	return s.firestoreService.GetUserIDFromToken(ctx, authToken, "api_pins_service")
 }
 
 func (s *PinsAPIService) ReplacePinByRequestId(ctx context.Context, requestid string, pin Pin) (ImplResponse, error) {

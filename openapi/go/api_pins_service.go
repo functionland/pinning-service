@@ -77,8 +77,13 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	}
 
 	if ipfsExists {
+		passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, "authToken")
+		if err != nil {
+			s.updateManifestStatus(ctx, requestId, "failed")
+		}
+		bgCtx, _ := context.WithTimeout(context.Background(), 2*time.Minute)
 		// Queue the blockchain operation
-		go s.handleUploadManifest(ctx, pin.Cid, requestId)
+		go s.handleUploadManifest(bgCtx, pin.Cid, requestId, passwordHash)
 	}
 
 	// Convert pin.Cid to api.Cid
@@ -150,21 +155,20 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 	}
 
 	// Queue the blockchain operation
-	go s.handleRemoveManifest(ctx, pin.Pin.Cid, requestid)
+	passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, "authToken")
+	if err != nil {
+		s.updateManifestStatus(ctx, requestid, "failed")
+	}
+	bgCtx, _ := context.WithTimeout(context.Background(), 2*time.Minute)
+	go s.handleRemoveManifest(bgCtx, pin.Pin.Cid, requestid, passwordHash)
 
 	// Return response
 	return Response(http.StatusAccepted, nil), nil
 }
 
-func (s *PinsAPIService) handleUploadManifest(ctx context.Context, cid string, requestId string) {
-	passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, "authToken")
-	if err != nil {
-		s.updateManifestStatus(ctx, requestId, "failed")
-		return
-	}
-
+func (s *PinsAPIService) handleUploadManifest(ctx context.Context, cid string, requestId string, passwordHash string) {
 	for i := 0; i < 3; i++ {
-		err = s.createManifestOnChain(ctx, passwordHash, cid)
+		err := s.createManifestOnChain(ctx, passwordHash, cid)
 		if err == nil {
 			s.updateManifestStatus(ctx, requestId, "completed")
 			return
@@ -174,17 +178,12 @@ func (s *PinsAPIService) handleUploadManifest(ctx context.Context, cid string, r
 	s.updateManifestStatus(ctx, requestId, "failed")
 }
 
-func (s *PinsAPIService) handleRemoveManifest(ctx context.Context, cid string, requestId string) {
-	passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, "authToken")
-	if err != nil {
-		s.updateManifestStatus(ctx, requestId, "failed")
-		return
-	}
-
+func (s *PinsAPIService) handleRemoveManifest(ctx context.Context, cid string, requestId string, passwordHash string) {
 	for i := 0; i < 3; i++ {
-		err = s.removeManifestFromChain(ctx, passwordHash, cid)
+		err := s.removeManifestFromChain(ctx, passwordHash, cid)
 		if err == nil {
 			s.updateManifestStatus(ctx, requestId, "completed")
+			s.firestoreService.DeletePin(ctx, requestId)
 			return
 		}
 		time.Sleep(30 * time.Second)

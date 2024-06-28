@@ -158,6 +158,7 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 	if err != nil {
 		if err.Error() != "pin is not part of the pinset (404)" {
 			log.Printf("ipfscluster unpin errored: %s", err.Error())
+			s.firestoreService.MarkPinAsDeleteFailed(ctx, requestid)
 			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 		} else {
 			log.Printf("ipfscluster unpin said: %s", err.Error())

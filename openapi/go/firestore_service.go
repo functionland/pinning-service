@@ -106,6 +106,25 @@ func (s *FirestoreService) MarkPinAsDeleted(ctx context.Context, requestID strin
 	return nil
 }
 
+func (s *FirestoreService) MarkPinAsDeleteFailed(ctx context.Context, requestID string) error {
+	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
+	if err != nil || len(docs) == 0 {
+		return err
+	}
+
+	for _, doc := range docs {
+		_, err := doc.Ref.Update(ctx, []firestore.Update{
+			{Path: "status", Value: "delete_failed"},
+			{Path: "remove_status", Value: "failed"},
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (s *FirestoreService) UpdatePinStatus(ctx context.Context, requestID, status string) error {
 	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
 	if err != nil || len(docs) == 0 {

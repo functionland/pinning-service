@@ -53,13 +53,9 @@ func NewPinsAPIService(firestoreService *FirestoreService, userService *UserServ
 }
 
 func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, error) {
-	// Check if the CID already exists in IPFS
 	ipfsExists := true
 	ipfsExists, err := s.cidExistsInIPFS(ctx, pin.Cid)
 	if err != nil {
-		ipfsExists = false
-	}
-	if !ipfsExists {
 		ipfsExists = false
 	}
 
@@ -68,89 +64,92 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
-	// Check blockchain balance
-	balance, passwordHash, err := s.checkBlockchainBalance(ctx)
-	if err != nil || balance < 999999999999 {
-		_, err := s.setBlockchainBalance(ctx, s.masterSeed, 999999999999999999)
-		if err != nil {
-			return createErrorResponse(http.StatusConflict, "INSUFFICIENT_FUNDS", err.Error()), err
-		}
-	}
-
 	if ipfsExists {
-		exists, err := s.verifyManifestOnChain(ctx, passwordHash, pin.Cid)
+		// Store pin in Firestore and mark blockchain upload as pending
+		requestId, err := s.firestoreService.AddPin(ctx, userID, pin, "pending")
 		if err != nil {
-			return createErrorResponse(http.StatusInsufficientStorage, "INTERNAL_SERVER_ERROR", err.Error()), err
-		}
-		if !exists {
-			// Create a manifest on the blockchain
-			err = s.createManifestOnChain(ctx, passwordHash, pin.Cid)
-			if err != nil {
-				return createErrorResponse(http.StatusInsufficientStorage, "INTERNAL_SERVER_ERROR", err.Error()), err
-			}
+			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 		}
 
-		// Verify the manifest exists on the blockchain
-		exists, err = s.verifyManifestOnChain(ctx, passwordHash, pin.Cid)
-		if err != nil {
-			return createErrorResponse(http.StatusInsufficientStorage, "INTERNAL_SERVER_ERROR", err.Error()), err
-		}
-		if !exists {
-			return createErrorResponse(http.StatusInsufficientStorage, "INTERNAL_SERVER_ERROR", "Manifest creation failed on blockchain"), nil
-		}
+		// Queue the blockchain operation
+		go s.handleUploadManifest(ctx, pin.Cid, requestId)
+
+		// Return response
+		return Response(http.StatusAccepted, map[string]string{"requestId": requestId}), nil
 	}
 
-	// Interact with IPFS to add pin
-	err = s.pinToIPFSCluster(ctx, pin.Cid)
+	return createErrorResponse(http.StatusNotFound, "CID_NOT_FOUND", "CID does not exist in IPFS"), nil
+}
+
+func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {
+	userID, err := s.extractUserIDFromAuth(ctx)
 	if err != nil {
-		return createErrorResponse(http.StatusFailedDependency, "PIN_TO_CLUSTER_FAILED", err.Error()), err
+		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
-	// Store pin in Firestore
-	requestId, err := s.firestoreService.AddPin(ctx, userID, pin)
+	pin, username, err := s.getPinByRequestID(ctx, requestid)
 	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
 	}
 
-	// Convert pin.Cid to api.Cid
-	c, err := api.DecodeCid(pin.Cid)
+	if userID != username {
+		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", "You do not have permission to delete this pin"), nil
+	}
+
+	// Mark pin as deleted in Firestore and set remove_manifest as pending
+	err = s.firestoreService.MarkPinAsDeleted(ctx, requestid)
 	if err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
-	// Call IPFS Cluster status endpoint to get additional details
-	pinStatus, err := s.ipfsClusterAPI.Status(ctx, c, true)
+	// Queue the blockchain operation
+	go s.handleRemoveManifest(ctx, pin.Pin.Cid, requestid)
+
+	// Return response
+	return Response(http.StatusAccepted, nil), nil
+}
+
+func (s *PinsAPIService) handleUploadManifest(ctx context.Context, cid string, requestId string) {
+	passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, "authToken")
 	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+		s.updateManifestStatus(ctx, requestId, "failed")
+		return
 	}
 
-	// Extract additional details from the status response
-	delegates := []string{}
-	for _, peer := range pinStatus.PeerMap {
-		for _, addr := range peer.IPFSAddresses {
-			delegates = append(delegates, addr.String())
+	for i := 0; i < 3; i++ {
+		err = s.createManifestOnChain(ctx, passwordHash, cid)
+		if err == nil {
+			s.updateManifestStatus(ctx, requestId, "completed")
+			return
 		}
+		time.Sleep(30 * time.Second)
+	}
+	s.updateManifestStatus(ctx, requestId, "failed")
+}
+
+func (s *PinsAPIService) handleRemoveManifest(ctx context.Context, cid string, requestId string) {
+	passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, "authToken")
+	if err != nil {
+		s.updateManifestStatus(ctx, requestId, "failed")
+		return
 	}
 
-	info := map[string]string{
-		"status_details": "Queue position: 0 of 0", // You may update this with actual status details if available
+	for i := 0; i < 3; i++ {
+		err = s.removeManifestFromChain(ctx, passwordHash, cid)
+		if err == nil {
+			s.updateManifestStatus(ctx, requestId, "completed")
+			return
+		}
+		time.Sleep(30 * time.Second)
 	}
+	s.updateManifestStatus(ctx, requestId, "failed")
+}
 
-	response := PinStatus{
-		Requestid: requestId,
-		Status:    "queued",
-		Created:   time.Now(),
-		Pin: Pin{
-			Cid:     pin.Cid,
-			Name:    pin.Name,
-			Origins: pin.Origins,
-			Meta:    pin.Meta,
-		},
-		Delegates: delegates,
-		Info:      info,
+func (s *PinsAPIService) updateManifestStatus(ctx context.Context, requestId, status string) {
+	err := s.firestoreService.UpdatePinStatus(ctx, requestId, status)
+	if err != nil {
+		log.Printf("Failed to update pin status: %v", err)
 	}
-
-	return Response(http.StatusAccepted, response), nil
 }
 
 // createManifestOnChain creates a manifest on the blockchain
@@ -269,66 +268,6 @@ func (s *PinsAPIService) cidExistsInIPFS(ctx context.Context, cid string) (bool,
 	}
 	// The block exists
 	return true, nil
-}
-
-func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {
-	userID, err := s.extractUserIDFromAuth(ctx)
-	if err != nil {
-		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
-	}
-
-	// Get the pin by request ID and check ownership
-	pin, username, err := s.getPinByRequestID(ctx, requestid)
-	if err != nil {
-		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
-	}
-
-	if userID != username {
-		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", "You do not have permission to delete this pin"), nil
-	}
-
-	// Check blockchain balance
-	balance, passwordHash, err := s.checkBlockchainBalance(ctx)
-	if err != nil || balance < 999999999999 {
-		_, err := s.setBlockchainBalance(ctx, s.masterSeed, 999999999999999999)
-		if err != nil {
-			return createErrorResponse(http.StatusConflict, "INSUFFICIENT_FUNDS", err.Error()), err
-		}
-	}
-	log.Printf("password hash: %s", passwordHash)
-
-	log.Printf("This is pinned object for request: %s: %s ------------", requestid, pin.Pin.Cid)
-
-	// Remove the manifest from the blockchain
-	err = s.removeManifestFromChain(ctx, passwordHash, pin.Pin.Cid)
-	if err != nil {
-		log.Printf("Removing manifest from chain was unsuccessful %v", err.Error())
-	}
-	log.Printf("Manifest remove call done")
-
-	// Verify the manifest has been removed from the blockchain
-	exists, err := s.verifyManifestOnChain(ctx, passwordHash, pin.Pin.Cid)
-	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
-	}
-	if exists {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Manifest removal failed on blockchain"), nil
-	}
-	log.Printf("Manifest is actually removed")
-
-	// Remove pin from IPFS
-	err = s.unpinFromIPFSCluster(ctx, pin.Pin.Cid)
-	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
-	}
-
-	// Remove pin from Firestore
-	err = s.firestoreService.DeletePin(ctx, requestid)
-	if err != nil {
-		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
-	}
-
-	return Response(http.StatusAccepted, nil), nil
 }
 
 // removeManifestFromChain removes a manifest from the blockchain

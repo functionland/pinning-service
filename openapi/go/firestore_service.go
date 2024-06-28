@@ -51,7 +51,7 @@ func extractAuthTokenFromContext(ctx context.Context) (string, error) {
 	return token, nil
 }
 
-func (s *FirestoreService) AddPin(ctx context.Context, username string, pin Pin) (string, error) {
+func (s *FirestoreService) AddPin(ctx context.Context, username string, pin Pin, uploadStatus string) (string, error) {
 	requestId := generateRequestID(pin)
 	_, _, err := s.Client.Collection("pins").Add(ctx, map[string]interface{}{
 		"username":       username,
@@ -63,6 +63,7 @@ func (s *FirestoreService) AddPin(ctx context.Context, username string, pin Pin)
 		"status":         "queued",
 		"requestid":      requestId,
 		"created_at":     time.Now(),
+		"upload_status":  uploadStatus,
 	})
 	if err != nil {
 		return "", err
@@ -70,14 +71,35 @@ func (s *FirestoreService) AddPin(ctx context.Context, username string, pin Pin)
 	return requestId, nil
 }
 
-func (s *FirestoreService) DeletePin(ctx context.Context, requestID string) error {
+func (s *FirestoreService) MarkPinAsDeleted(ctx context.Context, requestID string) error {
 	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
 	if err != nil || len(docs) == 0 {
 		return err
 	}
 
 	for _, doc := range docs {
-		_, err := doc.Ref.Delete(ctx)
+		_, err := doc.Ref.Update(ctx, []firestore.Update{
+			{Path: "status", Value: "deleted"},
+			{Path: "remove_status", Value: "pending"},
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *FirestoreService) UpdatePinStatus(ctx context.Context, requestID, status string) error {
+	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
+	if err != nil || len(docs) == 0 {
+		return err
+	}
+
+	for _, doc := range docs {
+		_, err := doc.Ref.Update(ctx, []firestore.Update{
+			{Path: "upload_status", Value: status},
+		})
 		if err != nil {
 			return err
 		}
@@ -143,20 +165,15 @@ func toStringMap(input interface{}) map[string]string {
 }
 
 func roundToTopSecond(t time.Time) time.Time {
-	/*if t.Nanosecond() > 0 || t.Second() > 0 {
-		return t.Truncate(time.Minute).Add(time.Minute)
-	}
-	return t.Truncate(time.Minute)*/
 	return t
 }
 
 func roundToBottomSecond(t time.Time) time.Time {
-	//return t.Truncate(time.Second)
 	return t
 }
 
 func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, _ []Status, before time.Time, after time.Time, limit int, meta map[string]string) ([]PinWithRequest, int, error) {
-	query := s.Client.Collection("pins").Where("username", "==", username)
+	query := s.Client.Collection("pins").Where("username", "==", username).Where("status", "!=", "deleted")
 
 	// Apply filters to the query
 	if len(cid) > 0 {

@@ -731,7 +731,7 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 }
 func mapStatus(ipfsStatus string) Status {
 	switch ipfsStatus {
-	case "pin_error":
+	case "pin_error", "unpinned":
 		return "failed"
 	case "pin_queued":
 		return "queued"

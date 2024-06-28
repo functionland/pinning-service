@@ -114,7 +114,7 @@ func (s *FirestoreService) MarkPinAsDeleteFailed(ctx context.Context, requestID 
 
 	for _, doc := range docs {
 		_, err := doc.Ref.Update(ctx, []firestore.Update{
-			{Path: "status", Value: "delete_failed"},
+			{Path: "status", Value: "deleted"},
 			{Path: "remove_status", Value: "failed"},
 		})
 		if err != nil {

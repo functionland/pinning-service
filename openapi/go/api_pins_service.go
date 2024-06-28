@@ -64,6 +64,12 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
+	// Interact with IPFS to add pin
+	err = s.pinToIPFSCluster(ctx, pin.Cid)
+	if err != nil {
+		return createErrorResponse(http.StatusFailedDependency, "PIN_TO_CLUSTER_FAILED", err.Error()), err
+	}
+
 	// Store pin in Firestore and mark blockchain upload as pending
 	requestId, err := s.firestoreService.AddPin(ctx, userID, pin, "pending")
 	if err != nil {
@@ -71,18 +77,49 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	}
 
 	if ipfsExists {
-		// Interact with IPFS to add pin
-		err = s.pinToIPFSCluster(ctx, pin.Cid)
-		if err != nil {
-			s.DeletePinByRequestId(ctx, requestId)
-			return createErrorResponse(http.StatusFailedDependency, "PIN_TO_CLUSTER_FAILED", err.Error()), err
-		}
-
 		// Queue the blockchain operation
 		go s.handleUploadManifest(ctx, pin.Cid, requestId)
 	}
 
-	return Response(http.StatusAccepted, map[string]string{"requestId": requestId}), nil
+	// Convert pin.Cid to api.Cid
+	c, err := api.DecodeCid(pin.Cid)
+	if err != nil {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+	}
+
+	// Call IPFS Cluster status endpoint to get additional details
+	pinStatus, err := s.ipfsClusterAPI.Status(ctx, c, true)
+	if err != nil {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
+	}
+
+	// Extract additional details from the status response
+	delegates := []string{}
+	for _, peer := range pinStatus.PeerMap {
+		for _, addr := range peer.IPFSAddresses {
+			delegates = append(delegates, addr.String())
+		}
+	}
+
+	info := map[string]string{
+		"status_details": "Queue position: 0 of 0", // You may update this with actual status details if available
+	}
+
+	response := PinStatus{
+		Requestid: requestId,
+		Status:    "queued",
+		Created:   time.Now(),
+		Pin: Pin{
+			Cid:     pin.Cid,
+			Name:    pin.Name,
+			Origins: pin.Origins,
+			Meta:    pin.Meta,
+		},
+		Delegates: delegates,
+		Info:      info,
+	}
+
+	return Response(http.StatusAccepted, response), nil
 }
 
 func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {

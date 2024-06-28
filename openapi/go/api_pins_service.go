@@ -733,7 +733,7 @@ func mapStatus(ipfsStatus string) Status {
 	switch ipfsStatus {
 	case "pin_error", "unpinned":
 		return "failed"
-	case "pin_queued":
+	case "pin_queued", "remote":
 		return "queued"
 	default:
 		return Status(ipfsStatus) // Use the original status if no custom mapping is required

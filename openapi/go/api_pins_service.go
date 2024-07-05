@@ -496,6 +496,10 @@ func (s *PinsAPIService) getPinByRequestID(ctx context.Context, requestid string
 	}
 
 	if len(pinStatuses) > 0 {
+		if pinStatuses[0].Created.IsZero() {
+			pinStatuses[0].Created = pin.Created
+		}
+
 		return pinStatuses[0], username, nil
 	}
 

@@ -18,6 +18,7 @@ type FirestoreService struct {
 type PinWithRequest struct {
 	Pin       Pin
 	RequestId string
+	Created   time.Time
 }
 
 func NewFirestoreService(ctx context.Context, credentialsFile string) (*FirestoreService, error) {
@@ -157,10 +158,14 @@ func (s *FirestoreService) GetPinByRequestID(ctx context.Context, requestID stri
 	for _, doc := range docs {
 		data := doc.Data()
 		username = data["username"].(string)
+		createdAt, err := doc.DataAt("created_at")
+		if err != nil {
+			return PinStatus{}, "", err
+		}
 		pinStatus = PinStatus{
 			Requestid: requestID,
 			Status:    Status(data["status"].(string)),
-			Created:   data["created_at"].(time.Time),
+			Created:   createdAt.(time.Time),
 			Pin: Pin{
 				Cid:     data["cid"].(string),
 				Name:    data["name"].(string),
@@ -269,6 +274,11 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 			}
 		}
 
+		createdAt, err := doc.DataAt("created_at")
+		if err != nil {
+			return nil, 0, err
+		}
+
 		pin := PinWithRequest{
 			Pin: Pin{
 				Cid:     doc.Data()["cid"].(string),
@@ -277,6 +287,7 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 				Meta:    meta,
 			},
 			RequestId: doc.Data()["requestid"].(string),
+			Created:   createdAt.(time.Time),
 		}
 
 		// Perform post-query filtering for partial and ipartial matches

@@ -21,11 +21,13 @@ type CidWithRequestId struct {
 	Cid       string
 	RequestId string
 	Name      string
+	Created   time.Time
 }
 
 type RequestIdWithName struct {
 	RequestId string
 	Name      string
+	Created   time.Time
 }
 
 type PinsAPIService struct {
@@ -420,6 +422,7 @@ func (s *PinsAPIService) GetPins(ctx context.Context, cid []string, name string,
 			Cid:       pin.Pin.Cid,
 			RequestId: pin.RequestId,
 			Name:      pin.Pin.Name,
+			Created:   pin.Created,
 		}
 	}
 	log.Printf("fetched: %v ", cidsWithRequestId)
@@ -681,6 +684,7 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 		cidToRequestId[cidStr] = RequestIdWithName{
 			RequestId: cidWithRequestId.RequestId,
 			Name:      cidWithRequestId.Name,
+			Created:   cidWithRequestId.Created,
 		}
 	}
 
@@ -702,6 +706,7 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 			requestIdWithName := cidToRequestId[status.Cid.String()]
 			requestId := requestIdWithName.RequestId
 			name := requestIdWithName.Name
+			createdFromDatastore := requestIdWithName.Created
 			customStatus := mapStatus(string(Status(pinInfo.Status.String())))
 
 			// Use the name from the status if it's not empty, otherwise use the name from the map
@@ -709,10 +714,15 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 				name = status.Name
 			}
 
+			created := status.Created
+			if created.IsZero() {
+				created = createdFromDatastore
+			}
+
 			pinStatuses = append(pinStatuses, PinStatus{
 				Requestid: requestId,
 				Status:    customStatus, // Convert TrackerStatus to string
-				Created:   status.Created,
+				Created:   created,
 				Pin: Pin{
 					Cid:     status.Cid.String(),
 					Name:    name,

@@ -393,6 +393,7 @@ func (s *PinsAPIService) GetPinByRequestId(ctx context.Context, requestid string
 	}
 
 	if len(pinStatuses) > 0 {
+		pinStatuses[0].Created = pin.Created
 		return Response(http.StatusOK, pinStatuses[0]), nil
 	}
 

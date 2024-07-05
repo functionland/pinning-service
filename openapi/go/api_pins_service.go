@@ -496,9 +496,7 @@ func (s *PinsAPIService) getPinByRequestID(ctx context.Context, requestid string
 	}
 
 	if len(pinStatuses) > 0 {
-		if pinStatuses[0].Created.IsZero() {
-			pinStatuses[0].Created = pin.Created
-		}
+		pinStatuses[0].Created = pin.Created
 
 		return pinStatuses[0], username, nil
 	}
@@ -718,15 +716,10 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 				name = status.Name
 			}
 
-			created := status.Created
-			if created.IsZero() {
-				created = createdFromDatastore
-			}
-
 			pinStatuses = append(pinStatuses, PinStatus{
 				Requestid: requestId,
 				Status:    customStatus, // Convert TrackerStatus to string
-				Created:   created,
+				Created:   createdFromDatastore,
 				Pin: Pin{
 					Cid:     status.Cid.String(),
 					Name:    name,

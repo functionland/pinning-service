@@ -261,16 +261,26 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 	var pins []PinWithRequest
 	for _, doc := range docs {
 		var origins []string
-		if doc.Data()["origins"] != nil {
-			origins = doc.Data()["origins"].([]string)
+		if originsInterface, ok := doc.Data()["origins"]; ok {
+			if originsSlice, ok := originsInterface.([]interface{}); ok {
+				origins = make([]string, len(originsSlice))
+				for i, v := range originsSlice {
+					if str, ok := v.(string); ok {
+						origins[i] = str
+					}
+				}
+			}
 		}
 
 		var meta map[string]string
-		if doc.Data()["meta"] != nil {
-			metaInterface := doc.Data()["meta"].(map[string]interface{})
-			meta = make(map[string]string, len(metaInterface))
-			for k, v := range metaInterface {
-				meta[k] = v.(string)
+		if metaInterface, ok := doc.Data()["meta"]; ok {
+			if metaMap, ok := metaInterface.(map[string]interface{}); ok {
+				meta = make(map[string]string, len(metaMap))
+				for k, v := range metaMap {
+					if str, ok := v.(string); ok {
+						meta[k] = str
+					}
+				}
 			}
 		}
 

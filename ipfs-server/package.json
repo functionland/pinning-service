@@ -1,14 +1,14 @@
 {
   "name": "ipfs-gateway",
-  "type": "module",
   "bin": "server.js",
   "scripts": {
-    "build": "esbuild server.js --bundle --platform=node --format=esm --target=node18 --outfile=dist/bundle.mjs && pkg ./dist/bundle.mjs --target node18-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode"
+    "build": "esbuild server.js --bundle --platform=node --format=cjs --target=node18 --outfile=dist/bundle.cjs && pkg ./dist/bundle.cjs --target node18-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode"
   },
   "pkg": {
     "assets": [
-      "../firebase.json",
-      "node_modules/kubo-rpc-client/**/*"
+      "firebase.json",
+      "node_modules/kubo-rpc-client/**/*",
+      "node_modules/file-type/**/*"
     ],
     "targets": [
       "node18-linux-x64"

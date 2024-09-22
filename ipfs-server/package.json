@@ -6,7 +6,7 @@
   },
   "pkg": {
     "assets": [
-      "firebase.json",
+      "../firebase.json",
       "node_modules/kubo-rpc-client/**/*",
       "node_modules/file-type/**/*"
     ],

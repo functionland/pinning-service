@@ -1,22 +1,25 @@
 import express from 'express';
 import multer from 'multer';
-import * as kuboRpcClient from 'kubo-rpc-client';
-const { create } = kuboRpcClient;
-import fs, { readFileSync } from 'fs';
+import { create } from 'kubo-rpc-client';
+import fs from 'fs';
+import { readFileSync } from 'fs';
 import admin from 'firebase-admin';
 import { fileTypeFromBuffer } from 'file-type';
-
 import path from 'path';
+import { fileURLToPath } from 'url';
 
-const __dirname = process.cwd();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// Initialize Firebase Admin SDK
-const serviceAccount = JSON.parse(readFileSync(path.join(__dirname, 'firebase.json'), 'utf8'));
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+function initializeFirebase() {
+  const serviceAccount = JSON.parse(readFileSync(path.join(__dirname, 'firebase.json'), 'utf8'));
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  return admin.firestore();
+}
 
-const db = admin.firestore();
+const db = initializeFirebase();
 
 const app = express();
 const upload = multer({ dest: 'uploads/' });

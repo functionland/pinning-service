@@ -3,7 +3,7 @@
   "type": "module",
   "bin": "server.js",
   "scripts": {
-    "build": "webpack --mode production --config webpack.config.mjs && pkg ./dist/bundle.js --target node18-linux-x64 -o ./dist/ipfs-gateway --public"
+    "build": "esbuild server.js --bundle --platform=node --target=node18 --outfile=dist/bundle.js && pkg ./dist/bundle.js --target node18-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode"
   },
   "pkg": {
     "assets": [
@@ -30,6 +30,7 @@
     "babel-loader": "^9.2.1",
     "buffer": "^6.0.3",
     "crypto-browserify": "^3.12.0",
+    "esbuild": "^0.24.0",
     "json-loader": "^0.5.7",
     "stream-browserify": "^3.0.0",
     "webpack": "^5.94.0",

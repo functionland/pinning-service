@@ -1,6 +1,7 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
 import nodeExternals from 'webpack-node-externals';
+import webpack from 'webpack';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,7 +42,17 @@ export default {
       }
     ]
   },
+  plugins: [
+    new webpack.ProvidePlugin({
+      kuboRpcClient: 'kubo-rpc-client'
+    })
+  ],
   resolve: {
-    extensions: ['.js', '.json']
-  }
+    fallback: {
+      "stream": 'stream-browserify',
+      "buffer": 'buffer',
+      "crypto": 'crypto-browserify'
+    }
+  },
+  externals: [nodeExternals(), 'kubo-rpc-client']
 };

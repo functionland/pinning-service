@@ -1,6 +1,7 @@
 import express from 'express';
 import multer from 'multer';
-import { create } from 'kubo-rpc-client';
+import * as kuboRpcClient from 'kubo-rpc-client';
+const { create } = kuboRpcClient;
 import fs, { readFileSync } from 'fs';
 import admin from 'firebase-admin';
 import { fileURLToPath } from 'url';

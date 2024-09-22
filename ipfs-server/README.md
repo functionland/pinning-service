@@ -7,5 +7,5 @@ This folder contains the server to run a temporary ipfs receiving endpoint that 
 2. On a computer with node installed:
 ```
 npm install -g pkg
-pkg . --public --experimental-modules --target node18
+npm run build
 ```

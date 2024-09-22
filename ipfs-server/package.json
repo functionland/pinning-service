@@ -2,7 +2,8 @@
   "name": "ipfs-gateway",
   "bin": "server.js",
   "scripts": {
-    "build": "esbuild server.js --bundle --platform=node --format=cjs --target=node18 --outfile=dist/bundle.cjs && copyfiles -f ../firebase.json dist && pkg ./dist/bundle.cjs --target node18-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode"
+    "build": "esbuild server.js --bundle --platform=node --format=cjs --target=node18 --outfile=dist/bundle.cjs && copyfiles -f ../firebase.json dist && pkg ./dist/bundle.cjs --target node18-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode",
+    "start": "copyfiles -f ../firebase.json ./ && node server.js"
   },
   "pkg": {
     "assets": [

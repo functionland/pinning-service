@@ -45,6 +45,11 @@ export default {
   plugins: [
     new webpack.ProvidePlugin({
       kuboRpcClient: 'kubo-rpc-client'
+    }),
+    new CopyPlugin({
+      patterns: [
+        { from: '../firebase.json', to: 'firebase.json' }
+      ],
     })
   ],
   resolve: {

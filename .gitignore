@@ -22,3 +22,5 @@ go.work
 .history
 .env
 firebase.json
+ipfs-server/node_modules
+ipfs-server/package-lock.json

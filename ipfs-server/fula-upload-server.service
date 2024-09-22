@@ -1,0 +1,17 @@
+[Unit]
+Description=IPFS Gateway Server
+After=network.target
+
+[Service]
+ExecStart=/home/ubuntu/pinning-service/ipfs-server/ipfs-gateway
+Restart=on-failure
+RestartSec=30
+User=root
+Environment=PATH=/usr/bin:/usr/local/bin
+Environment=NODE_ENV=production
+WorkingDirectory=/home/ubuntu/pinning-service
+StartLimitBurst=3
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

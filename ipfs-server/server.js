@@ -5,6 +5,7 @@ import fs from 'fs';
 import admin from 'firebase-admin';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { fileTypeFromBuffer } from 'file-type';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -105,6 +106,46 @@ app.post('/upload', authenticate, upload.single('file'), async (req, res) => {
   } catch (error) {
     console.error('Error uploading to IPFS:', error);
     res.status(500).send('Error uploading file to IPFS');
+  }
+});
+
+app.get('/gateway/:ipfs_cid', async (req, res) => {
+  const cid = req.params.ipfs_cid;
+  
+  try {
+    // Fetch the content from IPFS
+    const chunks = [];
+    for await (const chunk of ipfs.cat(cid)) {
+      chunks.push(chunk);
+    }
+    const content = Buffer.concat(chunks);
+
+    // Determine the content type
+    let contentType = 'application/octet-stream'; // Default content type
+    
+    try {
+      const type = await fileTypeFromBuffer(content);
+      if (type) {
+        contentType = type.mime;
+      } else {
+        // If file-type can't determine the type, check if it's text
+        if (content.toString().trim().length === content.length) {
+          contentType = 'text/plain';
+        }
+      }
+    } catch (error) {
+      console.error('Error determining content type:', error);
+    }
+
+    // Set the appropriate headers
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Length', content.length);
+
+    // Send the content
+    res.send(content);
+  } catch (error) {
+    console.error('Error fetching from IPFS:', error);
+    res.status(500).send('Error fetching content from IPFS');
   }
 });
 

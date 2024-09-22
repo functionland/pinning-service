@@ -3,7 +3,7 @@ Description=IPFS Gateway Server
 After=network.target
 
 [Service]
-ExecStart=/home/ubuntu/pinning-service/ipfs-server/ipfs-gateway
+ExecStart=/home/ubuntu/pinning-service/ipfs-server/dist/ipfs-gateway
 Restart=on-failure
 RestartSec=30
 User=root

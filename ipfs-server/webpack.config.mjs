@@ -53,6 +53,5 @@ export default {
       "buffer": 'buffer',
       "crypto": 'crypto-browserify'
     }
-  },
-  externals: [nodeExternals(), 'kubo-rpc-client']
+  }
 };

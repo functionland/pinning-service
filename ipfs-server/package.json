@@ -7,7 +7,8 @@
   },
   "pkg": {
     "assets": [
-      "../firebase.json"
+      "../firebase.json",
+      "node_modules/kubo-rpc-client/**/*"
     ],
     "targets": [
       "node18-linux-x64"

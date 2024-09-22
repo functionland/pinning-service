@@ -14,7 +14,8 @@ let create, fileTypeFromBuffer;
   fileTypeFromBuffer = fileType.fileTypeFromBuffer;
 
   function initializeFirebase() {
-    const serviceAccount = JSON.parse(fs.readFileSync(path.join(__dirname, 'firebase.json'), 'utf8'));
+    const firebasePath = path.join(process.cwd(), 'firebase.json');
+    const serviceAccount = JSON.parse(fs.readFileSync(firebasePath, 'utf8'));
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount)
     });

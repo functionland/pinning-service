@@ -155,6 +155,9 @@ let create, fileTypeFromBuffer;
     }
   });
 
+  // Serve ACME challenge files
+  app.use('/.well-known/acme-challenge', express.static(path.join(__dirname, '.well-known', 'acme-challenge'), { dotfiles: 'allow' }));
+
   const PORT = process.env.PORT || 3300;
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);

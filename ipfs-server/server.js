@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import { create } from 'kubo-rpc-client';
-import fs from 'fs';
+import fs, { readFileSync } from 'fs';
 import admin from 'firebase-admin';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -11,7 +11,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Initialize Firebase Admin SDK
-import serviceAccount from '../firebase.json' assert { type: 'json' };
+const serviceAccount = JSON.parse(readFileSync(join(__dirname, '../firebase.json'), 'utf8'));
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });

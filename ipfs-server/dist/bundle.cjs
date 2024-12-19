@@ -237710,24 +237710,28 @@ var fileTypeFromBuffer2;
       } catch (error) {
         if (error.message.includes("unknown node type")) {
           const block = await ipfs.block.get(cid);
-          content = block.data;
+          content = Buffer.from(block.data);
         } else {
           throw error;
         }
       }
+      if (!content) {
+        throw new Error("No content retrieved from IPFS");
+      }
       let contentType = "application/octet-stream";
+      let filename = `${cid}.bin`;
       try {
         const type = await fileTypeFromBuffer2(content);
         if (type) {
           contentType = type.mime;
-        } else if (content.toString().trim().length === content.length) {
-          contentType = "text/plain";
+          filename = `${cid}.${type.ext}`;
         }
       } catch (error) {
-        console.error("Error determining content type:", error);
+        console.log("Using default content type for", cid);
       }
       res.setHeader("Content-Type", contentType);
       res.setHeader("Content-Length", content.length);
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
       res.send(content);
     } catch (error) {
       console.error("Error fetching from IPFS:", error);

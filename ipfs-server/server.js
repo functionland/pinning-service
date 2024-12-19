@@ -131,33 +131,44 @@ let create, fileTypeFromBuffer;
         if (error.message.includes('unknown node type')) {
           // If cat fails, try to get the raw block
           const block = await ipfs.block.get(cid);
-          content = block.data;
+          content = Buffer.from(block.data);
         } else {
           throw error;
         }
       }
   
-      // Determine the content type
+      if (!content) {
+        throw new Error('No content retrieved from IPFS');
+      }
+  
+      // Default content type for raw data
       let contentType = 'application/octet-stream';
+      let filename = `${cid}.bin`;
+  
+      // Try to detect file type only if content exists
       try {
         const type = await fileTypeFromBuffer(content);
         if (type) {
           contentType = type.mime;
-        } else if (content.toString().trim().length === content.length) {
-          contentType = 'text/plain';
+          filename = `${cid}.${type.ext}`;
         }
       } catch (error) {
-        console.error('Error determining content type:', error);
+        // Silently fall back to default content type
+        console.log('Using default content type for', cid);
       }
   
+      // Set headers for file download
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Length', content.length);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       res.send(content);
+  
     } catch (error) {
       console.error('Error fetching from IPFS:', error);
       res.status(500).send('Error fetching content from IPFS');
     }
   });
+  
   
 
   // Serve ACME challenge files

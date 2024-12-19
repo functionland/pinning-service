@@ -237700,20 +237700,28 @@ var fileTypeFromBuffer2;
   app.get("/gateway/:ipfs_cid", async (req, res) => {
     const cid = req.params.ipfs_cid;
     try {
-      const chunks = [];
-      for await (const chunk of ipfs.cat(cid)) {
-        chunks.push(chunk);
+      let content;
+      try {
+        const chunks = [];
+        for await (const chunk of ipfs.cat(cid)) {
+          chunks.push(chunk);
+        }
+        content = Buffer.concat(chunks);
+      } catch (error) {
+        if (error.message.includes("unknown node type")) {
+          const block = await ipfs.block.get(cid);
+          content = block.data;
+        } else {
+          throw error;
+        }
       }
-      const content = Buffer.concat(chunks);
       let contentType = "application/octet-stream";
       try {
         const type = await fileTypeFromBuffer2(content);
         if (type) {
           contentType = type.mime;
-        } else {
-          if (content.toString().trim().length === content.length) {
-            contentType = "text/plain";
-          }
+        } else if (content.toString().trim().length === content.length) {
+          contentType = "text/plain";
         }
       } catch (error) {
         console.error("Error determining content type:", error);

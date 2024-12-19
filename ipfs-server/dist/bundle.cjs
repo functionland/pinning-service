@@ -237702,39 +237702,21 @@ var fileTypeFromBuffer2;
     try {
       let content;
       try {
+        const block = await ipfs.block.get(cid);
+        content = block;
+      } catch (error) {
         const chunks = [];
         for await (const chunk of ipfs.cat(cid)) {
           chunks.push(chunk);
         }
         content = Buffer.concat(chunks);
-      } catch (error) {
-        if (error.message.includes("unknown node type")) {
-          const block = await ipfs.block.get(cid);
-          if (!block || !block.data) {
-            throw new Error("No data in IPFS block");
-          }
-          content = block.data;
-        } else {
-          throw error;
-        }
       }
       if (!content) {
         throw new Error("No content retrieved from IPFS");
       }
       res.setHeader("Content-Type", "application/octet-stream");
       res.setHeader("Content-Length", content.length);
-      res.setHeader("Content-Disposition", `attachment; filename="${cid}.bin"`);
-      if (Buffer.isBuffer(content)) {
-        try {
-          const type = await fileTypeFromBuffer2(content);
-          if (type) {
-            res.setHeader("Content-Type", type.mime);
-            res.setHeader("Content-Disposition", `attachment; filename="${cid}.${type.ext}"`);
-          }
-        } catch (error) {
-          console.log("Using default content type for", cid);
-        }
-      }
+      res.setHeader("Content-Disposition", `attachment; filename="${cid}"`);
       res.send(content);
     } catch (error) {
       console.error("Error fetching from IPFS:", error);

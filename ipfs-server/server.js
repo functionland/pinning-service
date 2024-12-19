@@ -121,25 +121,16 @@ let create, fileTypeFromBuffer;
     try {
       let content;
       try {
-        // First try to get content using cat
+        // Try direct block get first since we know it works
+        const block = await ipfs.block.get(cid);
+        content = block;
+      } catch (error) {
+        // Fallback to cat only if block.get fails
         const chunks = [];
         for await (const chunk of ipfs.cat(cid)) {
           chunks.push(chunk);
         }
         content = Buffer.concat(chunks);
-      } catch (error) {
-        if (error.message.includes('unknown node type')) {
-          // If cat fails, try to get the raw block
-          const block = await ipfs.block.get(cid);
-          // Check if block exists and has data
-          if (!block || !block.data) {
-            throw new Error('No data in IPFS block');
-          }
-          // Handle block.data directly as it should already be a Buffer
-          content = block.data;
-        } else {
-          throw error;
-        }
       }
   
       if (!content) {
@@ -149,22 +140,9 @@ let create, fileTypeFromBuffer;
       // Set basic headers for raw data download
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Length', content.length);
-      res.setHeader('Content-Disposition', `attachment; filename="${cid}.bin"`);
-      
-      // Only attempt file type detection if content exists and is valid
-      if (Buffer.isBuffer(content)) {
-        try {
-          const type = await fileTypeFromBuffer(content);
-          if (type) {
-            res.setHeader('Content-Type', type.mime);
-            res.setHeader('Content-Disposition', `attachment; filename="${cid}.${type.ext}"`);
-          }
-        } catch (error) {
-          // Silently continue with default content type
-          console.log('Using default content type for', cid);
-        }
-      }
+      res.setHeader('Content-Disposition', `attachment; filename="${cid}"`);
   
+      // Send the raw content
       res.send(content);
   
     } catch (error) {
@@ -172,7 +150,6 @@ let create, fileTypeFromBuffer;
       res.status(500).send('Error fetching content from IPFS');
     }
   });  
-  
   
 
   // Serve ACME challenge files

@@ -119,41 +119,46 @@ let create, fileTypeFromBuffer;
     const cid = req.params.ipfs_cid;
     
     try {
-      // Fetch the content from IPFS
-      const chunks = [];
-      for await (const chunk of ipfs.cat(cid)) {
-        chunks.push(chunk);
+      let content;
+      try {
+        // First try to get content using cat
+        const chunks = [];
+        for await (const chunk of ipfs.cat(cid)) {
+          chunks.push(chunk);
+        }
+        content = Buffer.concat(chunks);
+      } catch (error) {
+        if (error.message.includes('unknown node type')) {
+          // If cat fails, try to get the raw block
+          const block = await ipfs.block.get(cid);
+          content = block.data;
+        } else {
+          throw error;
+        }
       }
-      const content = Buffer.concat(chunks);
-
+  
       // Determine the content type
-      let contentType = 'application/octet-stream'; // Default content type
-      
+      let contentType = 'application/octet-stream';
       try {
         const type = await fileTypeFromBuffer(content);
         if (type) {
           contentType = type.mime;
-        } else {
-          // If file-type can't determine the type, check if it's text
-          if (content.toString().trim().length === content.length) {
-            contentType = 'text/plain';
-          }
+        } else if (content.toString().trim().length === content.length) {
+          contentType = 'text/plain';
         }
       } catch (error) {
         console.error('Error determining content type:', error);
       }
-
-      // Set the appropriate headers
+  
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Length', content.length);
-
-      // Send the content
       res.send(content);
     } catch (error) {
       console.error('Error fetching from IPFS:', error);
       res.status(500).send('Error fetching content from IPFS');
     }
   });
+  
 
   // Serve ACME challenge files
   app.use('/.well-known/acme-challenge', express.static(path.join(__dirname, '.well-known', 'acme-challenge'), { dotfiles: 'allow' }));

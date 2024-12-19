@@ -237701,47 +237701,42 @@ var fileTypeFromBuffer2;
     const cid = req.params.ipfs_cid;
     const isRawRequest = "raw" in req.query;
     try {
-      let content;
-      try {
-        const block = await ipfs.block.get(cid);
-        content = block;
-      } catch (error) {
-        const chunks = [];
-        for await (const chunk of ipfs.cat(cid)) {
-          chunks.push(chunk);
-        }
-        content = Buffer.concat(chunks);
-      }
-      if (!content) {
-        throw new Error("No content retrieved from IPFS");
-      }
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "*");
       if (isRawRequest) {
-        res.setHeader("Content-Type", "application/octet-stream");
-        res.setHeader("Content-Length", content.length);
-        res.setHeader("Content-Disposition", `attachment; filename="${cid}"`);
+        try {
+          const block = await ipfs.block.get(cid);
+          res.setHeader("Content-Type", "application/octet-stream");
+          res.setHeader("Content-Length", block.length);
+          res.setHeader("Content-Disposition", `attachment; filename="${cid}"`);
+          res.send(block);
+        } catch (error) {
+          throw error;
+        }
       } else {
+        const chunks = [];
+        for await (const chunk of ipfs.cat(cid)) {
+          chunks.push(chunk);
+        }
+        const content = Buffer.concat(chunks);
         let contentType = "application/octet-stream";
-        let filename = `${cid}.bin`;
         try {
           const type = await fileTypeFromBuffer2(content);
           if (type) {
             contentType = type.mime;
-            filename = `${cid}.${type.ext}`;
-          } else if (content.toString().trim().length === content.length) {
-            contentType = "text/plain";
-            filename = `${cid}.txt`;
+          } else {
+            if (content.toString().trim().length === content.length) {
+              contentType = "text/plain";
+            }
           }
         } catch (error) {
-          console.log("Using default content type for", cid);
+          console.error("Error determining content type:", error);
         }
         res.setHeader("Content-Type", contentType);
         res.setHeader("Content-Length", content.length);
-        res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+        res.send(content);
       }
-      res.send(content);
     } catch (error) {
       console.error("Error fetching from IPFS:", error);
       res.status(500).send("Error fetching content from IPFS");

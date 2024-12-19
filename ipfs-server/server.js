@@ -120,65 +120,60 @@ let create, fileTypeFromBuffer;
     const isRawRequest = 'raw' in req.query;
     
     try {
-      let content;
-      try {
-        // Try direct block get first since we know it works
-        const block = await ipfs.block.get(cid);
-        content = block;
-      } catch (error) {
-        // Fallback to cat only if block.get fails
-        const chunks = [];
-        for await (const chunk of ipfs.cat(cid)) {
-          chunks.push(chunk);
-        }
-        content = Buffer.concat(chunks);
-      }
-  
-      if (!content) {
-        throw new Error('No content retrieved from IPFS');
-      }
-  
       // Set CORS headers
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', '*');
   
       if (isRawRequest) {
-        // Send as raw data
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Content-Length', content.length);
-        res.setHeader('Content-Disposition', `attachment; filename="${cid}"`);
+        // Handle raw block request
+        try {
+          const block = await ipfs.block.get(cid);
+          res.setHeader('Content-Type', 'application/octet-stream');
+          res.setHeader('Content-Length', block.length);
+          res.setHeader('Content-Disposition', `attachment; filename="${cid}"`);
+          res.send(block);
+        } catch (error) {
+          throw error;
+        }
       } else {
-        // Try to detect file type
-        let contentType = 'application/octet-stream';
-        let filename = `${cid}.bin`;
+        // Original behavior for regular requests
+        const chunks = [];
+        for await (const chunk of ipfs.cat(cid)) {
+          chunks.push(chunk);
+        }
+        const content = Buffer.concat(chunks);
   
+        // Determine the content type
+        let contentType = 'application/octet-stream'; // Default content type
+        
         try {
           const type = await fileTypeFromBuffer(content);
           if (type) {
             contentType = type.mime;
-            filename = `${cid}.${type.ext}`;
-          } else if (content.toString().trim().length === content.length) {
-            contentType = 'text/plain';
-            filename = `${cid}.txt`;
+          } else {
+            // If file-type can't determine the type, check if it's text
+            if (content.toString().trim().length === content.length) {
+              contentType = 'text/plain';
+            }
           }
         } catch (error) {
-          console.log('Using default content type for', cid);
+          console.error('Error determining content type:', error);
         }
   
+        // Set the appropriate headers
         res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Length', content.length);
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  
+        // Send the content
+        res.send(content);
       }
-  
-      // Send the content
-      res.send(content);
-  
     } catch (error) {
       console.error('Error fetching from IPFS:', error);
       res.status(500).send('Error fetching content from IPFS');
     }
-  });  
+  });
+  
   
 
   // Serve ACME challenge files

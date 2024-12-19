@@ -237697,6 +237697,12 @@ var fileTypeFromBuffer2;
       res.status(500).send("Error uploading file to IPFS");
     }
   });
+  app.options("/gateway/:ipfs_cid", (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "*");
+    res.sendStatus(200);
+  });
   app.get("/gateway/:ipfs_cid", async (req, res) => {
     const cid = req.params.ipfs_cid;
     const isRawRequest = "raw" in req.query;

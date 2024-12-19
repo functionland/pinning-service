@@ -136,11 +136,13 @@ let create, fileTypeFromBuffer;
         // Handle raw block request
         try {
           const block = await ipfs.block.get(cid);
-          res.setHeader('Content-Type', 'application/octet-stream');
+          res.setHeader('Content-Type', 'application/vnd.ipld.raw');
           res.setHeader('Content-Length', block.length);
-          res.setHeader('Content-Disposition', `attachment; filename="${cid}"`);
-          res.send(block);
+          // Send the raw buffer directly
+          res.send(Buffer.from(block));
+          return;
         } catch (error) {
+          console.error(error);
           throw error;
         }
       } else {

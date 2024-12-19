@@ -131,7 +131,12 @@ let create, fileTypeFromBuffer;
         if (error.message.includes('unknown node type')) {
           // If cat fails, try to get the raw block
           const block = await ipfs.block.get(cid);
-          content = Buffer.from(block.data);
+          // Check if block exists and has data
+          if (!block || !block.data) {
+            throw new Error('No data in IPFS block');
+          }
+          // Handle block.data directly as it should already be a Buffer
+          content = block.data;
         } else {
           throw error;
         }
@@ -141,33 +146,32 @@ let create, fileTypeFromBuffer;
         throw new Error('No content retrieved from IPFS');
       }
   
-      // Default content type for raw data
-      let contentType = 'application/octet-stream';
-      let filename = `${cid}.bin`;
-  
-      // Try to detect file type only if content exists
-      try {
-        const type = await fileTypeFromBuffer(content);
-        if (type) {
-          contentType = type.mime;
-          filename = `${cid}.${type.ext}`;
+      // Set basic headers for raw data download
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', content.length);
+      res.setHeader('Content-Disposition', `attachment; filename="${cid}.bin"`);
+      
+      // Only attempt file type detection if content exists and is valid
+      if (Buffer.isBuffer(content)) {
+        try {
+          const type = await fileTypeFromBuffer(content);
+          if (type) {
+            res.setHeader('Content-Type', type.mime);
+            res.setHeader('Content-Disposition', `attachment; filename="${cid}.${type.ext}"`);
+          }
+        } catch (error) {
+          // Silently continue with default content type
+          console.log('Using default content type for', cid);
         }
-      } catch (error) {
-        // Silently fall back to default content type
-        console.log('Using default content type for', cid);
       }
   
-      // Set headers for file download
-      res.setHeader('Content-Type', contentType);
-      res.setHeader('Content-Length', content.length);
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       res.send(content);
   
     } catch (error) {
       console.error('Error fetching from IPFS:', error);
       res.status(500).send('Error fetching content from IPFS');
     }
-  });
+  });  
   
   
 

@@ -237710,7 +237710,10 @@ var fileTypeFromBuffer2;
       } catch (error) {
         if (error.message.includes("unknown node type")) {
           const block = await ipfs.block.get(cid);
-          content = Buffer.from(block.data);
+          if (!block || !block.data) {
+            throw new Error("No data in IPFS block");
+          }
+          content = block.data;
         } else {
           throw error;
         }
@@ -237718,20 +237721,20 @@ var fileTypeFromBuffer2;
       if (!content) {
         throw new Error("No content retrieved from IPFS");
       }
-      let contentType = "application/octet-stream";
-      let filename = `${cid}.bin`;
-      try {
-        const type = await fileTypeFromBuffer2(content);
-        if (type) {
-          contentType = type.mime;
-          filename = `${cid}.${type.ext}`;
-        }
-      } catch (error) {
-        console.log("Using default content type for", cid);
-      }
-      res.setHeader("Content-Type", contentType);
+      res.setHeader("Content-Type", "application/octet-stream");
       res.setHeader("Content-Length", content.length);
-      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader("Content-Disposition", `attachment; filename="${cid}.bin"`);
+      if (Buffer.isBuffer(content)) {
+        try {
+          const type = await fileTypeFromBuffer2(content);
+          if (type) {
+            res.setHeader("Content-Type", type.mime);
+            res.setHeader("Content-Disposition", `attachment; filename="${cid}.${type.ext}"`);
+          }
+        } catch (error) {
+          console.log("Using default content type for", cid);
+        }
+      }
       res.send(content);
     } catch (error) {
       console.error("Error fetching from IPFS:", error);

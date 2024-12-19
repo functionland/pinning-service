@@ -237714,6 +237714,9 @@ var fileTypeFromBuffer2;
       if (!content) {
         throw new Error("No content retrieved from IPFS");
       }
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "*");
       res.setHeader("Content-Type", "application/octet-stream");
       res.setHeader("Content-Length", content.length);
       res.setHeader("Content-Disposition", `attachment; filename="${cid}"`);

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -164,8 +165,15 @@ func (s *UserService) GetUserPoolFromSession(ctx context.Context, authToken stri
 			poolId = int(v)
 		case int:
 			poolId = v
+		case string:
+			// Attempt to convert string to int
+			intValue, err := strconv.Atoi(v)
+			if err != nil {
+				return defaultPoolID, fmt.Errorf("pool_id is a string but cannot be converted to int: %v", err)
+			}
+			poolId = intValue
 		default:
-			return defaultPoolID, errors.New("pool_id is not of a type that can be converted to int, actual type: " + fmt.Sprintf("%T", v))
+			return defaultPoolID, fmt.Errorf("pool_id is not of a type that can be converted to int, actual type: %T", v)
 		}
 		return poolId, nil
 	}

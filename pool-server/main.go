@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"strconv"
 
 	"github.com/elazarl/goproxy"
 	openapi "github.com/functionland/pinning-service"
@@ -40,29 +39,12 @@ func ReverseProxyHandler(userService *openapi.UserService) http.Handler {
 			}
 			log.Printf("auth token: %s", authToken)
 
-			// Get the user pool ID, which might be a string or an int
-			poolIdValue, err := userService.GetUserPoolFromSession(req.Context(), authToken)
+			poolId, err = userService.GetUserPoolFromSession(req.Context(), authToken)
 			if err != nil {
 				log.Printf("Error getting user pool: %v", err)
 				poolId = 1
-			} else {
-				// Check if poolIdValue is a string and convert it to an integer
-				switch v := poolIdValue.(type) {
-				case int:
-					poolId = v
-				case string:
-					poolId, err = strconv.Atoi(v) // Convert string to int
-					if err != nil {
-						log.Printf("Error converting pool_id from string to int: %v", err)
-						poolId = 1 // Default value if conversion fails
-					}
-				default:
-					log.Printf("Unexpected type for pool_id: %T", v)
-					poolId = 1 // Default value for unsupported types
-				}
 			}
-
-			log.Printf("Final pool ID: %d", poolId)
+			log.Printf("pool_id: %d", poolId)
 
 			var backendServer string
 			switch poolId {

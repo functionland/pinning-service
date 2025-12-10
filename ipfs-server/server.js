@@ -34,8 +34,23 @@ let create, fileTypeFromBuffer;
     }
   });
 
-  // Create an IPFS client
-  const ipfs = create({ url: 'http://127.0.0.1:5001' });
+  // Create an IPFS client with aggressive timeout settings
+  const ipfs = create({
+    url: 'http://127.0.0.1:5001',
+    timeout: 30000, // 30 second timeout
+    headers: {
+      'User-Agent': 'ipfs-gateway/1.0.0'
+    }
+  });
+
+  // Test IPFS connection on startup
+  try {
+    const version = await ipfs.version();
+    console.log('IPFS connection successful, version:', version.version);
+  } catch (error) {
+    console.error('IPFS connection failed:', error.message);
+    console.error('Make sure IPFS daemon is running on http://127.0.0.1:5001');
+  }
 
   // Authentication middleware
   async function authenticate(req, res, next) {
@@ -93,32 +108,73 @@ let create, fileTypeFromBuffer;
   }
 
   app.post('/upload', authenticate, upload.single('file'), async (req, res) => {
-    console.log('request is authenticated');
+    console.log('Upload request received, authenticated');
+
     if (!req.file) {
+      console.log('No file in request');
       return res.status(400).send('No file uploaded.');
     }
 
+    console.log('File received:', {
+      originalname: req.file.originalname,
+      size: req.file.size,
+      mimetype: req.file.mimetype,
+      path: req.file.path
+    });
+
     try {
       // Read the file from the upload directory
+      console.log('Reading file from disk...');
       const fileData = fs.readFileSync(req.file.path);
+      console.log('File read successfully, size:', fileData.length);
 
-      // Add the file to IPFS with CIDv1
+      // Add the file to IPFS with minimal network interaction
+      console.log('Adding file to IPFS...');
+      console.log('File size:', fileData.length, 'bytes');
+
       const result = await ipfs.add(fileData, {
         cidVersion: 1,
-        hashAlg: 'sha2-256'
+        hashAlg: 'sha2-256',
+        pin: false, // Don't pin to avoid network delays
+        onlyHash: false, // We want to actually add it
+        wrapWithDirectory: false,
+        chunker: 'size-262144', // Use smaller chunks
+        progress: (bytes) => {
+          console.log(`Upload progress: ${bytes} bytes`);
+        }
       });
+
+      console.log('File added to IPFS successfully, CID:', result.cid.toString());
 
       // Remove the temporary file
       fs.unlinkSync(req.file.path);
+      console.log('Temporary file removed');
 
       // Return the IPFS CID and the user's pool ID
-      res.json({ 
+      res.json({
         cid: result.cid.toString(),
         poolId: req.poolId
       });
+      console.log('Response sent successfully');
+
     } catch (error) {
-      console.error('Error uploading to IPFS:', error);
-      res.status(500).send('Error uploading file to IPFS');
+      console.error('Error during upload process:', error);
+      console.error('Error stack:', error.stack);
+
+      // Clean up temporary file if it exists
+      try {
+        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+          console.log('Cleaned up temporary file after error');
+        }
+      } catch (cleanupError) {
+        console.error('Error cleaning up temporary file:', cleanupError);
+      }
+
+      res.status(500).json({
+        error: 'Error uploading file to IPFS',
+        details: error.message
+      });
     }
   });
 

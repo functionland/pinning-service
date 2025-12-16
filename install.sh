@@ -70,12 +70,26 @@ verify_step() {
     fi
 }
 
-# Load existing .env file if it exists
+# Load existing .env files from all services if they exist
 load_existing_env() {
-    local env_file="$1/.env"
-    if [ -f "$env_file" ]; then
-        print_info "Found existing .env file, loading defaults..."
-        source "$env_file" 2>/dev/null || true
+    local target_dir="$1"
+    
+    # Load pinning service env
+    if [ -f "$target_dir/.env" ]; then
+        print_info "Found existing pinning service .env file, loading defaults..."
+        source "$target_dir/.env" 2>/dev/null || true
+    fi
+    
+    # Load ipfs-server env
+    if [ -f "$target_dir/ipfs-server/.env" ]; then
+        print_info "Found existing ipfs-server .env file, loading defaults..."
+        source "$target_dir/ipfs-server/.env" 2>/dev/null || true
+    fi
+    
+    # Load webui env
+    if [ -f "$target_dir/pinning-webui/.env" ]; then
+        print_info "Found existing webui .env file, loading defaults..."
+        source "$target_dir/pinning-webui/.env" 2>/dev/null || true
     fi
 }
 
@@ -283,6 +297,10 @@ DATABASE_PATH=${DATABASE_PATH}
 # IPFS Configuration
 IPFS_API_ADDR=${IPFS_API_ADDR}
 
+# Domain Configuration (for nginx/SSL)
+PINNING_DOMAIN=${PINNING_DOMAIN}
+SSL_EMAIL=${SSL_EMAIL}
+
 # Admin API (optional - set to enable admin endpoints)
 # SYSTEM_KEY=your-secret-admin-key
 EOF
@@ -317,7 +335,7 @@ EnvironmentFile=${target_dir}/.env
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=false
 ReadWritePaths=${target_dir}/data ${target_dir}/logs
 
 # Resource limits
@@ -349,7 +367,7 @@ generate_gateway_env_file() {
 # Generated on $(date)
 
 # Server Configuration
-PORT=${GATEWAY_PORT}
+GATEWAY_PORT=${GATEWAY_PORT}
 
 # Database Configuration (read-only access to pinning service DB)
 DATABASE_PATH=${target_dir}/${DATABASE_PATH}
@@ -361,6 +379,9 @@ IPFS_API_URL=http://127.0.0.1:5001
 UPLOAD_DIR=${target_dir}/ipfs-server/uploads
 MAX_FILE_SIZE=838860800
 IPFS_TIMEOUT=60000
+
+# Domain Configuration (for nginx/SSL)
+IPFS_SERVER_DOMAIN=${IPFS_SERVER_DOMAIN}
 EOF
 
     chmod 600 "$target_dir/ipfs-server/.env"
@@ -395,7 +416,7 @@ EnvironmentFile=${target_dir}/ipfs-server/.env
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=false
 ReadWritePaths=${target_dir}/ipfs-server/uploads
 
 # Resource limits
@@ -453,6 +474,9 @@ SESSION_SECRET=${SESSION_SECRET}
 
 # Pinning service URL
 PINNING_SERVICE_URL=http://localhost:${PORT}
+
+# Domain Configuration (for nginx/SSL)
+WEBUI_DOMAIN=${WEBUI_DOMAIN}
 EOF
 
     chmod 600 "$target_dir/pinning-webui/.env"
@@ -487,7 +511,7 @@ EnvironmentFile=${target_dir}/pinning-webui/.env
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=false
 ReadWritePaths=${target_dir}/data
 
 # Resource limits
@@ -877,6 +901,449 @@ EOF
     fi
 }
 
+# Create nginx configuration for WebUI
+create_webui_nginx_config() {
+    local domain=$1
+    local target_dir=$2
+    local webui_port=$3
+    
+    print_info "Creating nginx configuration for WebUI at $domain..."
+    
+    local config_file="$NGINX_AVAILABLE/$domain"
+    
+    cat > "$config_file" << EOF
+# Nginx configuration for IPFS Pinning WebUI
+# Domain: $domain
+# Generated on $(date)
+
+# Upstream WebUI server
+upstream webui_service {
+    server 127.0.0.1:$webui_port;
+    keepalive 32;
+}
+
+# HTTP server - redirect to HTTPS
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain;
+    
+    # Allow ACME challenge
+    location /.well-known/acme-challenge/ {
+        root ${target_dir}/pinning-webui;
+        allow all;
+    }
+    
+    # Redirect all other traffic to HTTPS
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+# HTTPS server (certbot will add SSL config)
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $domain;
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    
+    # Logging
+    access_log /var/log/nginx/${domain}_access.log;
+    error_log /var/log/nginx/${domain}_error.log;
+    
+    # Proxy all requests to WebUI
+    location / {
+        proxy_pass http://webui_service;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+
+    chmod 644 "$config_file"
+    
+    # Enable the site
+    if [ ! -L "$NGINX_ENABLED/$domain" ]; then
+        ln -s "$config_file" "$NGINX_ENABLED/$domain"
+    fi
+    
+    # Test nginx configuration
+    if nginx -t 2>/dev/null; then
+        print_success "WebUI nginx configuration created and validated"
+        return 0
+    else
+        print_error "WebUI nginx configuration test failed"
+        nginx -t
+        return 1
+    fi
+}
+
+# Setup SSL for WebUI domain
+setup_webui_nginx_ssl() {
+    local domain=$1
+    local email=$2
+    local target_dir=$3
+    local webui_port=$4
+    
+    # Install nginx if needed
+    install_nginx
+    
+    # Create nginx configuration for WebUI
+    if ! create_webui_nginx_config "$domain" "$target_dir" "$webui_port"; then
+        print_error "Failed to create WebUI nginx configuration"
+        return 1
+    fi
+    
+    # Reload nginx to apply configuration
+    reload_nginx
+    
+    # Setup SSL if email provided
+    if [ -n "$email" ]; then
+        if setup_ssl "$domain" "$email"; then
+            print_success "SSL certificate obtained for WebUI"
+        else
+            print_warning "SSL setup failed for WebUI, but nginx is configured"
+        fi
+        
+        # Setup auto-renewal
+        setup_ssl_auto_renewal
+        
+        # Reload nginx after SSL setup
+        reload_nginx
+    else
+        print_warning "No email provided, skipping SSL setup for WebUI"
+        print_info "You can manually run: certbot --nginx -d $domain"
+    fi
+    
+    return 0
+}
+
+# Create nginx configuration for IPFS Server (standalone domain)
+create_ipfs_server_nginx_config() {
+    local domain=$1
+    local target_dir=$2
+    local gateway_port=$3
+    
+    print_info "Creating nginx configuration for IPFS Server at $domain..."
+    
+    local config_file="$NGINX_AVAILABLE/$domain"
+    
+    cat > "$config_file" << EOF
+# Nginx configuration for IPFS Server (Gateway/Upload)
+# Domain: $domain
+# Generated on $(date)
+
+# Upstream IPFS server
+upstream ipfs_server_${gateway_port} {
+    server 127.0.0.1:$gateway_port;
+    keepalive 32;
+}
+
+# HTTP server - redirect to HTTPS
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain;
+    
+    # Allow ACME challenge
+    location /.well-known/acme-challenge/ {
+        root ${target_dir}/ipfs-server;
+        allow all;
+    }
+    
+    # Redirect all other traffic to HTTPS
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+# HTTPS server (certbot will add SSL config)
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $domain;
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    
+    # CORS headers for IPFS content
+    add_header Access-Control-Allow-Origin "*" always;
+    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type" always;
+    
+    # Logging
+    access_log /var/log/nginx/${domain}_access.log;
+    error_log /var/log/nginx/${domain}_error.log;
+    
+    # Client body size for file uploads
+    client_max_body_size 800M;
+    
+    # Timeouts for large file uploads
+    proxy_connect_timeout 60s;
+    proxy_send_timeout 600s;
+    proxy_read_timeout 600s;
+    
+    # Gateway endpoint
+    location /gateway {
+        proxy_pass http://ipfs_server_${gateway_port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection "";
+        
+        # Cache for immutable IPFS content
+        proxy_cache_valid 200 365d;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+    
+    # Upload endpoint
+    location /upload {
+        proxy_pass http://ipfs_server_${gateway_port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection "";
+    }
+    
+    # Health endpoint
+    location /health {
+        proxy_pass http://ipfs_server_${gateway_port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+    
+    # Default - proxy to ipfs server
+    location / {
+        proxy_pass http://ipfs_server_${gateway_port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection "";
+    }
+}
+EOF
+
+    chmod 644 "$config_file"
+    
+    # Enable the site
+    if [ ! -L "$NGINX_ENABLED/$domain" ]; then
+        ln -s "$config_file" "$NGINX_ENABLED/$domain"
+    fi
+    
+    # Test nginx configuration
+    if nginx -t 2>/dev/null; then
+        print_success "IPFS Server nginx configuration created and validated"
+        return 0
+    else
+        print_error "IPFS Server nginx configuration test failed"
+        nginx -t
+        return 1
+    fi
+}
+
+# Setup SSL for IPFS Server domain
+setup_ipfs_server_nginx_ssl() {
+    local domain=$1
+    local email=$2
+    local target_dir=$3
+    local gateway_port=$4
+    
+    # Install nginx if needed
+    install_nginx
+    
+    # Create nginx configuration for IPFS Server
+    if ! create_ipfs_server_nginx_config "$domain" "$target_dir" "$gateway_port"; then
+        print_error "Failed to create IPFS Server nginx configuration"
+        return 1
+    fi
+    
+    # Reload nginx to apply configuration
+    reload_nginx
+    
+    # Setup SSL if email provided
+    if [ -n "$email" ]; then
+        if setup_ssl "$domain" "$email"; then
+            print_success "SSL certificate obtained for IPFS Server"
+        else
+            print_warning "SSL setup failed for IPFS Server, but nginx is configured"
+        fi
+        
+        # Setup auto-renewal
+        setup_ssl_auto_renewal
+        
+        # Reload nginx after SSL setup
+        reload_nginx
+    else
+        print_warning "No email provided, skipping SSL setup for IPFS Server"
+        print_info "You can manually run: certbot --nginx -d $domain"
+    fi
+    
+    return 0
+}
+
+# Create nginx configuration for Pinning API (standalone domain)
+create_pinning_nginx_config() {
+    local domain=$1
+    local target_dir=$2
+    local pinning_port=$3
+    
+    print_info "Creating nginx configuration for Pinning API at $domain..."
+    
+    local config_file="$NGINX_AVAILABLE/$domain"
+    
+    cat > "$config_file" << EOF
+# Nginx configuration for IPFS Pinning Service API
+# Domain: $domain
+# Generated on $(date)
+
+# Upstream pinning service
+upstream pinning_api_${pinning_port} {
+    server 127.0.0.1:$pinning_port;
+    keepalive 32;
+}
+
+# HTTP server - redirect to HTTPS
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain;
+    
+    # Allow ACME challenge
+    location /.well-known/acme-challenge/ {
+        root ${target_dir};
+        allow all;
+    }
+    
+    # Redirect all other traffic to HTTPS
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+# HTTPS server (certbot will add SSL config)
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $domain;
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    
+    # CORS headers
+    add_header Access-Control-Allow-Origin "*" always;
+    add_header Access-Control-Allow-Methods "GET, POST, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type" always;
+    
+    # Logging
+    access_log /var/log/nginx/${domain}_access.log;
+    error_log /var/log/nginx/${domain}_error.log;
+    
+    # Timeouts
+    proxy_connect_timeout 60s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+    
+    # Handle OPTIONS preflight
+    if (\$request_method = OPTIONS) {
+        return 204;
+    }
+    
+    # Proxy all requests to pinning service
+    location / {
+        proxy_pass http://pinning_api_${pinning_port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection "";
+    }
+}
+EOF
+
+    chmod 644 "$config_file"
+    
+    # Enable the site
+    if [ ! -L "$NGINX_ENABLED/$domain" ]; then
+        ln -s "$config_file" "$NGINX_ENABLED/$domain"
+    fi
+    
+    # Test nginx configuration
+    if nginx -t 2>/dev/null; then
+        print_success "Pinning API nginx configuration created and validated"
+        return 0
+    else
+        print_error "Pinning API nginx configuration test failed"
+        nginx -t
+        return 1
+    fi
+}
+
+# Setup SSL for Pinning API domain
+setup_pinning_nginx_ssl() {
+    local domain=$1
+    local email=$2
+    local target_dir=$3
+    local pinning_port=$4
+    
+    # Install nginx if needed
+    install_nginx
+    
+    # Create nginx configuration for Pinning API
+    if ! create_pinning_nginx_config "$domain" "$target_dir" "$pinning_port"; then
+        print_error "Failed to create Pinning API nginx configuration"
+        return 1
+    fi
+    
+    # Reload nginx to apply configuration
+    reload_nginx
+    
+    # Setup SSL if email provided
+    if [ -n "$email" ]; then
+        if setup_ssl "$domain" "$email"; then
+            print_success "SSL certificate obtained for Pinning API"
+        else
+            print_warning "SSL setup failed for Pinning API, but nginx is configured"
+        fi
+        
+        # Setup auto-renewal
+        setup_ssl_auto_renewal
+        
+        # Reload nginx after SSL setup
+        reload_nginx
+    else
+        print_warning "No email provided, skipping SSL setup for Pinning API"
+        print_info "You can manually run: certbot --nginx -d $domain"
+    fi
+    
+    return 0
+}
+
 # Setup SSL certificate with certbot
 setup_ssl() {
     local domain=$1
@@ -1053,17 +1520,34 @@ main() {
     print_info "Please provide configuration values (press Enter for defaults):"
     echo ""
     
-    # Prompt for pinning service configuration
+    # ===========================================
+    # Service 1: Pinning Service (api.cloud.fx.land)
+    # ===========================================
+    echo "=========================================="
+    print_info "1. PINNING SERVICE Configuration (API)"
+    echo "=========================================="
     prompt_value "Pinning service port" "${PORT:-$DEFAULT_PORT}" "PORT"
     prompt_value "Database path (relative to install dir)" "${DATABASE_PATH:-$DEFAULT_DB_PATH}" "DATABASE_PATH"
     prompt_value "IPFS API address" "${IPFS_API_ADDR:-$DEFAULT_IPFS_API_ADDR}" "IPFS_API_ADDR"
+    prompt_value "Pinning API domain (e.g., api.cloud.fx.land, leave empty to skip nginx)" "${PINNING_DOMAIN:-}" "PINNING_DOMAIN"
     
+    # ===========================================
+    # Service 2: IPFS Server (ipfs.cloud.fx.land)
+    # ===========================================
     echo ""
-    print_info "IPFS Gateway/Upload Server Configuration:"
-    prompt_value "Gateway server port" "${GATEWAY_PORT:-$DEFAULT_GATEWAY_PORT}" "GATEWAY_PORT"
+    echo "=========================================="
+    print_info "2. IPFS SERVER Configuration (Gateway/Upload)"
+    echo "=========================================="
+    prompt_value "IPFS server port" "${GATEWAY_PORT:-$DEFAULT_GATEWAY_PORT}" "GATEWAY_PORT"
+    prompt_value "IPFS server domain (e.g., ipfs.cloud.fx.land, leave empty to skip nginx)" "${IPFS_SERVER_DOMAIN:-}" "IPFS_SERVER_DOMAIN"
     
+    # ===========================================
+    # Service 3: WebUI (cloud.fx.land)
+    # ===========================================
     echo ""
-    print_info "WebUI Configuration (optional):"
+    echo "=========================================="
+    print_info "3. WEBUI Configuration (User Portal)"
+    echo "=========================================="
     echo "  The WebUI provides a web interface for users to manage their pins and API keys."
     echo "  Leave Google Client ID empty to skip WebUI installation."
     prompt_value "WebUI port" "${WEBUI_PORT:-$DEFAULT_WEBUI_PORT}" "WEBUI_PORT"
@@ -1072,19 +1556,28 @@ main() {
     INSTALL_WEBUI=false
     if [ -n "$GOOGLE_CLIENT_ID" ]; then
         INSTALL_WEBUI=true
-        prompt_value "WebUI domain (e.g., portal.example.com, leave empty for localhost)" "${WEBUI_DOMAIN:-}" "WEBUI_DOMAIN"
+        prompt_value "WebUI domain (e.g., cloud.fx.land, leave empty for localhost)" "${WEBUI_DOMAIN:-}" "WEBUI_DOMAIN"
     fi
     
+    # ===========================================
+    # SSL Configuration
+    # ===========================================
     echo ""
-    print_info "Nginx and SSL Configuration (optional):"
-    echo "  Leave domain empty to skip nginx/SSL setup"
-    prompt_value "Domain name (e.g., pinning.example.com)" "${DOMAIN:-}" "DOMAIN"
+    echo "=========================================="
+    print_info "SSL Certificate Configuration"
+    echo "=========================================="
     
+    # Check if any domain was provided
     SETUP_NGINX=false
-    if [ -n "$DOMAIN" ]; then
-        prompt_value "Email for SSL certificate (Let's Encrypt)" "${SSL_EMAIL:-}" "SSL_EMAIL"
+    if [ -n "$PINNING_DOMAIN" ] || [ -n "$IPFS_SERVER_DOMAIN" ] || [ -n "$WEBUI_DOMAIN" ]; then
         SETUP_NGINX=true
+        prompt_value "Email for SSL certificates (Let's Encrypt)" "${SSL_EMAIL:-}" "SSL_EMAIL"
+    else
+        print_info "No domains configured, skipping nginx/SSL setup"
     fi
+    
+    # Keep DOMAIN for backward compatibility (use PINNING_DOMAIN)
+    DOMAIN="$PINNING_DOMAIN"
     
     echo ""
     print_info "Starting installation..."
@@ -1106,8 +1599,11 @@ main() {
     create_service_file "$TARGET_DIR"
     configure_service
     
-    # Start pinning service
-    start_service
+    # Start pinning service (continue even if it fails)
+    if ! start_service; then
+        print_warning "Pinning service failed to start, but continuing with other installations..."
+        print_warning "Fix the issue and restart with: systemctl restart $SERVICE_NAME"
+    fi
     
     # Build and install IPFS gateway (optional - requires Node.js)
     echo ""
@@ -1121,9 +1617,13 @@ main() {
         create_gateway_service_file "$TARGET_DIR"
         configure_gateway_service
         
-        # Start gateway service
-        start_gateway_service
-        GATEWAY_INSTALLED=true
+        # Start gateway service (continue even if it fails)
+        if start_gateway_service; then
+            GATEWAY_INSTALLED=true
+        else
+            print_warning "Gateway service failed to start, but installation completed."
+            GATEWAY_INSTALLED=true
+        fi
     else
         print_warning "Gateway server was not installed (Node.js 18+ required)"
         GATEWAY_INSTALLED=false
@@ -1143,22 +1643,62 @@ main() {
             create_webui_service_file "$TARGET_DIR"
             configure_webui_service
             
-            # Start WebUI service
-            start_webui_service
-            WEBUI_INSTALLED=true
+            # Start WebUI service (continue even if it fails)
+            if start_webui_service; then
+                WEBUI_INSTALLED=true
+            else
+                print_warning "WebUI service failed to start, but installation completed."
+                WEBUI_INSTALLED=true
+            fi
         else
             print_warning "WebUI was not installed (Node.js 18+ required)"
         fi
     fi
     
-    # Setup Nginx and SSL if domain was provided
-    NGINX_CONFIGURED=false
-    if [ "$SETUP_NGINX" = true ] && [ -n "$DOMAIN" ]; then
-        if setup_nginx_ssl "$DOMAIN" "$SSL_EMAIL" "$TARGET_DIR" "$PORT" "$GATEWAY_PORT"; then
-            NGINX_CONFIGURED=true
+    # ===========================================
+    # Setup Nginx and SSL for all services
+    # ===========================================
+    
+    # Setup Nginx and SSL for Pinning API if domain was provided
+    PINNING_NGINX_CONFIGURED=false
+    if [ -n "$PINNING_DOMAIN" ]; then
+        echo ""
+        print_info "Setting up Nginx and SSL for Pinning API ($PINNING_DOMAIN)..."
+        if setup_pinning_nginx_ssl "$PINNING_DOMAIN" "$SSL_EMAIL" "$TARGET_DIR" "$PORT"; then
+            PINNING_NGINX_CONFIGURED=true
         else
-            print_warning "Nginx/SSL setup encountered issues"
+            print_warning "Pinning API Nginx/SSL setup encountered issues"
         fi
+    fi
+    
+    # Setup Nginx and SSL for IPFS Server if domain was provided
+    IPFS_SERVER_NGINX_CONFIGURED=false
+    if [ "$GATEWAY_INSTALLED" = true ] && [ -n "$IPFS_SERVER_DOMAIN" ]; then
+        echo ""
+        print_info "Setting up Nginx and SSL for IPFS Server ($IPFS_SERVER_DOMAIN)..."
+        if setup_ipfs_server_nginx_ssl "$IPFS_SERVER_DOMAIN" "$SSL_EMAIL" "$TARGET_DIR" "$GATEWAY_PORT"; then
+            IPFS_SERVER_NGINX_CONFIGURED=true
+        else
+            print_warning "IPFS Server Nginx/SSL setup encountered issues"
+        fi
+    fi
+    
+    # Setup Nginx and SSL for WebUI if domain was provided
+    WEBUI_NGINX_CONFIGURED=false
+    if [ "$WEBUI_INSTALLED" = true ] && [ -n "$WEBUI_DOMAIN" ]; then
+        echo ""
+        print_info "Setting up Nginx and SSL for WebUI ($WEBUI_DOMAIN)..."
+        if setup_webui_nginx_ssl "$WEBUI_DOMAIN" "$SSL_EMAIL" "$TARGET_DIR" "$WEBUI_PORT"; then
+            WEBUI_NGINX_CONFIGURED=true
+        else
+            print_warning "WebUI Nginx/SSL setup encountered issues"
+        fi
+    fi
+    
+    # Keep NGINX_CONFIGURED for backward compatibility
+    NGINX_CONFIGURED=false
+    if [ "$PINNING_NGINX_CONFIGURED" = true ] || [ "$IPFS_SERVER_NGINX_CONFIGURED" = true ] || [ "$WEBUI_NGINX_CONFIGURED" = true ]; then
+        NGINX_CONFIGURED=true
     fi
     
     echo ""
@@ -1195,7 +1735,7 @@ main() {
     echo ""
     
     if [ "$GATEWAY_INSTALLED" = true ]; then
-        echo "  Gateway Service:"
+        echo "  IPFS Server (Gateway/Upload):"
         echo "    - View logs:    journalctl -u $GATEWAY_SERVICE_NAME -f"
         echo "    - Restart:      systemctl restart $GATEWAY_SERVICE_NAME"
         echo ""
@@ -1210,56 +1750,84 @@ main() {
     
     if [ "$NGINX_CONFIGURED" = true ]; then
         echo "  Nginx:"
-        echo "    - View logs:    tail -f /var/log/nginx/${DOMAIN}_access.log"
         echo "    - Restart:      systemctl restart nginx"
         echo "    - Test config:  nginx -t"
+        if [ "$PINNING_NGINX_CONFIGURED" = true ]; then
+            echo "    - Pinning logs: tail -f /var/log/nginx/${PINNING_DOMAIN}_access.log"
+        fi
+        if [ "$IPFS_SERVER_NGINX_CONFIGURED" = true ]; then
+            echo "    - IPFS logs:    tail -f /var/log/nginx/${IPFS_SERVER_DOMAIN}_access.log"
+        fi
+        if [ "$WEBUI_NGINX_CONFIGURED" = true ]; then
+            echo "    - WebUI logs:   tail -f /var/log/nginx/${WEBUI_DOMAIN}_access.log"
+        fi
         echo ""
     fi
     
     echo "Configuration files:"
-    echo "  - Pinning:  $TARGET_DIR/.env"
-    echo "  - Gateway:  $TARGET_DIR/ipfs-server/.env"
+    echo "  - Pinning:     $TARGET_DIR/.env"
+    echo "  - IPFS Server: $TARGET_DIR/ipfs-server/.env"
     if [ "$WEBUI_INSTALLED" = true ]; then
-        echo "  - WebUI:    $TARGET_DIR/pinning-webui/.env"
+        echo "  - WebUI:       $TARGET_DIR/pinning-webui/.env"
     fi
-    if [ "$NGINX_CONFIGURED" = true ]; then
-        echo "  - Nginx:    $NGINX_AVAILABLE/$DOMAIN"
+    if [ "$PINNING_NGINX_CONFIGURED" = true ]; then
+        echo "  - Nginx API:   $NGINX_AVAILABLE/$PINNING_DOMAIN"
+    fi
+    if [ "$IPFS_SERVER_NGINX_CONFIGURED" = true ]; then
+        echo "  - Nginx IPFS:  $NGINX_AVAILABLE/$IPFS_SERVER_DOMAIN"
+    fi
+    if [ "$WEBUI_NGINX_CONFIGURED" = true ]; then
+        echo "  - Nginx WebUI: $NGINX_AVAILABLE/$WEBUI_DOMAIN"
     fi
     echo ""
     echo "Database location: $TARGET_DIR/$DATABASE_PATH"
     echo ""
     echo "Endpoints:"
     
-    if [ "$NGINX_CONFIGURED" = true ] && [ -n "$DOMAIN" ]; then
-        echo "  - Pinning API: https://$DOMAIN/pins"
-        echo "  - Gateway:     https://$DOMAIN/gateway/{cid}"
-        echo "  - Upload:      https://$DOMAIN/upload"
-        echo "  - Health:      https://$DOMAIN/health"
+    # Pinning API
+    if [ -n "$PINNING_DOMAIN" ]; then
+        echo "  - Pinning API: https://$PINNING_DOMAIN/pins"
     else
         echo "  - Pinning API: http://localhost:$PORT/pins"
-        if [ "$GATEWAY_INSTALLED" = true ]; then
-            echo "  - Gateway:     http://localhost:$GATEWAY_PORT/gateway/{cid}"
-            echo "  - Upload:      http://localhost:$GATEWAY_PORT/upload"
+    fi
+    
+    # IPFS Server
+    if [ "$GATEWAY_INSTALLED" = true ]; then
+        if [ -n "$IPFS_SERVER_DOMAIN" ]; then
+            echo "  - IPFS Gateway: https://$IPFS_SERVER_DOMAIN/gateway/{cid}"
+            echo "  - IPFS Upload:  https://$IPFS_SERVER_DOMAIN/upload"
+            echo "  - IPFS Health:  https://$IPFS_SERVER_DOMAIN/health"
+        else
+            echo "  - IPFS Gateway: http://localhost:$GATEWAY_PORT/gateway/{cid}"
+            echo "  - IPFS Upload:  http://localhost:$GATEWAY_PORT/upload"
         fi
     fi
     
+    # WebUI
     if [ "$WEBUI_INSTALLED" = true ]; then
         if [ -n "$WEBUI_DOMAIN" ]; then
-            echo "  - WebUI:       https://$WEBUI_DOMAIN"
+            echo "  - WebUI:        https://$WEBUI_DOMAIN"
         else
-            echo "  - WebUI:       http://localhost:$WEBUI_PORT"
+            echo "  - WebUI:        http://localhost:$WEBUI_PORT"
         fi
-        echo ""
-        print_info "WebUI Setup Notes:"
-        echo "  - Ensure Google OAuth is configured with the correct redirect URI"
-        echo "  - Add 'http://localhost:$WEBUI_PORT' (or your domain) to authorized origins"
-        echo "  - Users sign in with Google and get automatic API keys"
     fi
     echo ""
     
+    if [ "$WEBUI_INSTALLED" = true ]; then
+        print_info "WebUI Setup Notes:"
+        echo "  - Ensure Google OAuth is configured with the correct redirect URI"
+        if [ -n "$WEBUI_DOMAIN" ]; then
+            echo "  - Add 'https://$WEBUI_DOMAIN' to authorized redirect URIs"
+        else
+            echo "  - Add 'http://localhost:$WEBUI_PORT' to authorized redirect URIs"
+        fi
+        echo "  - Users sign in with Google and get automatic API keys"
+        echo ""
+    fi
+    
     if [ "$NGINX_CONFIGURED" = true ]; then
-        echo "SSL Certificate:"
-        echo "  - Auto-renewal is configured"
+        echo "SSL Certificates:"
+        echo "  - Auto-renewal is configured via certbot"
         echo "  - Check status: certbot certificates"
         echo "  - Manual renew: certbot renew"
         echo ""

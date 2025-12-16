@@ -388,7 +388,8 @@ generate_gateway_env_file() {
 GATEWAY_PORT=${GATEWAY_PORT}
 
 # Database Configuration (read-only access to pinning service DB)
-DATABASE_PATH=${target_dir}/${DATABASE_PATH}
+# Use absolute path if DATABASE_PATH starts with /, otherwise relative to target_dir
+DATABASE_PATH=$(if [[ "${DATABASE_PATH}" == /* ]]; then echo "${DATABASE_PATH}"; else echo "${target_dir}/${DATABASE_PATH}"; fi)
 
 # IPFS Configuration
 IPFS_API_URL=http://127.0.0.1:5001
@@ -479,7 +480,8 @@ WEBUI_PORT=${WEBUI_PORT}
 NODE_ENV=production
 
 # Database path (same as pinning service)
-DATABASE_PATH=${target_dir}/${DATABASE_PATH}
+# Use absolute path if DATABASE_PATH starts with /, otherwise relative to target_dir
+DATABASE_PATH=$(if [[ "${DATABASE_PATH}" == /* ]]; then echo "${DATABASE_PATH}"; else echo "${target_dir}/${DATABASE_PATH}"; fi)
 
 # Google OAuth Client ID
 # Get this from: https://console.cloud.google.com/apis/credentials
@@ -508,6 +510,9 @@ create_webui_service_file() {
     
     print_info "Creating WebUI systemd service file..."
     
+    # Get the actual node path
+    local node_path=$(which node)
+    
     cat > "$WEBUI_SERVICE_FILE" << EOF
 [Unit]
 Description=FULA Pinning Service WebUI
@@ -517,12 +522,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/node ${target_dir}/pinning-webui/dist/server.mjs
+ExecStart=${node_path} ${target_dir}/pinning-webui/dist/server.mjs
 Restart=on-failure
 RestartSec=10
 User=root
 WorkingDirectory=${target_dir}/pinning-webui
-Environment=PATH=/usr/bin:/usr/local/bin
+Environment=PATH=/usr/bin:/usr/local/bin:/usr/local/node/bin
 Environment=NODE_ENV=production
 EnvironmentFile=${target_dir}/pinning-webui/.env
 

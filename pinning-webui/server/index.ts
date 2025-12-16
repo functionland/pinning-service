@@ -482,8 +482,8 @@ if (config.nodeEnv === 'production') {
   const publicPath = path.join(__dirname, 'public');
   app.use(express.static(publicPath));
   
-  // SPA fallback
-  app.get('*', (_req: Request, res: Response) => {
+  // SPA fallback - Express 5 requires named parameter for catch-all
+  app.get('/{*splat}', (_req: Request, res: Response) => {
     res.sendFile(path.join(publicPath, 'index.html'));
   });
 }

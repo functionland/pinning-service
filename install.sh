@@ -956,6 +956,7 @@ EOF
 }
 
 # Create nginx configuration for WebUI
+# Creates HTTP-only config first - certbot will add SSL
 create_webui_nginx_config() {
     local domain=$1
     local target_dir=$2
@@ -976,7 +977,7 @@ upstream webui_service {
     keepalive 32;
 }
 
-# HTTP server - redirect to HTTPS
+# HTTP server (certbot will add HTTPS redirect and SSL server block)
 server {
     listen 80;
     listen [::]:80;
@@ -987,18 +988,6 @@ server {
         root ${target_dir}/pinning-webui;
         allow all;
     }
-    
-    # Redirect all other traffic to HTTPS
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
-
-# HTTPS server (certbot will add SSL config)
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $domain;
     
     # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;
@@ -1083,6 +1072,7 @@ setup_webui_nginx_ssl() {
 }
 
 # Create nginx configuration for IPFS Server (standalone domain)
+# Creates HTTP-only config first - certbot will add SSL
 create_ipfs_server_nginx_config() {
     local domain=$1
     local target_dir=$2
@@ -1103,7 +1093,7 @@ upstream ipfs_server_${gateway_port} {
     keepalive 32;
 }
 
-# HTTP server - redirect to HTTPS
+# HTTP server (certbot will add HTTPS redirect and SSL server block)
 server {
     listen 80;
     listen [::]:80;
@@ -1114,18 +1104,6 @@ server {
         root ${target_dir}/ipfs-server;
         allow all;
     }
-    
-    # Redirect all other traffic to HTTPS
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
-
-# HTTPS server (certbot will add SSL config)
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $domain;
     
     # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;
@@ -1258,6 +1236,7 @@ setup_ipfs_server_nginx_ssl() {
 }
 
 # Create nginx configuration for Pinning API (standalone domain)
+# Creates HTTP-only config first - certbot will add SSL
 create_pinning_nginx_config() {
     local domain=$1
     local target_dir=$2
@@ -1278,7 +1257,7 @@ upstream pinning_api_${pinning_port} {
     keepalive 32;
 }
 
-# HTTP server - redirect to HTTPS
+# HTTP server (certbot will add HTTPS redirect and SSL server block)
 server {
     listen 80;
     listen [::]:80;
@@ -1289,18 +1268,6 @@ server {
         root ${target_dir};
         allow all;
     }
-    
-    # Redirect all other traffic to HTTPS
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
-
-# HTTPS server (certbot will add SSL config)
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $domain;
     
     # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;

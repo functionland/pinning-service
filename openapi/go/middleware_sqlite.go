@@ -62,11 +62,10 @@ func GetUsernameFromContextSQLite(ctx context.Context) (string, bool) {
 // writeSQLiteErrorResponse writes a JSON error response
 func writeSQLiteErrorResponse(w http.ResponseWriter, statusCode int, reason, details string) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(statusCode)
 	EncodeJSONResponse(Failure{
 		Error: FailureError{
 			Reason:  reason,
 			Details: details,
 		},
-	}, nil, w)
+	}, &statusCode, w)
 }

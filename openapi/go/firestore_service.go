@@ -73,15 +73,22 @@ func (s *FirestoreService) AddPin(ctx context.Context, username string, pin Pin,
 }
 
 func (s *FirestoreService) DeletePin(ctx context.Context, requestID string) error {
+	if requestID == "" {
+		return errors.New("requestID cannot be empty")
+	}
+
 	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
-	if err != nil || len(docs) == 0 {
-		return err
+	if err != nil {
+		return fmt.Errorf("failed to query pins: %w", err)
+	}
+	if len(docs) == 0 {
+		return errors.New("pin not found")
 	}
 
 	for _, doc := range docs {
 		_, err := doc.Ref.Delete(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to delete pin document: %w", err)
 		}
 	}
 
@@ -89,9 +96,16 @@ func (s *FirestoreService) DeletePin(ctx context.Context, requestID string) erro
 }
 
 func (s *FirestoreService) MarkPinAsDeleted(ctx context.Context, requestID string) error {
+	if requestID == "" {
+		return errors.New("requestID cannot be empty")
+	}
+
 	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
-	if err != nil || len(docs) == 0 {
-		return err
+	if err != nil {
+		return fmt.Errorf("failed to query pins: %w", err)
+	}
+	if len(docs) == 0 {
+		return errors.New("pin not found")
 	}
 
 	for _, doc := range docs {
@@ -100,7 +114,7 @@ func (s *FirestoreService) MarkPinAsDeleted(ctx context.Context, requestID strin
 			{Path: "remove_status", Value: "pending"},
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to update pin status: %w", err)
 		}
 	}
 
@@ -108,9 +122,16 @@ func (s *FirestoreService) MarkPinAsDeleted(ctx context.Context, requestID strin
 }
 
 func (s *FirestoreService) MarkPinAsDeleteFailed(ctx context.Context, requestID string) error {
+	if requestID == "" {
+		return errors.New("requestID cannot be empty")
+	}
+
 	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
-	if err != nil || len(docs) == 0 {
-		return err
+	if err != nil {
+		return fmt.Errorf("failed to query pins: %w", err)
+	}
+	if len(docs) == 0 {
+		return errors.New("pin not found")
 	}
 
 	for _, doc := range docs {
@@ -119,7 +140,7 @@ func (s *FirestoreService) MarkPinAsDeleteFailed(ctx context.Context, requestID 
 			{Path: "remove_status", Value: "failed"},
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to update pin status: %w", err)
 		}
 	}
 
@@ -127,9 +148,16 @@ func (s *FirestoreService) MarkPinAsDeleteFailed(ctx context.Context, requestID 
 }
 
 func (s *FirestoreService) UpdatePinStatus(ctx context.Context, requestID, status string) error {
+	if requestID == "" {
+		return errors.New("requestID cannot be empty")
+	}
+
 	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Documents(ctx).GetAll()
-	if err != nil || len(docs) == 0 {
-		return err
+	if err != nil {
+		return fmt.Errorf("failed to query pins: %w", err)
+	}
+	if len(docs) == 0 {
+		return errors.New("pin not found")
 	}
 
 	for _, doc := range docs {
@@ -137,7 +165,7 @@ func (s *FirestoreService) UpdatePinStatus(ctx context.Context, requestID, statu
 			{Path: "upload_status", Value: status},
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to update pin status: %w", err)
 		}
 	}
 
@@ -145,36 +173,63 @@ func (s *FirestoreService) UpdatePinStatus(ctx context.Context, requestID, statu
 }
 
 func (s *FirestoreService) GetPinByRequestID(ctx context.Context, requestID string) (PinStatus, string, error) {
+	if requestID == "" {
+		return PinStatus{}, "", errors.New("requestID cannot be empty")
+	}
+
 	docs, err := s.Client.Collection("pins").Where("requestid", "==", requestID).Where("status", "!=", "deleted").Documents(ctx).GetAll()
 	if err != nil {
-		return PinStatus{}, "", err
+		return PinStatus{}, "", fmt.Errorf("failed to query pins: %w", err)
 	}
 	if len(docs) == 0 {
-		return PinStatus{}, "", errors.New("document not found")
+		return PinStatus{}, "", errors.New("pin not found")
 	}
 
 	var pinStatus PinStatus
 	var username string
 	for _, doc := range docs {
 		data := doc.Data()
-		username = data["username"].(string)
+
+		// Safely extract username
+		if u, ok := data["username"].(string); ok {
+			username = u
+		} else {
+			return PinStatus{}, "", errors.New("invalid username in pin data")
+		}
+
+		// Safely extract created_at
 		createdAt, err := doc.DataAt("created_at")
 		if err != nil {
-			return PinStatus{}, "", err
+			return PinStatus{}, "", fmt.Errorf("failed to get created_at: %w", err)
 		}
+		createdTime, ok := createdAt.(time.Time)
+		if !ok {
+			return PinStatus{}, "", errors.New("invalid created_at format")
+		}
+
+		// Safely extract other fields
+		cid, _ := data["cid"].(string)
+		name, _ := data["name"].(string)
+		status, _ := data["status"].(string)
+
+		if cid == "" {
+			return PinStatus{}, "", errors.New("invalid cid in pin data")
+		}
+
 		pinStatus = PinStatus{
 			Requestid: requestID,
-			Status:    Status(data["status"].(string)),
-			Created:   createdAt.(time.Time),
+			Status:    Status(status),
+			Created:   createdTime,
 			Pin: Pin{
-				Cid:     data["cid"].(string),
-				Name:    data["name"].(string),
+				Cid:     cid,
+				Name:    name,
 				Origins: toStringSlice(data["origins"]),
 				Meta:    toStringMap(data["meta"]),
 			},
 			Delegates: toStringSlice(data["delegates"]),
 			Info:      toStringMap(data["info"]),
 		}
+		break // Only need the first document
 	}
 
 	return pinStatus, username, nil
@@ -184,10 +239,15 @@ func toStringSlice(input interface{}) []string {
 	if input == nil {
 		return nil
 	}
-	interfaceSlice := input.([]interface{})
-	stringSlice := make([]string, len(interfaceSlice))
-	for i, v := range interfaceSlice {
-		stringSlice[i] = v.(string)
+	interfaceSlice, ok := input.([]interface{})
+	if !ok {
+		return nil
+	}
+	stringSlice := make([]string, 0, len(interfaceSlice))
+	for _, v := range interfaceSlice {
+		if str, ok := v.(string); ok {
+			stringSlice = append(stringSlice, str)
+		}
 	}
 	return stringSlice
 }
@@ -196,10 +256,15 @@ func toStringMap(input interface{}) map[string]string {
 	if input == nil {
 		return nil
 	}
-	interfaceMap := input.(map[string]interface{})
+	interfaceMap, ok := input.(map[string]interface{})
+	if !ok {
+		return nil
+	}
 	stringMap := make(map[string]string)
 	for k, v := range interfaceMap {
-		stringMap[k] = v.(string)
+		if str, ok := v.(string); ok {
+			stringMap[k] = str
+		}
 	}
 	return stringMap
 }
@@ -212,17 +277,25 @@ func roundToBottomSecond(t time.Time) time.Time {
 	return t
 }
 
-func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, _ []Status, before time.Time, after time.Time, limit int, meta map[string]string) ([]PinWithRequest, int, error) {
+func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []string, name string, match TextMatchingStrategy, _ []Status, before time.Time, after time.Time, limit int, metaFilter map[string]string) ([]PinWithRequest, int, error) {
+	if username == "" {
+		return nil, 0, errors.New("username cannot be empty")
+	}
+
 	query := s.Client.Collection("pins").Where("username", "==", username).Where("status", "!=", "deleted")
 
 	// Apply filters to the query
 	if len(cid) > 0 {
+		// Firestore 'in' query has a limit of 10 elements
+		if len(cid) > 10 {
+			cid = cid[:10]
+		}
 		query = query.Where("cid", "in", cid)
 	}
 
-	if name != "" && (match == "exact" || match == "iexact") {
+	if name != "" && (match == "exact" || match == "iexact" || match == "") {
 		switch match {
-		case "exact":
+		case "exact", "":
 			query = query.Where("name", "==", name)
 		case "iexact":
 			query = query.Where("name_lowercase", "==", strings.ToLower(name))
@@ -239,65 +312,56 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 		query = query.Where("created_at", ">", roundedAfter)
 	}
 
-	// Get the count of all matching documents
-	countQuery := query
-	countDocs, err := countQuery.Documents(ctx).GetAll()
-	if err != nil {
-		return nil, 0, err
-	}
-	count := len(countDocs)
-
 	// Apply limit if specified, otherwise default to 10
 	if limit <= 0 {
 		limit = 10
 	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	// Get documents with ordering and limit
 	query = query.OrderBy("created_at", firestore.Desc).Limit(limit)
 
 	docs, err := query.Documents(ctx).GetAll()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("failed to query pins: %w", err)
 	}
 
 	var pins []PinWithRequest
 	for _, doc := range docs {
-		var origins []string
-		if originsInterface, ok := doc.Data()["origins"]; ok {
-			if originsSlice, ok := originsInterface.([]interface{}); ok {
-				origins = make([]string, len(originsSlice))
-				for i, v := range originsSlice {
-					if str, ok := v.(string); ok {
-						origins[i] = str
-					}
-				}
-			}
+		data := doc.Data()
+
+		// Safely extract fields with type checking
+		cidValue, _ := data["cid"].(string)
+		nameValue, _ := data["name"].(string)
+		requestIdValue, _ := data["requestid"].(string)
+
+		if cidValue == "" || requestIdValue == "" {
+			continue // Skip invalid documents
 		}
 
-		var meta map[string]string
-		if metaInterface, ok := doc.Data()["meta"]; ok {
-			if metaMap, ok := metaInterface.(map[string]interface{}); ok {
-				meta = make(map[string]string, len(metaMap))
-				for k, v := range metaMap {
-					if str, ok := v.(string); ok {
-						meta[k] = str
-					}
-				}
-			}
-		}
+		origins := toStringSlice(data["origins"])
+		meta := toStringMap(data["meta"])
 
 		createdAt, err := doc.DataAt("created_at")
 		if err != nil {
-			return nil, 0, err
+			continue // Skip documents with invalid created_at
+		}
+		createdTime, ok := createdAt.(time.Time)
+		if !ok {
+			continue // Skip documents with invalid created_at format
 		}
 
 		pin := PinWithRequest{
 			Pin: Pin{
-				Cid:     doc.Data()["cid"].(string),
-				Name:    doc.Data()["name"].(string),
+				Cid:     cidValue,
+				Name:    nameValue,
 				Origins: origins,
 				Meta:    meta,
 			},
-			RequestId: doc.Data()["requestid"].(string),
-			Created:   createdAt.(time.Time),
+			RequestId: requestIdValue,
+			Created:   createdTime,
 		}
 
 		// Perform post-query filtering for partial and ipartial matches
@@ -305,21 +369,34 @@ func (s *FirestoreService) GetPins(ctx context.Context, username string, cid []s
 			switch match {
 			case "partial":
 				if !strings.Contains(pin.Pin.Name, name) {
-					count = count - 1
 					continue
 				}
 			case "ipartial":
 				if !strings.Contains(strings.ToLower(pin.Pin.Name), strings.ToLower(name)) {
-					count = count - 1
 					continue
 				}
+			}
+		}
+
+		// Apply meta filter (AND logic per IPFS spec)
+		if len(metaFilter) > 0 {
+			metaMatch := true
+			for k, v := range metaFilter {
+				if meta == nil || meta[k] != v {
+					metaMatch = false
+					break
+				}
+			}
+			if !metaMatch {
+				continue
 			}
 		}
 
 		pins = append(pins, pin)
 	}
 
-	return pins, count, nil
+	// Return the count as the number of matching pins after all filters
+	return pins, len(pins), nil
 }
 
 func (s *FirestoreService) GetUserIDFromToken(ctx context.Context, token string, tag string) (string, error) {

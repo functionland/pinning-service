@@ -15,7 +15,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
 	openapi "github.com/functionland/pinning-service"
 	"github.com/gorilla/mux"
@@ -24,74 +27,124 @@ import (
 	"github.com/joho/godotenv"
 	ma "github.com/multiformats/go-multiaddr"
 )
- 
+
 func main() {
-    log.Printf("Server started")
+	log.Printf("IPFS Pinning Service starting...")
 
-    // Load environment variables from .env file
-    err := godotenv.Load()
-    if err != nil {
-        log.Fatalf("Error loading .env file")
-        panic("no env found")
-    }
+	// Load environment variables from .env file
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file: %v", err)
+	}
 
-    // Get the environment variables
-    masterSeed := os.Getenv("MASTER_SEED")
-    poolSeed := os.Getenv("POOL_SEED")
-    blockchainAPIEndpoint := os.Getenv("BLOCKCHAIN_API_ENDPOINT")
-    credentialsFile := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    poolIdStr := os.Getenv("POOL_ID")
-    poolId, err := strconv.Atoi(poolIdStr)
-    if err != nil {
-        log.Fatalf("Error converting POOL_ID to integer: %v", err)
-        panic(err)
-    }
+	// Get and validate environment variables
+	masterSeed := os.Getenv("MASTER_SEED")
+	poolSeed := os.Getenv("POOL_SEED")
+	blockchainAPIEndpoint := os.Getenv("BLOCKCHAIN_API_ENDPOINT")
+	credentialsFile := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	poolIdStr := os.Getenv("POOL_ID")
 
-    // Initialize FirestoreService (assuming you have a function to create this)
-    firestoreService, err := openapi.NewFirestoreService(context.Background(), credentialsFile)
-    if err != nil {
-        log.Fatalf("Error initializing Firestore service: %v", err)
-        panic(err)
-    }
-    userService, err := openapi.NewUserService(firestoreService.Client)
-    if err != nil {
-        log.Fatalf("Error initializing User service: %v", err)
-        panic(err)
-    }
-    userAPIController := openapi.NewUserAPIController(userService)
+	if masterSeed == "" || poolSeed == "" || blockchainAPIEndpoint == "" || credentialsFile == "" {
+		log.Fatal("Missing required environment variables: MASTER_SEED, POOL_SEED, BLOCKCHAIN_API_ENDPOINT, GOOGLE_APPLICATION_CREDENTIALS")
+	}
 
-    nodeMultiAddr, err := ma.NewMultiaddr("/ip4/127.0.0.1/tcp/5001")
-    if err != nil {
-        log.Fatalf("invalid multiaddress: %v", err)
-        panic(err)
-    }
-    ipfsAPI, err := rpc.NewApi(nodeMultiAddr)
-    if err != nil {
-        panic(err)
-    }
+	poolId, err := strconv.Atoi(poolIdStr)
+	if err != nil {
+		log.Fatalf("Error converting POOL_ID to integer: %v", err)
+	}
 
-    ipfsClusterConfig := ipfsCluster.Config{}
-    ipfsClusterApi, err := ipfsCluster.NewDefaultClient(&ipfsClusterConfig)
-    if err != nil {
-        log.Fatalf("Error in setting ipfs cluster api %v", err)
-        panic(err)
-    }
+	// Initialize FirestoreService
+	ctx := context.Background()
+	firestoreService, err := openapi.NewFirestoreService(ctx, credentialsFile)
+	if err != nil {
+		log.Fatalf("Error initializing Firestore service: %v", err)
+	}
+	defer func() {
+		if err := firestoreService.Close(); err != nil {
+			log.Printf("Error closing Firestore service: %v", err)
+		}
+	}()
 
-    // Initialize PinsAPIService
-    pinsAPIService := openapi.NewPinsAPIService(firestoreService, userService, ipfsAPI, ipfsClusterApi, blockchainAPIEndpoint, masterSeed, poolSeed, poolId)
+	userService, err := openapi.NewUserService(firestoreService.Client)
+	if err != nil {
+		log.Fatalf("Error initializing User service: %v", err)
+	}
+	userAPIController := openapi.NewUserAPIController(userService)
 
-    // Create PinsAPIController
-    pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)
+	// Initialize IPFS node connection
+	ipfsAddr := os.Getenv("IPFS_API_ADDR")
+	if ipfsAddr == "" {
+		ipfsAddr = "/ip4/127.0.0.1/tcp/5001"
+	}
+	nodeMultiAddr, err := ma.NewMultiaddr(ipfsAddr)
+	if err != nil {
+		log.Fatalf("Invalid IPFS multiaddress %s: %v", ipfsAddr, err)
+	}
 
-    // Initialize router
-    mainRouter := openapi.NewRouter(pinsAPIController)
-    additionalRouter := openapi.NewAdditionalRouter(pinsAPIController, userAPIController)
-    router := mux.NewRouter()
-    router.PathPrefix("/auth/").Handler(additionalRouter)
-    router.PathPrefix("/").Handler(mainRouter)
+	ipfsAPI, err := rpc.NewApi(nodeMultiAddr)
+	if err != nil {
+		log.Fatalf("Error connecting to IPFS API: %v", err)
+	}
 
-    authRouter := openapi.AuthMiddleware(firestoreService)(router)
+	// Initialize IPFS Cluster connection
+	ipfsClusterConfig := ipfsCluster.Config{}
+	ipfsClusterApi, err := ipfsCluster.NewDefaultClient(&ipfsClusterConfig)
+	if err != nil {
+		log.Fatalf("Error initializing IPFS cluster API: %v", err)
+	}
 
-    // Start the server
-    log.Fatal(http.ListenAndServe(":6000", openapi.InjectRequestIntoContext(authRouter)))
+	// Initialize PinsAPIService
+	pinsAPIService := openapi.NewPinsAPIService(firestoreService, userService, ipfsAPI, ipfsClusterApi, blockchainAPIEndpoint, masterSeed, poolSeed, poolId)
+
+	// Create PinsAPIController
+	pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)
+
+	// Initialize router
+	mainRouter := openapi.NewRouter(pinsAPIController)
+	additionalRouter := openapi.NewAdditionalRouter(pinsAPIController, userAPIController)
+	router := mux.NewRouter()
+	router.PathPrefix("/auth/").Handler(additionalRouter)
+	router.PathPrefix("/").Handler(mainRouter)
+
+	authRouter := openapi.AuthMiddleware(firestoreService)(router)
+
+	// Get server port from environment or default to 6000
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "6000"
+	}
+
+	// Create server with timeouts for production
+	server := &http.Server{
+		Addr:         ":" + port,
+		Handler:      openapi.InjectRequestIntoContext(authRouter),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 90 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("Server listening on port %s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server error: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal for graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Shutting down server...")
+
+	// Create shutdown context with timeout
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+
+	log.Println("Server exited gracefully")
 }

@@ -212,16 +212,25 @@ build_gateway() {
     print_info "Installing Node.js dependencies..."
     npm install --production=false
     
-    # Build the binary
-    print_info "Building gateway binary..."
+    # Build the application
+    print_info "Building gateway server..."
     npm run build
     
-    # Copy to target
+    # Copy built files to target
     mkdir -p "$target_dir/ipfs-server/dist"
     mkdir -p "$target_dir/ipfs-server/uploads"
     cp -r dist/* "$target_dir/ipfs-server/dist/"
     
-    verify_step "Gateway build" "[ -f '$target_dir/ipfs-server/dist/ipfs-gateway' ]"
+    # Copy package files for production dependencies
+    cp package.json "$target_dir/ipfs-server/"
+    cp package-lock.json "$target_dir/ipfs-server/" 2>/dev/null || true
+    
+    # Install production dependencies in target directory (for native modules like better-sqlite3)
+    print_info "Installing production dependencies in target directory..."
+    cd "$target_dir/ipfs-server"
+    npm install --production --ignore-scripts=false
+    
+    verify_step "Gateway build" "[ -f '$target_dir/ipfs-server/dist/index.js' ] || [ -f '$target_dir/ipfs-server/dist/ipfs-gateway' ]"
 }
 
 # Build the WebUI
@@ -254,9 +263,18 @@ build_webui() {
     print_info "Building WebUI..."
     npm run build
     
-    # Copy to target
+    # Copy built files to target
     mkdir -p "$target_dir/pinning-webui/dist"
     cp -r dist/* "$target_dir/pinning-webui/dist/"
+    
+    # Copy package files for production dependencies
+    cp package.json "$target_dir/pinning-webui/"
+    cp package-lock.json "$target_dir/pinning-webui/" 2>/dev/null || true
+    
+    # Install production dependencies in target directory (for native modules like better-sqlite3)
+    print_info "Installing production dependencies in target directory..."
+    cd "$target_dir/pinning-webui"
+    npm install --production --ignore-scripts=false
     
     verify_step "WebUI build" "[ -d '$target_dir/pinning-webui/dist/public' ]"
 }
@@ -417,7 +435,7 @@ EnvironmentFile=${target_dir}/ipfs-server/.env
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=false
-ReadWritePaths=${target_dir}/ipfs-server/uploads
+ReadWritePaths=${target_dir}/ipfs-server/uploads ${target_dir}/data
 
 # Resource limits
 LimitNOFILE=65535
@@ -512,7 +530,7 @@ EnvironmentFile=${target_dir}/pinning-webui/.env
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=false
-ReadWritePaths=${target_dir}/data
+ReadWritePaths=${target_dir}/data ${target_dir}/pinning-webui
 
 # Resource limits
 LimitNOFILE=65535

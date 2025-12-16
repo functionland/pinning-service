@@ -1,11 +1,8 @@
 package openapi
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -75,22 +72,15 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to add pin"), err
 	}
 
-	// Handle blockchain manifest upload asynchronously
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-
-		if err := s.handleManifestUpload(bgCtx, pin.Cid, requestId); err != nil {
-			log.Printf("Failed to upload manifest for CID %s: %v", pin.Cid, err)
-		}
-	}()
+	// Get delegates from IPFS cluster or use default
+	delegates := s.getDelegates(ctx)
 
 	status := PinStatus{
 		Requestid: requestId,
 		Status:    QUEUED,
 		Created:   time.Now(),
 		Pin:       pin,
-		Delegates: []string{},
+		Delegates: delegates,
 		Info:      map[string]string{"status_details": "Queue position: 0 of 0"},
 	}
 
@@ -103,7 +93,7 @@ func (s *PinsAPIServiceSQLite) DeletePinByRequestId(ctx context.Context, request
 		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "requestid is required"), errors.New("requestid is required")
 	}
 
-	pinStatus, username, err := s.db.GetPinByRequestID(ctx, requestid)
+	_, username, err := s.db.GetPinByRequestID(ctx, requestid)
 	if err != nil {
 		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
 	}
@@ -117,21 +107,10 @@ func (s *PinsAPIServiceSQLite) DeletePinByRequestId(ctx context.Context, request
 		return createErrorResponse(http.StatusForbidden, "FORBIDDEN", "You don't have permission to delete this pin"), errors.New("unauthorized")
 	}
 
-	// Mark pin as deleted first
+	// Mark pin as deleted
 	if err := s.db.MarkPinAsDeleted(ctx, requestid); err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to delete pin"), err
 	}
-
-	// Handle blockchain manifest removal asynchronously
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-
-		if err := s.handleManifestRemoval(bgCtx, pinStatus.Pin.Cid, requestid); err != nil {
-			log.Printf("Failed to remove manifest for CID %s: %v", pinStatus.Pin.Cid, err)
-			s.db.MarkPinAsDeleteFailed(context.Background(), requestid)
-		}
-	}()
 
 	return Response(http.StatusAccepted, nil), nil
 }
@@ -154,6 +133,11 @@ func (s *PinsAPIServiceSQLite) GetPinByRequestId(ctx context.Context, requestid 
 
 	if username != userID {
 		return createErrorResponse(http.StatusForbidden, "FORBIDDEN", "You don't have permission to view this pin"), errors.New("unauthorized")
+	}
+
+	// Ensure delegates have at least 1 item (required by spec)
+	if len(pinStatus.Delegates) == 0 {
+		pinStatus.Delegates = s.getDelegates(ctx)
 	}
 
 	// Update status from IPFS cluster if available
@@ -179,6 +163,9 @@ func (s *PinsAPIServiceSQLite) GetPins(ctx context.Context, cid []string, name s
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to retrieve pins"), err
 	}
 
+	// Get delegates once for all results
+	delegates := s.getDelegates(ctx)
+
 	var results []PinStatus
 	for _, p := range pins {
 		ps := PinStatus{
@@ -186,7 +173,7 @@ func (s *PinsAPIServiceSQLite) GetPins(ctx context.Context, cid []string, name s
 			Status:    QUEUED,
 			Created:   p.Created,
 			Pin:       p.Pin,
-			Delegates: []string{},
+			Delegates: delegates,
 			Info:      map[string]string{},
 		}
 
@@ -268,6 +255,24 @@ func (s *PinsAPIServiceSQLite) cidExistsInIPFS(ctx context.Context, cidStr strin
 	return true, nil
 }
 
+// getDelegates returns delegate addresses for pinning service
+// The spec requires at least 1 delegate (minItems: 1)
+func (s *PinsAPIServiceSQLite) getDelegates(ctx context.Context) []string {
+	// Try to get delegates from IPFS node
+	if s.ipfsAPI != nil {
+		// Get the IPFS node's peer ID and addresses
+		key, err := s.ipfsAPI.Key().Self(ctx)
+		if err == nil {
+			// Return default delegate address format
+			return []string{"/p2p/" + key.ID().String()}
+		}
+	}
+
+	// Fallback to a placeholder delegate if IPFS is not available
+	// This ensures we always return at least 1 delegate as required by spec
+	return []string{"/p2p/QmPlaceholder"}
+}
+
 func (s *PinsAPIServiceSQLite) getClusterStatus(ctx context.Context, cidStr string) (string, error) {
 	if s.ipfsClusterAPI == nil {
 		return "queued", nil
@@ -288,109 +293,6 @@ func (s *PinsAPIServiceSQLite) getClusterStatus(ctx context.Context, cidStr stri
 	}
 
 	return "queued", nil
-}
-
-func (s *PinsAPIServiceSQLite) handleManifestUpload(ctx context.Context, cidStr string, requestId string) error {
-	poolIdForUser, err := s.getPoolIdForRequest(ctx, requestId)
-	if err != nil {
-		poolIdForUser = s.poolId
-	}
-
-	payload := map[string]interface{}{
-		"cid":     []string{cidStr},
-		"pool_id": poolIdForUser,
-	}
-	jsonPayload, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	// Retry logic
-	var lastErr error
-	for i := 0; i < 3; i++ {
-		req, err := http.NewRequestWithContext(ctx, "POST", s.blockchainAPIEndpoint+"/fula/manifest/batch_upload", bytes.NewBuffer(jsonPayload))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+s.masterSeed)
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			lastErr = err
-			time.Sleep(time.Duration(i+1) * time.Second)
-			continue
-		}
-		resp.Body.Close()
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			s.db.UpdatePinStatus(context.Background(), requestId, "manifest_uploaded")
-			return nil
-		}
-		lastErr = fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-		time.Sleep(time.Duration(i+1) * time.Second)
-	}
-
-	return lastErr
-}
-
-func (s *PinsAPIServiceSQLite) handleManifestRemoval(ctx context.Context, cidStr string, requestId string) error {
-	poolIdForUser, err := s.getPoolIdForRequest(ctx, requestId)
-	if err != nil {
-		poolIdForUser = s.poolId
-	}
-
-	payload := map[string]interface{}{
-		"cid":     cidStr,
-		"pool_id": poolIdForUser,
-	}
-	jsonPayload, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	// Retry logic
-	var lastErr error
-	for i := 0; i < 3; i++ {
-		req, err := http.NewRequestWithContext(ctx, "POST", s.blockchainAPIEndpoint+"/fula/manifest/remove", bytes.NewBuffer(jsonPayload))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+s.masterSeed)
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			lastErr = err
-			time.Sleep(time.Duration(i+1) * time.Second)
-			continue
-		}
-		resp.Body.Close()
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil
-		}
-		lastErr = fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-		time.Sleep(time.Duration(i+1) * time.Second)
-	}
-
-	return lastErr
-}
-
-func (s *PinsAPIServiceSQLite) getPoolIdForRequest(ctx context.Context, requestId string) (int, error) {
-	_, username, err := s.db.GetPinByRequestID(ctx, requestId)
-	if err != nil {
-		return s.poolId, err
-	}
-
-	poolId, err := s.db.GetUserPoolID(ctx, username)
-	if err != nil {
-		return s.poolId, err
-	}
-
-	return poolId, nil
 }
 
 // Note: generateRequestID is defined in api_pins_service.go

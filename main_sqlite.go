@@ -161,7 +161,14 @@ func main() {
 	router.PathPrefix("/auth/").Handler(additionalRouter)
 	router.PathPrefix("/").Handler(mainRouter)
 
+	// Apply auth middleware
 	authRouter := openapi.AuthMiddlewareSQLite(sqliteService)(router)
+
+	// Apply CORS middleware (required for compliance tests)
+	corsRouter := corsMiddleware(authRouter)
+
+	// Apply request logging middleware (for debugging)
+	loggingRouter := requestLoggingMiddleware(corsRouter, testMode)
 
 	// Get server port from environment or default to 6000
 	port := os.Getenv("PORT")
@@ -172,7 +179,7 @@ func main() {
 	// Create server with timeouts for production
 	server := &http.Server{
 		Addr:         ":" + port,
-		Handler:      openapi.InjectRequestIntoContext(authRouter),
+		Handler:      openapi.InjectRequestIntoContext(loggingRouter),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 90 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -221,4 +228,42 @@ func setupTestUser(ctx context.Context, db *openapi.SQLiteService, userService *
 	log.Printf("   Test Username: %s", TestModeUsername)
 	log.Printf("   Test Token: %s", TestModeToken)
 	return nil
+}
+
+// corsMiddleware adds CORS headers required for compliance tests
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-Requested-With")
+		w.Header().Set("Access-Control-Max-Age", "3600")
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requestLoggingMiddleware logs all incoming requests (verbose in test mode)
+func requestLoggingMiddleware(next http.Handler, verbose bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if verbose {
+			log.Printf("➡️  %s %s (from %s)", r.Method, r.URL.Path, r.RemoteAddr)
+			if auth := r.Header.Get("Authorization"); auth != "" {
+				if len(auth) > 20 {
+					log.Printf("    Auth: %s...%s", auth[:15], auth[len(auth)-5:])
+				} else {
+					log.Printf("    Auth: %s", auth)
+				}
+			} else {
+				log.Printf("    Auth: (none)")
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

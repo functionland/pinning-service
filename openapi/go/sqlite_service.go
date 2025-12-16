@@ -216,9 +216,13 @@ func (s *SQLiteService) AddPinWithSize(ctx context.Context, username string, pin
 		metaJSON = []byte("{}")
 	}
 
+	// Use Go's time.Now() for high-precision timestamps (nanoseconds)
+	// SQLite's CURRENT_TIMESTAMP only has second precision which breaks pagination
+	createdAt := time.Now().UTC()
+
 	query := `
 		INSERT INTO pins (requestid, username, cid, name, name_lowercase, origins, meta, status, upload_status, size, session_token, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
 	`
 
 	_, err = s.db.ExecContext(ctx, query,
@@ -232,6 +236,7 @@ func (s *SQLiteService) AddPinWithSize(ctx context.Context, username string, pin
 		uploadStatus,
 		size,
 		sessionToken,
+		createdAt,
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to add pin: %w", err)
@@ -425,39 +430,35 @@ func (s *SQLiteService) GetPins(ctx context.Context, username string, cid []stri
 		return nil, 0, errors.New("username cannot be empty")
 	}
 
-	// Build dynamic query
-	query := `
-		SELECT requestid, cid, name, origins, meta, status, created_at
-		FROM pins
-		WHERE username = ? AND status != 'deleted'
-	`
-	args := []interface{}{username}
+	// Build WHERE clause (shared between count and select queries)
+	whereClause := "username = ? AND status != 'deleted'"
+	whereArgs := []interface{}{username}
 
 	// CID filter
 	if len(cid) > 0 {
 		placeholders := make([]string, len(cid))
 		for i, c := range cid {
 			placeholders[i] = "?"
-			args = append(args, c)
+			whereArgs = append(whereArgs, c)
 		}
-		query += " AND cid IN (" + strings.Join(placeholders, ",") + ")"
+		whereClause += " AND cid IN (" + strings.Join(placeholders, ",") + ")"
 	}
 
-	// Name filter (exact and iexact can be done in SQL)
+	// Name filter
 	if name != "" {
 		switch match {
 		case "exact", "":
-			query += " AND name = ?"
-			args = append(args, name)
+			whereClause += " AND name = ?"
+			whereArgs = append(whereArgs, name)
 		case "iexact":
-			query += " AND name_lowercase = ?"
-			args = append(args, strings.ToLower(name))
+			whereClause += " AND name_lowercase = ?"
+			whereArgs = append(whereArgs, strings.ToLower(name))
 		case "partial":
-			query += " AND name LIKE ?"
-			args = append(args, "%"+name+"%")
+			whereClause += " AND name LIKE ?"
+			whereArgs = append(whereArgs, "%"+name+"%")
 		case "ipartial":
-			query += " AND name_lowercase LIKE ?"
-			args = append(args, "%"+strings.ToLower(name)+"%")
+			whereClause += " AND name_lowercase LIKE ?"
+			whereArgs = append(whereArgs, "%"+strings.ToLower(name)+"%")
 		}
 	}
 
@@ -466,34 +467,42 @@ func (s *SQLiteService) GetPins(ctx context.Context, username string, cid []stri
 		placeholders := make([]string, len(statuses))
 		for i, st := range statuses {
 			placeholders[i] = "?"
-			args = append(args, string(st))
+			whereArgs = append(whereArgs, string(st))
 		}
-		query += " AND status IN (" + strings.Join(placeholders, ",") + ")"
+		whereClause += " AND status IN (" + strings.Join(placeholders, ",") + ")"
 	}
 
-	// Time filters
+	// Time filters - NOTE: for count, we don't apply before/after to get TRUE total
+	// But the spec says "total number of pin objects that exist for passed query filters"
+	// So we need to include time filters in count too
 	if !before.IsZero() {
-		query += " AND created_at < ?"
-		args = append(args, before)
+		whereClause += " AND created_at < ?"
+		whereArgs = append(whereArgs, before)
 	}
 	if !after.IsZero() {
-		query += " AND created_at > ?"
-		args = append(args, after)
+		whereClause += " AND created_at > ?"
+		whereArgs = append(whereArgs, after)
 	}
 
-	// Order and limit
-	query += " ORDER BY created_at DESC"
+	// Get total count FIRST (without LIMIT) - this is required by the spec
+	countQuery := "SELECT COUNT(*) FROM pins WHERE " + whereClause
+	var totalCount int
+	if err := s.db.QueryRowContext(ctx, countQuery, whereArgs...).Scan(&totalCount); err != nil {
+		return nil, 0, fmt.Errorf("failed to count pins: %w", err)
+	}
 
+	// Now build select query with ORDER and LIMIT
 	if limit <= 0 {
 		limit = 10
 	}
 	if limit > 1000 {
 		limit = 1000
 	}
-	query += " LIMIT ?"
-	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	selectQuery := "SELECT requestid, cid, name, origins, meta, status, created_at FROM pins WHERE " + whereClause + " ORDER BY created_at DESC LIMIT ?"
+	selectArgs := append(whereArgs, limit)
+
+	rows, err := s.db.QueryContext(ctx, selectQuery, selectArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query pins: %w", err)
 	}
@@ -546,7 +555,7 @@ func (s *SQLiteService) GetPins(ctx context.Context, username string, cid []stri
 		return nil, 0, fmt.Errorf("error iterating pins: %w", err)
 	}
 
-	return pins, len(pins), nil
+	return pins, totalCount, nil
 }
 
 // GetUserIDFromToken retrieves the username from a session token

@@ -64,14 +64,19 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to add pin"), err
 	}
 
-	// If CID exists in IPFS, get and update the size
+	// If CID exists in IPFS, get and update the size asynchronously
 	if ipfsExists {
-		size, sizeErr := s.getCIDSize(ctx, pin.Cid)
-		if sizeErr == nil && size > 0 {
-			if updateErr := s.db.UpdatePinSize(ctx, requestId, size); updateErr != nil {
-				log.Printf("Warning: failed to update pin size for %s: %v", requestId, updateErr)
+		go func(reqID, cid string) {
+			timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			size, sizeErr := s.getCIDSize(timeoutCtx, cid)
+			if sizeErr == nil && size > 0 {
+				if updateErr := s.db.UpdatePinSize(timeoutCtx, reqID, size); updateErr != nil {
+					log.Printf("Warning: failed to update pin size for %s: %v", reqID, updateErr)
+				}
 			}
-		}
+		}(requestId, pin.Cid)
 	}
 
 	// Get delegates from IPFS cluster or use default
@@ -150,18 +155,20 @@ func (s *PinsAPIServiceSQLite) GetPinByRequestId(ctx context.Context, requestid 
 		}
 	}
 
-	// Try to fetch and update size if not set (lazy size update)
+	// Try to fetch and update size asynchronously (fire and forget with timeout)
 	if s.ipfsAPI != nil {
-		size, sizeErr := s.getCIDSize(ctx, pinStatus.Pin.Cid)
-		if sizeErr == nil && size > 0 {
-			// Update the size in the database (fire and forget)
-			go func() {
-				bgCtx := context.Background()
-				if updateErr := s.db.UpdatePinSize(bgCtx, requestid, size); updateErr != nil {
-					log.Printf("Warning: failed to update pin size for %s: %v", requestid, updateErr)
+		go func(reqID, cid string) {
+			// Use a short timeout to avoid blocking on remote content
+			timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			size, sizeErr := s.getCIDSize(timeoutCtx, cid)
+			if sizeErr == nil && size > 0 {
+				if updateErr := s.db.UpdatePinSize(timeoutCtx, reqID, size); updateErr != nil {
+					log.Printf("Warning: failed to update pin size for %s: %v", reqID, updateErr)
 				}
-			}()
-		}
+			}
+		}(requestid, pinStatus.Pin.Cid)
 	}
 
 	return Response(http.StatusOK, pinStatus), nil

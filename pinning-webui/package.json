@@ -9,7 +9,7 @@
     "dev:client": "vite",
     "build": "npm run build:client && npm run build:server",
     "build:client": "vite build",
-    "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --outfile=dist/server.mjs --external:better-sqlite3",
+    "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --outfile=dist/server.mjs --external:better-sqlite3 --external:fs --external:path --external:crypto --external:os --external:http --external:https --external:stream --external:url --external:util --external:events --external:buffer --external:querystring --external:zlib --external:net --external:tls --external:child_process --packages=external",
     "start": "node dist/server.mjs",
     "preview": "vite preview"
   },

@@ -70,6 +70,24 @@ verify_step() {
     fi
 }
 
+# Source nvm if available (for correct Node.js version)
+setup_node_env() {
+    # Try to source nvm from common locations
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    if [ -s "$NVM_DIR/nvm.sh" ]; then
+        source "$NVM_DIR/nvm.sh"
+        print_info "Using nvm Node.js: $(node -v)"
+    elif [ -s "/root/.nvm/nvm.sh" ]; then
+        export NVM_DIR="/root/.nvm"
+        source "$NVM_DIR/nvm.sh"
+        print_info "Using nvm Node.js: $(node -v)"
+    elif [ -s "$HOME/.nvm/nvm.sh" ]; then
+        export NVM_DIR="$HOME/.nvm"
+        source "$NVM_DIR/nvm.sh"
+        print_info "Using nvm Node.js: $(node -v)"
+    fi
+}
+
 # Load existing .env files from all services if they exist
 load_existing_env() {
     local target_dir="$1"
@@ -90,6 +108,23 @@ load_existing_env() {
     if [ -f "$target_dir/pinning-webui/.env" ]; then
         print_info "Found existing webui .env file, loading defaults..."
         source "$target_dir/pinning-webui/.env" 2>/dev/null || true
+    fi
+    
+    # Sanitize DATABASE_PATH - fix duplicated paths
+    if [ -n "$DATABASE_PATH" ]; then
+        # If path contains duplicated target_dir, extract just the relative part
+        if [[ "$DATABASE_PATH" == *"$target_dir"*"$target_dir"* ]]; then
+            print_warning "Detected corrupted DATABASE_PATH, fixing..."
+            DATABASE_PATH="data/pinning.db"
+        # If it's already an absolute path, convert to relative
+        elif [[ "$DATABASE_PATH" == /* ]]; then
+            # Extract just the relative path after target_dir
+            DATABASE_PATH="${DATABASE_PATH##$target_dir/}"
+            # If still absolute, use default
+            if [[ "$DATABASE_PATH" == /* ]]; then
+                DATABASE_PATH="data/pinning.db"
+            fi
+        fi
     fi
 }
 
@@ -1503,6 +1538,9 @@ main() {
     echo ""
     
     check_root
+    
+    # Setup Node.js environment (source nvm if available)
+    setup_node_env
     
     # Determine source directory (where this script is located)
     SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

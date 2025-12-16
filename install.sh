@@ -295,8 +295,13 @@ build_webui() {
     npm install
     
     # Build the application
+    # VITE_GOOGLE_CLIENT_ID must be set at build time for Vite to embed it
     print_info "Building WebUI..."
-    npm run build
+    if [ -n "$GOOGLE_CLIENT_ID" ]; then
+        VITE_GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" npm run build
+    else
+        npm run build
+    fi
     
     # Copy built files to target
     mkdir -p "$target_dir/pinning-webui/dist"

@@ -155,7 +155,7 @@ export default function Login() {
           <img
             src="https://fx.land/wp-content/uploads/2024/10/FULA_GRNLockup2_Lrg_green.png"
             alt="FULA"
-            className="h-16 mx-auto mb-6"
+            className="mx-auto mb-6"
           />
           <h1 className="text-3xl font-bold text-gray-900 mb-2">
             IPFS Pinning Service

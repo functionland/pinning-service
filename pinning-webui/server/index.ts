@@ -235,6 +235,9 @@ const dbOps = {
 // Create Express app
 const app = express();
 
+// Trust proxy (required for secure cookies behind nginx)
+app.set('trust proxy', 1);
+
 // Security middleware
 app.use(helmet({
   contentSecurityPolicy: {

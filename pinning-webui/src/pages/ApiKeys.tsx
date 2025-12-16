@@ -9,7 +9,7 @@ interface ApiKey {
 
 export default function ApiKeys() {
   const { t } = useLanguage();
-  const [keys, setKeys] = useState<ApiKey[]>();
+  const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);

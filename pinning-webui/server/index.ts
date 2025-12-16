@@ -154,19 +154,17 @@ const dbOps = {
   getUserPins(email: string, page: number, limit: number) {
     const offset = (page - 1) * limit;
     const pins = db.prepare(`
-      SELECT p.request_id, p.cid, p.name, p.created_at, p.status, p.size
-      FROM pins p
-      JOIN users u ON p.user_id = u.id
-      WHERE u.username = ? AND p.deleted = 0
-      ORDER BY p.created_at DESC
+      SELECT requestid as request_id, cid, name, created_at, status, size
+      FROM pins
+      WHERE username = ? AND status != 'deleted'
+      ORDER BY created_at DESC
       LIMIT ? OFFSET ?
     `).all(email, limit, offset) as any[];
     
     const countResult = db.prepare(`
       SELECT COUNT(*) as total
-      FROM pins p
-      JOIN users u ON p.user_id = u.id
-      WHERE u.username = ? AND p.deleted = 0
+      FROM pins
+      WHERE username = ? AND status != 'deleted'
     `).get(email) as any;
     
     return { pins, total: countResult?.total || 0 };
@@ -177,9 +175,8 @@ const dbOps = {
       SELECT 
         COUNT(*) as total_pins,
         COALESCE(SUM(size), 0) as total_size
-      FROM pins p
-      JOIN users u ON p.user_id = u.id
-      WHERE u.username = ?
+      FROM pins
+      WHERE username = ? AND status != 'deleted'
     `).get(email) as any;
     
     const user = db.prepare('SELECT last_login_at, created_at FROM webui_users WHERE email = ?').get(email) as any;
@@ -194,15 +191,10 @@ const dbOps = {
   
   deleteUserProfile(email: string) {
     const transaction = db.transaction(() => {
-      // Get user ID from main users table
-      const user = db.prepare('SELECT id FROM users WHERE username = ?').get(email) as any;
-      
-      if (user) {
-        // Delete all pins
-        db.prepare('DELETE FROM pins WHERE user_id = ?').run(user.id);
-        // Delete user from main table
-        db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
-      }
+      // Delete all pins for this user
+      db.prepare('DELETE FROM pins WHERE username = ?').run(email);
+      // Delete user from main table
+      db.prepare('DELETE FROM users WHERE username = ?').run(email);
       
       // Delete sessions
       db.prepare('DELETE FROM sessions WHERE username = ?').run(email);
@@ -216,17 +208,12 @@ const dbOps = {
   },
   
   addPin(email: string, cid: string, name?: string) {
-    // Get user ID
-    const user = db.prepare('SELECT id FROM users WHERE username = ?').get(email) as any;
-    if (!user) {
-      throw new Error('User not found');
-    }
-    
     const requestId = uuidv4();
+    const nameLower = (name || '').toLowerCase();
     db.prepare(`
-      INSERT INTO pins (request_id, user_id, cid, name, status, created_at)
-      VALUES (?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP)
-    `).run(requestId, user.id, cid, name || '');
+      INSERT INTO pins (requestid, username, cid, name, name_lowercase, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `).run(requestId, email, cid, name || '', nameLower);
     
     return requestId;
   },
@@ -466,9 +453,9 @@ app.get('/api/public/stats', (_req: Request, res: Response) => {
       SELECT 
         COUNT(*) as total_pins,
         COALESCE(SUM(size), 0) as total_size,
-        COUNT(DISTINCT user_id) as total_users
+        COUNT(DISTINCT username) as total_users
       FROM pins
-      WHERE deleted = 0
+      WHERE status != 'deleted'
     `).get() as any;
     
     res.json({

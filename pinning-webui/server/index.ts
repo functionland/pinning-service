@@ -431,10 +431,12 @@ app.post('/api/pins/:requestId/refresh', requireAuth, async (req: Request, res: 
     }
     
     // Call the pinning service to get updated status
-    const pinningApiUrl = process.env.PINNING_SERVICE_URL || process.env.PINNING_API_URL || 'http://localhost:6000';
-    console.log(`[webui] Refreshing pin ${requestId} via ${pinningApiUrl}`);
+    // Use hardcoded default to avoid any env var parsing issues
+    const pinningApiUrl = 'http://127.0.0.1:6000';
+    const fullUrl = `${pinningApiUrl}/pins/${requestId}`;
+    console.log(`[webui] Refreshing pin ${requestId} via ${fullUrl} (key: ${keys[0].key_id?.substring(0, 8)}...)`);
     
-    const response = await fetch(`${pinningApiUrl}/pins/${requestId}`, {
+    const response = await fetch(fullUrl, {
       headers: {
         'Authorization': `Bearer ${keys[0].key_id}`
       }

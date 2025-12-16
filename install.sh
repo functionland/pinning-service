@@ -778,14 +778,44 @@ check_nginx_config_exists() {
     return 1
 }
 
-# Check if SSL certificate exists for domain
+# Check if SSL certificate exists and is valid for domain
 check_ssl_exists() {
     local domain=$1
     
     if [ -d "/etc/letsencrypt/live/$domain" ]; then
-        return 0
+        # Check if cert is not expired (valid for at least 7 days)
+        if openssl x509 -checkend 604800 -noout -in "/etc/letsencrypt/live/$domain/fullchain.pem" 2>/dev/null; then
+            return 0
+        fi
     fi
     return 1
+}
+
+# Check if nginx config exists, is enabled, and nginx is running properly
+check_nginx_config_valid() {
+    local domain=$1
+    
+    # Check if config file exists
+    if [ ! -f "$NGINX_AVAILABLE/$domain" ]; then
+        return 1
+    fi
+    
+    # Check if it's enabled (symlink exists)
+    if [ ! -L "$NGINX_ENABLED/$domain" ]; then
+        return 1
+    fi
+    
+    # Check if nginx config test passes
+    if ! nginx -t 2>/dev/null; then
+        return 1
+    fi
+    
+    # Check if nginx is running
+    if ! systemctl is-active --quiet nginx; then
+        return 1
+    fi
+    
+    return 0
 }
 
 # Create nginx configuration for the services
@@ -971,9 +1001,15 @@ create_webui_nginx_config() {
     local target_dir=$2
     local webui_port=$3
     
-    print_info "Creating nginx configuration for WebUI at $domain..."
-    
     local config_file="$NGINX_AVAILABLE/$domain"
+    
+    # Check if nginx config is already valid - skip recreation
+    if check_nginx_config_valid "$domain"; then
+        print_info "Nginx configuration for WebUI at $domain is already valid, skipping..."
+        return 0
+    fi
+    
+    print_info "Creating nginx configuration for WebUI at $domain..."
     
     # Remove old config if exists (may have broken SSL blocks)
     rm -f "$config_file" "$NGINX_ENABLED/$domain" 2>/dev/null || true
@@ -1090,9 +1126,15 @@ create_ipfs_server_nginx_config() {
     local target_dir=$2
     local gateway_port=$3
     
-    print_info "Creating nginx configuration for IPFS Server at $domain..."
-    
     local config_file="$NGINX_AVAILABLE/$domain"
+    
+    # Check if nginx config is already valid - skip recreation
+    if check_nginx_config_valid "$domain"; then
+        print_info "Nginx configuration for IPFS Server at $domain is already valid, skipping..."
+        return 0
+    fi
+    
+    print_info "Creating nginx configuration for IPFS Server at $domain..."
     
     # Remove old config if exists (may have broken SSL blocks)
     rm -f "$config_file" "$NGINX_ENABLED/$domain" 2>/dev/null || true
@@ -1257,9 +1299,15 @@ create_pinning_nginx_config() {
     local target_dir=$2
     local pinning_port=$3
     
-    print_info "Creating nginx configuration for Pinning API at $domain..."
-    
     local config_file="$NGINX_AVAILABLE/$domain"
+    
+    # Check if nginx config is already valid - skip recreation
+    if check_nginx_config_valid "$domain"; then
+        print_info "Nginx configuration for Pinning API at $domain is already valid, skipping..."
+        return 0
+    fi
+    
+    print_info "Creating nginx configuration for Pinning API at $domain..."
     
     # Remove old config if exists (may have broken SSL blocks)
     rm -f "$config_file" "$NGINX_ENABLED/$domain" 2>/dev/null || true

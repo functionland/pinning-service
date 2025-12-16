@@ -61,6 +61,8 @@ declare global {
             client_id: string;
             callback: (response: { credential: string }) => void;
             auto_select?: boolean;
+            ux_mode?: 'popup' | 'redirect';
+            itp_support?: boolean;
           }) => void;
           renderButton: (element: HTMLElement, config: {
             theme?: string;
@@ -97,15 +99,18 @@ export default function Login() {
   }, []);
 
   const handleCredentialResponse = useCallback(async (response: { credential: string }) => {
+    console.log('[Login] Google credential received, length:', response.credential?.length);
     try {
       const result = await login(response.credential);
+      console.log('[Login] Login successful, isNew:', result.isNew);
       if (result.isNew) {
         navigate('/?welcome=true');
       } else {
         navigate('/');
       }
     } catch (error) {
-      console.error('Login failed:', error);
+      console.error('[Login] Login failed:', error);
+      alert('Login failed: ' + (error instanceof Error ? error.message : 'Unknown error'));
     }
   }, [login, navigate]);
 
@@ -117,9 +122,19 @@ export default function Login() {
 
     const initializeGoogle = () => {
       if (window.google) {
+        const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+        console.log('[Login] Initializing Google Sign-In, client_id present:', !!clientId, 'length:', clientId.length);
+        
+        if (!clientId) {
+          console.error('[Login] VITE_GOOGLE_CLIENT_ID is not set!');
+          return;
+        }
+        
         window.google.accounts.id.initialize({
-          client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID || '',
+          client_id: clientId,
           callback: handleCredentialResponse,
+          ux_mode: 'popup',
+          itp_support: true,
         });
 
         const buttonDiv = document.getElementById('google-signin-button');

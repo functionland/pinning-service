@@ -420,6 +420,8 @@ Description=IPFS Gateway and Upload Server
 Documentation=https://github.com/functionland/pinning-service
 After=network.target ipfs.service fula-pinning-service.service
 Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
@@ -441,10 +443,6 @@ ReadWritePaths=${target_dir}/ipfs-server/uploads ${target_dir}/data
 # Resource limits
 LimitNOFILE=65535
 MemoryMax=2G
-
-# Restart limits
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 # Logging
 StandardOutput=journal
@@ -519,6 +517,8 @@ Description=FULA Pinning Service WebUI
 Documentation=https://github.com/functionland/pinning-service
 After=network.target fula-pinning-service.service
 Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
@@ -540,10 +540,6 @@ ReadWritePaths=${target_dir}/data ${target_dir}/pinning-webui
 # Resource limits
 LimitNOFILE=65535
 MemoryMax=512M
-
-# Restart limits
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 # Logging
 StandardOutput=journal

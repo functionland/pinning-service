@@ -367,6 +367,66 @@ func (s *SQLiteService) UpdatePinPinningStatus(ctx context.Context, requestID, s
 	return nil
 }
 
+// GetExistingPinByCID retrieves an existing non-deleted pin by CID for a user
+// Returns nil if no existing pin is found
+func (s *SQLiteService) GetExistingPinByCID(ctx context.Context, username, cid string) (*PinStatus, error) {
+	if username == "" || cid == "" {
+		return nil, nil
+	}
+
+	query := `
+		SELECT requestid, cid, name, origins, meta, status, delegates, info, created_at
+		FROM pins
+		WHERE username = ? AND cid = ? AND status != 'deleted'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+
+	var (
+		reqID, cidVal, name, status string
+		originsJSON, metaJSON       string
+		delegatesJSON, infoJSON     string
+		createdAt                   time.Time
+	)
+
+	err := s.db.QueryRowContext(ctx, query, username, cid).Scan(
+		&reqID, &cidVal, &name, &originsJSON, &metaJSON,
+		&status, &delegatesJSON, &infoJSON, &createdAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil // No existing pin found
+		}
+		return nil, fmt.Errorf("failed to query existing pin: %w", err)
+	}
+
+	var origins []string
+	var meta map[string]string
+	var delegates []string
+	var info map[string]string
+
+	json.Unmarshal([]byte(originsJSON), &origins)
+	json.Unmarshal([]byte(metaJSON), &meta)
+	json.Unmarshal([]byte(delegatesJSON), &delegates)
+	json.Unmarshal([]byte(infoJSON), &info)
+
+	pinStatus := PinStatus{
+		Requestid: reqID,
+		Status:    Status(status),
+		Created:   createdAt,
+		Pin: Pin{
+			Cid:     cidVal,
+			Name:    name,
+			Origins: origins,
+			Meta:    meta,
+		},
+		Delegates: delegates,
+		Info:      info,
+	}
+
+	return &pinStatus, nil
+}
+
 // GetPinByRequestID retrieves a pin by its request ID
 func (s *SQLiteService) GetPinByRequestID(ctx context.Context, requestID string) (PinStatus, string, error) {
 	if requestID == "" {

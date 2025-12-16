@@ -431,16 +431,18 @@ app.post('/api/pins/:requestId/refresh', requireAuth, async (req: Request, res: 
     }
     
     // Call the pinning service to get updated status
-    const pinningApiUrl = process.env.PINNING_API_URL || 'http://localhost:6000';
+    const pinningApiUrl = process.env.PINNING_SERVICE_URL || process.env.PINNING_API_URL || 'http://localhost:6000';
+    console.log(`[webui] Refreshing pin ${requestId} via ${pinningApiUrl}`);
+    
     const response = await fetch(`${pinningApiUrl}/pins/${requestId}`, {
       headers: {
-        'Authorization': `Bearer ${keys[0].token}`
+        'Authorization': `Bearer ${keys[0].key_id}`
       }
     });
     
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[webui] Error refreshing pin:', errorText);
+      console.error('[webui] Error refreshing pin:', response.status, errorText);
       return res.status(response.status).json({ error: 'Failed to refresh pin status' });
     }
     
@@ -452,6 +454,7 @@ app.post('/api/pins/:requestId/refresh', requireAuth, async (req: Request, res: 
       status: pinData.status,
       cid: pinData.pin?.cid,
       name: pinData.pin?.name,
+      size: pinData.info?.size || 0,
       refreshed: true
     });
   } catch (error) {

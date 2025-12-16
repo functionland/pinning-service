@@ -40,6 +40,22 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", err.Error()), err
 	}
 
+	userID, err := s.extractUserIDFromAuth(ctx)
+	if err != nil {
+		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
+	}
+
+	// Check if user already has a pin for this CID (avoid duplicates)
+	existingPin, err := s.db.GetExistingPinByCID(ctx, userID, pin.Cid)
+	if err != nil {
+		log.Printf("Warning: failed to check for existing pin: %v", err)
+	}
+	if existingPin != nil {
+		log.Printf("CID %s already pinned for user %s, returning existing pin %s", pin.Cid, userID, existingPin.Requestid)
+		// Return the existing pin with 200 OK (not 202 Accepted for new pins)
+		return Response(http.StatusOK, *existingPin), nil
+	}
+
 	ipfsExists := false
 	exists, err := s.cidExistsInIPFS(ctx, pin.Cid)
 	if err != nil {
@@ -47,11 +63,6 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 		ipfsExists = false
 	} else {
 		ipfsExists = exists
-	}
-
-	userID, err := s.extractUserIDFromAuth(ctx)
-	if err != nil {
-		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
 	var uploadStatus string

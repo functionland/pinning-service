@@ -31,6 +31,7 @@ export default function Layout() {
               <img 
                 src="https://fx.land/wp-content/uploads/2024/10/FULA_GRNLockup2_Lrg_green.png" 
                 alt="FULA" 
+                style="max-width: 180px;"
                 className="w-auto"
               />
               <span className="text-lg font-semibold text-gray-900">Pinning Service</span>

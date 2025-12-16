@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useLanguage } from '../context/LanguageContext';
 
 interface Stats {
   totalPins: number;
@@ -24,6 +25,7 @@ function formatDate(dateStr: string | null): string {
 
 export default function Dashboard() {
   const { user } = useAuth();
+  const { t } = useLanguage();
   const [searchParams] = useSearchParams();
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -56,11 +58,12 @@ export default function Dashboard() {
             <div className="text-3xl">🎉</div>
             <div>
               <h2 className="text-lg font-semibold text-primary-800">
-                Welcome to FULA Pinning Service!
+                {t.dashboard.welcomeTitle}
               </h2>
               <p className="text-primary-700 mt-1">
-                Your account has been created and an API key has been generated for you.
-                Check the <Link to="/keys" className="underline font-medium">API Keys</Link> page to get started.
+                {t.dashboard.welcomeDesc.split('API Keys')[0]}
+                <Link to="/keys" className="underline font-medium">{t.nav.apiKeys}</Link>
+                {t.dashboard.welcomeDesc.split('API Keys')[1] || ''}
               </p>
             </div>
           </div>
@@ -69,8 +72,8 @@ export default function Dashboard() {
 
       {/* Page header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <p className="text-gray-600 mt-1">Welcome back, {user?.name || user?.email}</p>
+        <h1 className="text-2xl font-bold text-gray-900">{t.dashboard.title}</h1>
+        <p className="text-gray-600 mt-1">{t.dashboard.welcomeBack}, {user?.name || user?.email}</p>
       </div>
 
       {/* Stats grid */}
@@ -92,7 +95,7 @@ export default function Dashboard() {
           <div className="card">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Total Pins</p>
+                <p className="text-sm font-medium text-gray-500">{t.dashboard.totalPins}</p>
                 <p className="text-3xl font-bold text-gray-900 mt-1">{stats.totalPins}</p>
               </div>
               <div className="text-4xl opacity-20">📌</div>
@@ -102,7 +105,7 @@ export default function Dashboard() {
           <div className="card">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Storage Used</p>
+                <p className="text-sm font-medium text-gray-500">{t.dashboard.storageUsed}</p>
                 <p className="text-3xl font-bold text-gray-900 mt-1">{formatBytes(stats.totalSize)}</p>
               </div>
               <div className="text-4xl opacity-20">💾</div>
@@ -112,7 +115,7 @@ export default function Dashboard() {
           <div className="card">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Last Login</p>
+                <p className="text-sm font-medium text-gray-500">{t.dashboard.lastLogin}</p>
                 <p className="text-lg font-semibold text-gray-900 mt-1">{formatDate(stats.lastLogin)}</p>
               </div>
               <div className="text-4xl opacity-20">🕐</div>
@@ -122,7 +125,7 @@ export default function Dashboard() {
           <div className="card">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Member Since</p>
+                <p className="text-sm font-medium text-gray-500">{t.dashboard.memberSince}</p>
                 <p className="text-lg font-semibold text-gray-900 mt-1">
                   {stats.memberSince ? new Date(stats.memberSince).toLocaleDateString() : 'Today'}
                 </p>
@@ -135,14 +138,14 @@ export default function Dashboard() {
 
       {/* Quick actions */}
       <div>
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">{t.dashboard.quickActions}</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <Link to="/pins" className="card hover:shadow-md transition-shadow group">
             <div className="flex items-center space-x-4">
               <div className="text-3xl group-hover:scale-110 transition-transform">📋</div>
               <div>
-                <h3 className="font-semibold text-gray-900">View Pins</h3>
-                <p className="text-sm text-gray-500">Manage your pinned content</p>
+                <h3 className="font-semibold text-gray-900">{t.dashboard.viewPins}</h3>
+                <p className="text-sm text-gray-500">{t.dashboard.viewPinsDesc}</p>
               </div>
             </div>
           </Link>
@@ -151,8 +154,8 @@ export default function Dashboard() {
             <div className="flex items-center space-x-4">
               <div className="text-3xl group-hover:scale-110 transition-transform">🔑</div>
               <div>
-                <h3 className="font-semibold text-gray-900">API Keys</h3>
-                <p className="text-sm text-gray-500">Manage your access tokens</p>
+                <h3 className="font-semibold text-gray-900">{t.dashboard.apiKeys}</h3>
+                <p className="text-sm text-gray-500">{t.dashboard.apiKeysDesc}</p>
               </div>
             </div>
           </Link>
@@ -161,8 +164,8 @@ export default function Dashboard() {
             <div className="flex items-center space-x-4">
               <div className="text-3xl group-hover:scale-110 transition-transform">👤</div>
               <div>
-                <h3 className="font-semibold text-gray-900">Profile</h3>
-                <p className="text-sm text-gray-500">Account settings</p>
+                <h3 className="font-semibold text-gray-900">{t.dashboard.profile}</h3>
+                <p className="text-sm text-gray-500">{t.dashboard.profileDesc}</p>
               </div>
             </div>
           </Link>
@@ -171,10 +174,9 @@ export default function Dashboard() {
 
       {/* API documentation hint */}
       <div className="card bg-gray-50 border-gray-200">
-        <h2 className="text-lg font-semibold text-gray-900 mb-2">API Documentation</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-2">{t.dashboard.apiDocsTitle}</h2>
         <p className="text-gray-600 mb-4">
-          Use your API key to interact with the IPFS Pinning Service API. 
-          The API follows the standard IPFS Pinning Service specification.
+          {t.dashboard.apiDocsDesc}
         </p>
         <code className="block bg-white rounded-lg p-4 text-sm font-mono text-gray-700 overflow-x-auto">
           curl -X POST "https://api.cloud.fx.land/pins" \<br />

@@ -1,16 +1,19 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-
-const navigation = [
-  { name: 'Dashboard', href: '/' },
-  { name: 'API Keys', href: '/keys' },
-  { name: 'My Pins', href: '/pins' },
-  { name: 'Profile', href: '/profile' },
-];
+import { useLanguage } from '../context/LanguageContext';
+import LanguageSelector from './LanguageSelector';
 
 export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const { t } = useLanguage();
+
+  const navigation = [
+    { name: t.nav.dashboard, href: '/' },
+    { name: t.nav.apiKeys, href: '/keys' },
+    { name: t.nav.myPins, href: '/pins' },
+    { name: t.nav.profile, href: '/profile' },
+  ];
 
   const handleLogout = async () => {
     await logout();
@@ -54,6 +57,7 @@ export default function Layout() {
 
             {/* User menu */}
             <div className="flex items-center space-x-4">
+              <LanguageSelector />
               <div className="flex items-center space-x-3">
                 {user?.picture && (
                   <img
@@ -68,7 +72,7 @@ export default function Layout() {
                 onClick={handleLogout}
                 className="text-sm text-gray-500 hover:text-gray-700 font-medium"
               >
-                Logout
+                {t.nav.logout}
               </button>
             </div>
           </div>

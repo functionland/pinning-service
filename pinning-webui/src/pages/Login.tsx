@@ -1,6 +1,8 @@
 import { useEffect, useCallback, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useLanguage } from '../context/LanguageContext';
+import LanguageSelector from '../components/LanguageSelector';
 
 function useAnimatedCounter(targetValue: number, duration: number = 5000) {
   const [displayValue, setDisplayValue] = useState(0);
@@ -77,6 +79,7 @@ declare global {
 export default function Login() {
   const { user, login } = useAuth();
   const navigate = useNavigate();
+  const { t } = useLanguage();
   const [totalSize, setTotalSize] = useState(0);
   const animatedSize = useAnimatedCounter(totalSize, 5000);
   const formattedSize = formatStorageSize(animatedSize);
@@ -149,6 +152,11 @@ export default function Login() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary-50 to-gray-100 flex flex-col items-center justify-center p-4">
+      {/* Language selector - top right */}
+      <div className="absolute top-4 right-4">
+        <LanguageSelector />
+      </div>
+
       <div className="w-full max-w-md">
         {/* Logo and title */}
         <div className="text-center mb-8">
@@ -158,17 +166,17 @@ export default function Login() {
             className="mx-auto mb-6"
           />
           <h1 className="text-3xl font-bold text-gray-900 mb-2">
-            IPFS Pinning Service
+            {t.login.title}
           </h1>
           <p className="text-gray-600">
-            Secure, reliable, and easy-to-use IPFS pinning
+            {t.login.subtitle}
           </p>
         </div>
 
         {/* Storage counter */}
         {totalSize > 0 && (
           <div className="bg-white/80 backdrop-blur rounded-xl shadow-sm p-6 mb-6 text-center">
-            <p className="text-sm text-gray-500 mb-1">Total data stored on FULA</p>
+            <p className="text-sm text-gray-500 mb-1">{t.login.totalStored}</p>
             <div className="flex items-baseline justify-center gap-1">
               <span className="text-4xl font-bold text-primary-600 tabular-nums">
                 {formattedSize.value}
@@ -183,7 +191,7 @@ export default function Login() {
         {/* Login card */}
         <div className="bg-white rounded-2xl shadow-lg p-8">
           <h2 className="text-xl font-semibold text-gray-900 mb-6 text-center">
-            Sign in to continue
+            {t.login.signIn}
           </h2>
 
           <div className="flex justify-center">
@@ -192,8 +200,7 @@ export default function Login() {
 
           <div className="mt-6 pt-6 border-t border-gray-100">
             <p className="text-xs text-gray-500 text-center">
-              By signing in, you agree to our Terms of Service and Privacy Policy.
-              Your email will be used as your account identifier.
+              {t.login.terms}
             </p>
           </div>
         </div>
@@ -202,18 +209,18 @@ export default function Login() {
         <div className="mt-8 grid grid-cols-3 gap-4 text-center">
           <div className="p-4">
             <div className="text-2xl mb-2">🔑</div>
-            <div className="text-sm font-medium text-gray-900">API Keys</div>
-            <div className="text-xs text-gray-500">Secure access</div>
+            <div className="text-sm font-medium text-gray-900">{t.login.apiKeys}</div>
+            <div className="text-xs text-gray-500">{t.login.apiKeysDesc}</div>
           </div>
           <div className="p-4">
             <div className="text-2xl mb-2">📌</div>
-            <div className="text-sm font-medium text-gray-900">Pin CIDs</div>
-            <div className="text-xs text-gray-500">Keep content alive</div>
+            <div className="text-sm font-medium text-gray-900">{t.login.pinCids}</div>
+            <div className="text-xs text-gray-500">{t.login.pinCidsDesc}</div>
           </div>
           <div className="p-4">
             <div className="text-2xl mb-2">📊</div>
-            <div className="text-sm font-medium text-gray-900">Analytics</div>
-            <div className="text-xs text-gray-500">Track usage</div>
+            <div className="text-sm font-medium text-gray-900">{t.login.analytics}</div>
+            <div className="text-xs text-gray-500">{t.login.analyticsDesc}</div>
           </div>
         </div>
       </div>

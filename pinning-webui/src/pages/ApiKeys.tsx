@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useLanguage } from '../context/LanguageContext';
 
 interface ApiKey {
   key_id: string;
@@ -7,7 +8,8 @@ interface ApiKey {
 }
 
 export default function ApiKeys() {
-  const [keys, setKeys] = useState<ApiKey[]>([]);
+  const { t } = useLanguage();
+  const [keys, setKeys] = useState<ApiKey[]>();
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,8 +84,8 @@ export default function ApiKeys() {
       {/* Page header */}
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">API Keys</h1>
-          <p className="text-gray-600 mt-1">Manage your API access tokens</p>
+          <h1 className="text-2xl font-bold text-gray-900">{t.apiKeys.title}</h1>
+          <p className="text-gray-600 mt-1">{t.apiKeys.subtitle}</p>
         </div>
         <button
           onClick={createKey}
@@ -93,12 +95,12 @@ export default function ApiKeys() {
           {creating ? (
             <>
               <span className="animate-spin">⏳</span>
-              <span>Creating...</span>
+              <span>{t.apiKeys.creating}</span>
             </>
           ) : (
             <>
               <span>+</span>
-              <span>Create New Key</span>
+              <span>{t.apiKeys.createNew}</span>
             </>
           )}
         </button>
@@ -116,10 +118,9 @@ export default function ApiKeys() {
         <div className="flex items-start space-x-3">
           <span className="text-xl">ℹ️</span>
           <div className="text-sm text-blue-800">
-            <p className="font-medium">Keep your API keys secure</p>
+            <p className="font-medium">{t.apiKeys.securityTitle}</p>
             <p className="mt-1">
-              API keys provide full access to your pinning service account. 
-              Never share them publicly or commit them to version control.
+              {t.apiKeys.securityDesc}
             </p>
           </div>
         </div>
@@ -140,8 +141,8 @@ export default function ApiKeys() {
       ) : keys.length === 0 ? (
         <div className="card text-center py-12">
           <div className="text-5xl mb-4">🔑</div>
-          <h3 className="text-lg font-semibold text-gray-900 mb-2">No API Keys</h3>
-          <p className="text-gray-600 mb-4">Create your first API key to get started</p>
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">{t.apiKeys.noKeys}</h3>
+          <p className="text-gray-600 mb-4">{t.apiKeys.noKeysDesc}</p>
           <button onClick={createKey} disabled={creating} className="btn-primary">
             Create API Key
           </button>
@@ -152,16 +153,16 @@ export default function ApiKeys() {
             <thead className="bg-gray-50 border-b border-gray-100">
               <tr>
                 <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
-                  API Key
+                  {t.apiKeys.apiKey}
                 </th>
                 <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden sm:table-cell">
-                  Created
+                  {t.apiKeys.created}
                 </th>
                 <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden md:table-cell">
-                  Last Used
+                  {t.apiKeys.lastUsed}
                 </th>
                 <th className="text-right text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
-                  Actions
+                  {t.apiKeys.actions}
                 </th>
               </tr>
             </thead>
@@ -191,18 +192,18 @@ export default function ApiKeys() {
                   <td className="px-4 py-4 text-right">
                     {deleteConfirm === key.key_id ? (
                       <div className="flex items-center justify-end space-x-2">
-                        <span className="text-sm text-gray-600">Delete?</span>
+                        <span className="text-sm text-gray-600">{t.apiKeys.deleteConfirm}</span>
                         <button
                           onClick={() => deleteKey(key.key_id)}
                           className="text-red-600 hover:text-red-700 text-sm font-medium"
                         >
-                          Yes
+                          {t.apiKeys.yes}
                         </button>
                         <button
                           onClick={() => setDeleteConfirm(null)}
                           className="text-gray-600 hover:text-gray-700 text-sm"
                         >
-                          No
+                          {t.apiKeys.no}
                         </button>
                       </div>
                     ) : (
@@ -210,7 +211,7 @@ export default function ApiKeys() {
                         onClick={() => setDeleteConfirm(key.key_id)}
                         className="text-red-600 hover:text-red-700 text-sm font-medium"
                       >
-                        Delete
+                        {t.apiKeys.delete}
                       </button>
                     )}
                   </td>
@@ -223,9 +224,9 @@ export default function ApiKeys() {
 
       {/* Usage example */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">How to use your API key</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">{t.apiKeys.usageTitle}</h2>
         <p className="text-gray-600 mb-4">
-          Include your API key in the Authorization header of your requests:
+          {t.apiKeys.usageDesc}
         </p>
         <code className="block bg-gray-50 rounded-lg p-4 text-sm font-mono text-gray-700 overflow-x-auto">
           Authorization: Bearer YOUR_API_KEY

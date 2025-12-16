@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useLanguage } from '../context/LanguageContext';
 
 interface Pin {
   request_id: string;
@@ -18,6 +19,7 @@ interface PinsResponse {
 }
 
 export default function Pins() {
+  const { t } = useLanguage();
   const [data, setData] = useState<PinsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -100,13 +102,13 @@ export default function Pins() {
       {/* Page header */}
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">My Pins</h1>
+          <h1 className="text-2xl font-bold text-gray-900">{t.pins.title}</h1>
           <p className="text-gray-600 mt-1">
-            {data ? `${data.total} total pins` : 'Loading...'}
+            {data ? `${data.total} ${t.pins.totalPins}` : t.common.loading}
           </p>
         </div>
         <button onClick={() => setShowAddModal(true)} className="btn-primary">
-          + Add Pin
+          + {t.pins.addPin}
         </button>
       </div>
 
@@ -123,34 +125,34 @@ export default function Pins() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md">
             <div className="p-6 border-b border-gray-100">
-              <h2 className="text-xl font-semibold text-gray-900">Add New Pin</h2>
+              <h2 className="text-xl font-semibold text-gray-900">{t.pins.addTitle}</h2>
             </div>
             <form onSubmit={addPin} className="p-6 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  CID <span className="text-red-500">*</span>
+                  {t.pins.cidLabel} <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
                   value={newCid}
                   onChange={(e) => setNewCid(e.target.value)}
-                  placeholder="Qm... or bafy..."
+                  placeholder={t.pins.cidPlaceholder}
                   className="input"
                   required
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  Enter a valid IPFS CID (v0 or v1)
+                  {t.pins.cidHelp}
                 </p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Name (optional)
+                  {t.pins.nameLabel}
                 </label>
                 <input
                   type="text"
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
-                  placeholder="My file"
+                  placeholder={t.pins.namePlaceholder}
                   className="input"
                 />
               </div>
@@ -160,10 +162,10 @@ export default function Pins() {
                   onClick={() => setShowAddModal(false)}
                   className="btn-secondary"
                 >
-                  Cancel
+                  {t.pins.cancel}
                 </button>
                 <button type="submit" disabled={adding || !newCid.trim()} className="btn-primary">
-                  {adding ? 'Adding...' : 'Add Pin'}
+                  {adding ? t.pins.adding : t.pins.add}
                 </button>
               </div>
             </form>
@@ -183,10 +185,10 @@ export default function Pins() {
       ) : data && data.pins.length === 0 ? (
         <div className="card text-center py-12">
           <div className="text-5xl mb-4">📌</div>
-          <h3 className="text-lg font-semibold text-gray-900 mb-2">No Pins Yet</h3>
-          <p className="text-gray-600 mb-4">Add your first pin to get started</p>
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">{t.pins.noPins}</h3>
+          <p className="text-gray-600 mb-4">{t.pins.noPinsDesc}</p>
           <button onClick={() => setShowAddModal(true)} className="btn-primary">
-            Add Your First Pin
+            {t.pins.addFirst}
           </button>
         </div>
       ) : data && (
@@ -197,19 +199,19 @@ export default function Pins() {
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
                     <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
-                      CID
+                      {t.pins.cid}
                     </th>
                     <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden sm:table-cell">
-                      Name
+                      {t.pins.name}
                     </th>
                     <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden md:table-cell">
-                      Created At
+                      {t.pins.createdAt}
                     </th>
                     <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
-                      Status
+                      {t.pins.status}
                     </th>
                     <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden lg:table-cell">
-                      Request ID
+                      {t.pins.requestId}
                     </th>
                   </tr>
                 </thead>
@@ -246,7 +248,7 @@ export default function Pins() {
           {data.totalPages > 1 && (
             <div className="flex justify-between items-center">
               <p className="text-sm text-gray-600">
-                Page {data.page} of {data.totalPages}
+                {t.pins.page} {data.page} {t.pins.of} {data.totalPages}
               </p>
               <div className="flex space-x-2">
                 <button
@@ -254,14 +256,14 @@ export default function Pins() {
                   disabled={page === 1}
                   className="btn-secondary disabled:opacity-50"
                 >
-                  Previous
+                  {t.pins.previous}
                 </button>
                 <button
                   onClick={() => setPage((p) => Math.min(data.totalPages, p + 1))}
                   disabled={page === data.totalPages}
                   className="btn-secondary disabled:opacity-50"
                 >
-                  Next
+                  {t.pins.next}
                 </button>
               </div>
             </div>

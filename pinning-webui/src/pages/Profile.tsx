@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useLanguage } from '../context/LanguageContext';
 
 export default function Profile() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const { t } = useLanguage();
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState('');
   const [deleting, setDeleting] = useState(false);
@@ -45,8 +47,8 @@ export default function Profile() {
     <div className="space-y-6 max-w-2xl">
       {/* Page header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Profile</h1>
-        <p className="text-gray-600 mt-1">Manage your account settings</p>
+        <h1 className="text-2xl font-bold text-gray-900">{t.profile.title}</h1>
+        <p className="text-gray-600 mt-1">{t.profile.subtitle}</p>
       </div>
 
       {/* Profile info */}
@@ -64,43 +66,43 @@ export default function Profile() {
             </div>
           )}
           <div>
-            <h2 className="text-xl font-semibold text-gray-900">{user?.name || 'User'}</h2>
+            <h2 className="text-xl font-semibold text-gray-900">{user?.name || t.common.user}</h2>
             <p className="text-gray-600">{user?.email}</p>
-            <p className="text-sm text-gray-500 mt-1">Signed in with Google</p>
+            <p className="text-sm text-gray-500 mt-1">{t.profile.signedWith}</p>
           </div>
         </div>
       </div>
 
       {/* Account info */}
       <div className="card">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Account Information</h3>
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">{t.profile.accountInfo}</h3>
         <div className="space-y-4">
           <div className="flex justify-between py-3 border-b border-gray-100">
-            <span className="text-gray-600">Email</span>
+            <span className="text-gray-600">{t.profile.email}</span>
             <span className="font-medium text-gray-900">{user?.email}</span>
           </div>
           <div className="flex justify-between py-3 border-b border-gray-100">
-            <span className="text-gray-600">User ID</span>
+            <span className="text-gray-600">{t.profile.userId}</span>
             <span className="font-mono text-sm text-gray-700">{user?.email}</span>
           </div>
           <div className="flex justify-between py-3">
-            <span className="text-gray-600">Authentication</span>
-            <span className="text-gray-900">Google OAuth</span>
+            <span className="text-gray-600">{t.profile.auth}</span>
+            <span className="text-gray-900">{t.profile.googleOAuth}</span>
           </div>
         </div>
       </div>
 
       {/* Danger zone */}
       <div className="card border-red-200 bg-red-50">
-        <h3 className="text-lg font-semibold text-red-800 mb-2">Danger Zone</h3>
+        <h3 className="text-lg font-semibold text-red-800 mb-2">{t.profile.dangerTitle}</h3>
         <p className="text-red-700 text-sm mb-4">
-          Once you delete your account, there is no going back. All your pins and data will be permanently deleted.
+          {t.profile.dangerDesc}
         </p>
         <button
           onClick={() => setShowDeleteModal(true)}
           className="btn-danger"
         >
-          Delete My Account
+          {t.profile.deleteAccount}
         </button>
       </div>
 
@@ -109,15 +111,15 @@ export default function Profile() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md">
             <div className="p-6 border-b border-gray-100">
-              <h2 className="text-xl font-semibold text-red-600">Delete Account</h2>
+              <h2 className="text-xl font-semibold text-red-600">{t.profile.deleteTitle}</h2>
             </div>
             <div className="p-6 space-y-4">
               <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-                <p className="text-red-800 font-medium">⚠️ This action cannot be undone</p>
+                <p className="text-red-800 font-medium">⚠️ {t.profile.deleteWarning}</p>
                 <ul className="text-red-700 text-sm mt-2 space-y-1">
-                  <li>• All your pins will be permanently deleted</li>
-                  <li>• All your API keys will be revoked</li>
-                  <li>• Your account data will be completely removed</li>
+                  <li>• {t.profile.deletePins}</li>
+                  <li>• {t.profile.deleteKeys}</li>
+                  <li>• {t.profile.deleteData}</li>
                 </ul>
               </div>
 
@@ -129,7 +131,7 @@ export default function Profile() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Type <span className="font-mono font-bold">delete</span> to confirm
+                  {t.profile.confirmLabel}
                 </label>
                 <input
                   type="text"
@@ -150,14 +152,14 @@ export default function Profile() {
                   }}
                   className="btn-secondary"
                 >
-                  Cancel
+                  {t.pins.cancel}
                 </button>
                 <button
                   onClick={handleDeleteProfile}
                   disabled={deleting || deleteConfirmation !== 'delete'}
                   className="btn-danger disabled:opacity-50"
                 >
-                  {deleting ? 'Deleting...' : 'Delete My Account'}
+                  {deleting ? t.profile.deleting : t.profile.deleteAccount}
                 </button>
               </div>
             </div>

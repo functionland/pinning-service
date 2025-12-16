@@ -151,21 +151,31 @@ const dbOps = {
     return result.changes > 0;
   },
   
-  getUserPins(email: string, page: number, limit: number) {
+  getUserPins(email: string, page: number, limit: number, search?: string) {
     const offset = (page - 1) * limit;
+    
+    let whereClause = 'WHERE username = ? AND status != \'deleted\'';
+    const params: any[] = [email];
+    
+    if (search && search.trim()) {
+      whereClause += ' AND (cid LIKE ? OR requestid LIKE ?)';
+      const searchPattern = `%${search.trim()}%`;
+      params.push(searchPattern, searchPattern);
+    }
+    
     const pins = db.prepare(`
       SELECT requestid as request_id, cid, name, created_at, status, size
       FROM pins
-      WHERE username = ? AND status != 'deleted'
+      ${whereClause}
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
-    `).all(email, limit, offset) as any[];
+    `).all(...params, limit, offset) as any[];
     
     const countResult = db.prepare(`
       SELECT COUNT(*) as total
       FROM pins
-      WHERE username = ? AND status != 'deleted'
-    `).get(email) as any;
+      ${whereClause}
+    `).get(...params) as any;
     
     return { pins, total: countResult?.total || 0 };
   },
@@ -378,8 +388,9 @@ app.get('/api/pins', requireAuth, (req: Request, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const search = req.query.search as string | undefined;
     
-    const { pins, total } = dbOps.getUserPins(req.session.user!.email, page, limit);
+    const { pins, total } = dbOps.getUserPins(req.session.user!.email, page, limit, search);
     res.json({ pins, total, page, limit, totalPages: Math.ceil(total / limit) });
   } catch (error) {
     console.error('[webui] Error fetching pins:', error);

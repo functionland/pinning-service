@@ -79,6 +79,13 @@ export const ar: Translations = {
     of: 'من',
     previous: 'السابق',
     next: 'التالي',
+    searchPlaceholder: 'البحث بـ CID أو معرف الطلب...',
+    search: 'بحث',
+    clear: 'مسح',
+    copy: 'نسخ',
+    copied: 'تم النسخ!',
+    close: 'إغلاق',
+    noResults: 'لم يتم العثور على تثبيتات مطابقة',
   },
   profile: {
     title: 'الملف الشخصي',

@@ -79,6 +79,13 @@ export const en: Translations = {
     of: 'of',
     previous: 'Previous',
     next: 'Next',
+    searchPlaceholder: 'Search by CID or Request ID...',
+    search: 'Search',
+    clear: 'Clear',
+    copy: 'Copy',
+    copied: 'Copied!',
+    close: 'Close',
+    noResults: 'No pins found matching your search',
   },
   profile: {
     title: 'Profile',

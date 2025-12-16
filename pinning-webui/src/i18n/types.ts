@@ -97,6 +97,13 @@ export interface Translations {
     of: string;
     previous: string;
     next: string;
+    searchPlaceholder: string;
+    search: string;
+    clear: string;
+    copy: string;
+    copied: string;
+    close: string;
+    noResults: string;
   };
   profile: {
     title: string;

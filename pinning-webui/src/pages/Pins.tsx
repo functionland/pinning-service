@@ -28,15 +28,22 @@ export default function Pins() {
   const [newCid, setNewCid] = useState('');
   const [newName, setNewName] = useState('');
   const [adding, setAdding] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [expandedValue, setExpandedValue] = useState<{ type: string; value: string } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     fetchPins();
-  }, [page]);
+  }, [page, searchQuery]);
 
   const fetchPins = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/pins?page=${page}&limit=20`, { credentials: 'include' });
+      const params = new URLSearchParams({ page: String(page), limit: '20' });
+      if (searchQuery.trim()) {
+        params.set('search', searchQuery.trim());
+      }
+      const res = await fetch(`/api/pins?${params}`, { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to fetch pins');
       const result = await res.json();
       setData(result);
@@ -45,6 +52,23 @@ export default function Pins() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    setPage(1);
+    fetchPins();
+  };
+
+  const clearSearch = () => {
+    setSearchQuery('');
+    setPage(1);
+  };
+
+  const copyToClipboard = async (text: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const addPin = async (e: React.FormEvent) => {
@@ -112,11 +136,55 @@ export default function Pins() {
         </button>
       </div>
 
+      {/* Search bar */}
+      <form onSubmit={handleSearch} className="flex gap-2">
+        <div className="relative flex-1">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={t.pins.searchPlaceholder}
+            className="input w-full pl-10"
+          />
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+        </div>
+        {searchQuery && (
+          <button type="button" onClick={clearSearch} className="btn-secondary">
+            {t.pins.clear}
+          </button>
+        )}
+      </form>
+
       {/* Error message */}
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700 flex justify-between items-center">
           <span>{error}</span>
           <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700">✕</button>
+        </div>
+      )}
+
+      {/* Expand modal */}
+      {expandedValue && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setExpandedValue(null)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+              <h2 className="text-xl font-semibold text-gray-900">{expandedValue.type}</h2>
+              <button onClick={() => setExpandedValue(null)} className="text-gray-400 hover:text-gray-600">✕</button>
+            </div>
+            <div className="p-6">
+              <div className="bg-gray-50 rounded-lg p-4 break-all font-mono text-sm">
+                {expandedValue.value}
+              </div>
+              <button
+                onClick={() => copyToClipboard(expandedValue.value)}
+                className="mt-4 btn-secondary w-full"
+              >
+                {copied ? t.pins.copied : t.pins.copy}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -216,12 +284,23 @@ export default function Pins() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {data.pins.map((pin) => (
+                  {data.pins.map((pin: Pin) => (
                     <tr key={pin.request_id} className="hover:bg-gray-50">
                       <td className="px-4 py-4">
-                        <code className="text-sm font-mono text-gray-700">
-                          {pin.cid.slice(0, 12)}...{pin.cid.slice(-6)}
-                        </code>
+                        <div className="flex items-center gap-1">
+                          <code className="text-sm font-mono text-gray-700">
+                            {pin.cid.slice(0, 12)}...{pin.cid.slice(-6)}
+                          </code>
+                          <button
+                            onClick={() => setExpandedValue({ type: t.pins.cid, value: pin.cid })}
+                            className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
+                            title="Expand"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                            </svg>
+                          </button>
+                        </div>
                       </td>
                       <td className="px-4 py-4 text-sm text-gray-600 hidden sm:table-cell">
                         {pin.name || <span className="text-gray-400">—</span>}
@@ -234,8 +313,21 @@ export default function Pins() {
                           {pin.status}
                         </span>
                       </td>
-                      <td className="px-4 py-4 text-sm text-gray-500 font-mono hidden lg:table-cell">
-                        {pin.request_id.slice(0, 8)}...
+                      <td className="px-4 py-4 hidden lg:table-cell">
+                        <div className="flex items-center gap-1">
+                          <code className="text-sm text-gray-500 font-mono">
+                            {pin.request_id.slice(0, 8)}...
+                          </code>
+                          <button
+                            onClick={() => setExpandedValue({ type: t.pins.requestId, value: pin.request_id })}
+                            className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
+                            title="Expand"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                            </svg>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

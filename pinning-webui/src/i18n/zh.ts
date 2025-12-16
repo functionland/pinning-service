@@ -79,6 +79,13 @@ export const zh: Translations = {
     of: '页，共',
     previous: '上一页',
     next: '下一页',
+    searchPlaceholder: '按 CID 或请求 ID 搜索...',
+    search: '搜索',
+    clear: '清除',
+    copy: '复制',
+    copied: '已复制！',
+    close: '关闭',
+    noResults: '未找到匹配的固定',
   },
   profile: {
     title: '个人资料',

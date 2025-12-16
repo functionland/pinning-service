@@ -79,6 +79,13 @@ export const hi: Translations = {
     of: 'का',
     previous: 'पिछला',
     next: 'अगला',
+    searchPlaceholder: 'CID या अनुरोध ID से खोजें...',
+    search: 'खोजें',
+    clear: 'साफ़ करें',
+    copy: 'कॉपी करें',
+    copied: 'कॉपी हो गया!',
+    close: 'बंद करें',
+    noResults: 'कोई मेल खाते पिन नहीं मिले',
   },
   profile: {
     title: 'प्रोफ़ाइल',

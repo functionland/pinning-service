@@ -79,6 +79,13 @@ export const es: Translations = {
     of: 'de',
     previous: 'Anterior',
     next: 'Siguiente',
+    searchPlaceholder: 'Buscar por CID o ID de solicitud...',
+    search: 'Buscar',
+    clear: 'Limpiar',
+    copy: 'Copiar',
+    copied: '¡Copiado!',
+    close: 'Cerrar',
+    noResults: 'No se encontraron fijaciones',
   },
   profile: {
     title: 'Perfil',

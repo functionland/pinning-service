@@ -79,6 +79,13 @@ export const de: Translations = {
     of: 'von',
     previous: 'Zurück',
     next: 'Weiter',
+    searchPlaceholder: 'Nach CID oder Anfrage-ID suchen...',
+    search: 'Suchen',
+    clear: 'Löschen',
+    copy: 'Kopieren',
+    copied: 'Kopiert!',
+    close: 'Schließen',
+    noResults: 'Keine passenden Pins gefunden',
   },
   profile: {
     title: 'Profil',

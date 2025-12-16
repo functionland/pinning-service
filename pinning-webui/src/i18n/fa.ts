@@ -79,6 +79,13 @@ export const fa: Translations = {
     of: 'از',
     previous: 'قبلی',
     next: 'بعدی',
+    searchPlaceholder: 'جستجو با CID یا شناسه درخواست...',
+    search: 'جستجو',
+    clear: 'پاک کردن',
+    copy: 'کپی',
+    copied: 'کپی شد!',
+    close: 'بستن',
+    noResults: 'پینی با این جستجو یافت نشد',
   },
   profile: {
     title: 'پروفایل',

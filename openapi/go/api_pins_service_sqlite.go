@@ -64,6 +64,16 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to add pin"), err
 	}
 
+	// If CID exists in IPFS, get and update the size
+	if ipfsExists {
+		size, sizeErr := s.getCIDSize(ctx, pin.Cid)
+		if sizeErr == nil && size > 0 {
+			if updateErr := s.db.UpdatePinSize(ctx, requestId, size); updateErr != nil {
+				log.Printf("Warning: failed to update pin size for %s: %v", requestId, updateErr)
+			}
+		}
+	}
+
 	// Get delegates from IPFS cluster or use default
 	delegates := s.getDelegates(ctx)
 
@@ -137,6 +147,20 @@ func (s *PinsAPIServiceSQLite) GetPinByRequestId(ctx context.Context, requestid 
 		clusterStatus, err := s.getClusterStatus(ctx, pinStatus.Pin.Cid)
 		if err == nil {
 			pinStatus.Status = mapStatus(clusterStatus)
+		}
+	}
+
+	// Try to fetch and update size if not set (lazy size update)
+	if s.ipfsAPI != nil {
+		size, sizeErr := s.getCIDSize(ctx, pinStatus.Pin.Cid)
+		if sizeErr == nil && size > 0 {
+			// Update the size in the database (fire and forget)
+			go func() {
+				bgCtx := context.Background()
+				if updateErr := s.db.UpdatePinSize(bgCtx, requestid, size); updateErr != nil {
+					log.Printf("Warning: failed to update pin size for %s: %v", requestid, updateErr)
+				}
+			}()
 		}
 	}
 
@@ -245,6 +269,26 @@ func (s *PinsAPIServiceSQLite) cidExistsInIPFS(ctx context.Context, cidStr strin
 		return false, nil
 	}
 	return true, nil
+}
+
+// getCIDSize returns the size of a CID from IPFS
+func (s *PinsAPIServiceSQLite) getCIDSize(ctx context.Context, cidStr string) (int64, error) {
+	if s.ipfsAPI == nil {
+		return 0, nil
+	}
+
+	path, err := ipfspath.NewPath("/ipfs/" + cidStr)
+	if err != nil {
+		return 0, err
+	}
+
+	// Get block stat for size
+	blockStat, err := s.ipfsAPI.Block().Stat(ctx, path)
+	if err != nil {
+		return 0, err
+	}
+
+	return int64(blockStat.Size()), nil
 }
 
 // getDelegates returns delegate addresses for pinning service

@@ -1,9 +1,7 @@
 package openapi
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -18,16 +16,6 @@ import (
 	ipfspath "github.com/ipfs/boxo/path"
 	ipfsrpc "github.com/ipfs/kubo/client/rpc"
 )
-
-// httpClient is a custom HTTP client with timeouts for production use
-var httpClient = &http.Client{
-	Timeout: 30 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-	},
-}
 
 // CID validation regex patterns
 var (
@@ -58,26 +46,18 @@ type RequestIdWithName struct {
 }
 
 type PinsAPIService struct {
-	firestoreService      *FirestoreService
-	userService           *UserService
-	ipfsAPI               *ipfsrpc.HttpApi
-	ipfsClusterAPI        clusterapi.Client
-	blockchainAPIEndpoint string
-	masterSeed            string
-	poolSeed              string
-	poolId                int
+	firestoreService *FirestoreService
+	userService      *UserService
+	ipfsAPI          *ipfsrpc.HttpApi
+	ipfsClusterAPI   clusterapi.Client
 }
 
-func NewPinsAPIService(firestoreService *FirestoreService, userService *UserService, ipfsAPI *ipfsrpc.HttpApi, ipfsClusterAPI clusterapi.Client, blockchainAPIEndpoint, masterSeed, poolSeed string, poolId int) *PinsAPIService {
+func NewPinsAPIService(firestoreService *FirestoreService, userService *UserService, ipfsAPI *ipfsrpc.HttpApi, ipfsClusterAPI clusterapi.Client) *PinsAPIService {
 	return &PinsAPIService{
-		firestoreService:      firestoreService,
-		userService:           userService,
-		ipfsAPI:               ipfsAPI,
-		ipfsClusterAPI:        ipfsClusterAPI,
-		blockchainAPIEndpoint: blockchainAPIEndpoint,
-		masterSeed:            masterSeed,
-		poolSeed:              poolSeed,
-		poolId:                poolId,
+		firestoreService: firestoreService,
+		userService:      userService,
+		ipfsAPI:          ipfsAPI,
+		ipfsClusterAPI:   ipfsClusterAPI,
 	}
 }
 
@@ -125,15 +105,6 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", err.Error()), err
 	}
 
-	ipfsExists := false
-	exists, err := s.cidExistsInIPFS(ctx, pin.Cid)
-	if err != nil {
-		log.Printf("Warning: failed to check CID existence in IPFS: %v", err)
-		ipfsExists = false
-	} else {
-		ipfsExists = exists
-	}
-
 	userID, err := s.extractUserIDFromAuth(ctx)
 	if err != nil {
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
@@ -151,28 +122,6 @@ func (s *PinsAPIService) AddPin(ctx context.Context, pin Pin) (ImplResponse, err
 	if err != nil {
 		log.Printf("Error storing pin in Firestore: %v", err)
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
-	}
-
-	if ipfsExists {
-		authToken, err := extractAuthTokenFromContext(ctx)
-		if err != nil {
-			log.Printf("Error extracting auth token for manifest upload: %v", err)
-			s.updateManifestStatus(ctx, requestId, "failed")
-		} else {
-			log.Printf("auth token extracted successfully")
-			passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, authToken)
-			if err != nil {
-				log.Printf("Error getting password hash for manifest upload: %v", err)
-				s.updateManifestStatus(ctx, requestId, "failed")
-			} else {
-				bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				// Queue the blockchain operation
-				go func() {
-					defer cancel()
-					s.handleUploadManifest(bgCtx, pin.Cid, requestId, passwordHash)
-				}()
-			}
-		}
 	}
 
 	// Convert pin.Cid to api.Cid
@@ -257,165 +206,8 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 		log.Printf("ipfscluster unpin info: %s", err.Error())
 	}
 
-	// Queue the blockchain operation
-	authToken, err := extractAuthTokenFromContext(ctx)
-	if err != nil {
-		log.Printf("Error extracting auth token for manifest removal: %v", err)
-		s.updateManifestStatus(ctx, requestid, "failed")
-		// Continue to return success as the pin has been marked deleted
-	} else {
-		passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, authToken)
-		if err != nil {
-			log.Printf("Error getting password hash for manifest removal: %v", err)
-			s.updateManifestStatus(ctx, requestid, "failed")
-		} else {
-			bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			go func() {
-				defer cancel()
-				s.handleRemoveManifest(bgCtx, pin.Pin.Cid, requestid, passwordHash)
-			}()
-		}
-	}
-
 	// Return response
 	return Response(http.StatusAccepted, nil), nil
-}
-
-func (s *PinsAPIService) handleUploadManifest(ctx context.Context, cid string, requestId string, passwordHash string) {
-	for i := 0; i < 3; i++ {
-		err := s.createManifestOnChain(ctx, passwordHash, cid)
-		if err == nil {
-			s.updateManifestStatus(ctx, requestId, "completed")
-			return
-		}
-		time.Sleep(30 * time.Second)
-	}
-	s.updateManifestStatus(ctx, requestId, "failed")
-}
-
-func (s *PinsAPIService) handleRemoveManifest(ctx context.Context, cid string, requestId string, passwordHash string) {
-	for i := 0; i < 3; i++ {
-		err := s.removeManifestFromChain(ctx, passwordHash, cid)
-		if err == nil {
-			s.updateManifestStatus(ctx, requestId, "completed")
-			s.firestoreService.DeletePin(ctx, requestId)
-			return
-		} else {
-			exists, err := s.verifyManifestOnChain(ctx, passwordHash, cid)
-			if err == nil {
-				if !exists {
-					s.updateManifestStatus(ctx, requestId, "completed")
-					s.firestoreService.DeletePin(ctx, requestId)
-					return
-				}
-			}
-		}
-		time.Sleep(30 * time.Second)
-	}
-	s.updateManifestStatus(ctx, requestId, "failed")
-}
-
-func (s *PinsAPIService) updateManifestStatus(ctx context.Context, requestId, status string) {
-	err := s.firestoreService.UpdatePinStatus(ctx, requestId, status)
-	if err != nil {
-		log.Printf("Failed to update pin status: %v", err)
-	}
-}
-
-// createManifestOnChain creates a manifest on the blockchain
-func (s *PinsAPIService) createManifestOnChain(ctx context.Context, passwordHash, cid string) error {
-	reqBody, err := json.Marshal(map[string]interface{}{
-		"seed":               "//" + passwordHash,
-		"replication_factor": []int{6},
-		"pool_id":            []int{s.poolId},
-		"cid":                []string{cid},
-		"manifest_metadata": map[string]interface{}{
-			"job": map[string]string{
-				"work":   "Storage",
-				"engine": "IPFS",
-				"uri":    cid,
-			},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", s.blockchainAPIEndpoint+"/fula/manifest/batch_upload", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var errorResponse struct {
-			Message     string `json:"message"`
-			Description string `json:"description"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&errorResponse); err != nil {
-			return fmt.Errorf("blockchain API returned status %d", resp.StatusCode)
-		}
-		return fmt.Errorf("%s: %s", errorResponse.Message, errorResponse.Description)
-	}
-
-	return nil
-}
-
-// verifyManifestOnChain verifies if the manifest exists on the blockchain
-func (s *PinsAPIService) verifyManifestOnChain(ctx context.Context, passwordHash, cid string) (bool, error) {
-	account, err := s.getAccountFromPasswordHash(ctx, passwordHash)
-	if err != nil {
-		return false, fmt.Errorf("failed to get account from password hash: %w", err)
-	}
-	log.Printf("blockchain account was created from seed: %s", account)
-
-	reqBody, err := json.Marshal(map[string]interface{}{
-		"pool_id":  s.poolId,
-		"uploader": account,
-		"cids":     []string{cid},
-	})
-	if err != nil {
-		return false, fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", s.blockchainAPIEndpoint+"/fula/manifest/available_batch", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return false, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("blockchain API returned status %d", resp.StatusCode)
-	}
-
-	var result struct {
-		Manifests []struct {
-			Cid                  string `json:"cid"`
-			ReplicationAvailable int    `json:"replication_available"`
-		} `json:"manifests"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if len(result.Manifests) == 0 {
-		return false, nil
-	}
-	log.Printf("Manifest verified: %+v", result)
-
-	return true, nil
 }
 
 // cidExistsInIPFS checks if a CID exists in IPFS
@@ -447,44 +239,6 @@ func (s *PinsAPIService) cidExistsInIPFS(ctx context.Context, cid string) (bool,
 	}
 	// The block exists
 	return true, nil
-}
-
-// removeManifestFromChain removes a manifest from the blockchain
-func (s *PinsAPIService) removeManifestFromChain(ctx context.Context, passwordHash string, cid string) error {
-	log.Printf("Creating blockchain request for manifest removal")
-	reqBody, err := json.Marshal(map[string]interface{}{
-		"seed":    "//" + passwordHash,
-		"cid":     cid,
-		"pool_id": s.poolId,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", s.blockchainAPIEndpoint+"/fula/manifest/remove", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var errorResponse struct {
-			Message     string `json:"message"`
-			Description string `json:"description"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&errorResponse); err != nil {
-			return fmt.Errorf("blockchain API returned status %d", resp.StatusCode)
-		}
-		return fmt.Errorf("%s: %s", errorResponse.Message, errorResponse.Description)
-	}
-
-	return nil
 }
 
 func (s *PinsAPIService) GetPinByRequestId(ctx context.Context, requestid string) (ImplResponse, error) {
@@ -628,142 +382,6 @@ func (s *PinsAPIService) getPinByRequestID(ctx context.Context, requestid string
 	}
 
 	return pin, username, nil
-}
-
-func (s *PinsAPIService) checkBlockchainBalance(ctx context.Context) (int64, string, error) {
-	authToken, err := extractAuthTokenFromContext(ctx)
-	if err != nil {
-		return 0, "", fmt.Errorf("failed to extract auth token: %w", err)
-	}
-
-	passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, authToken)
-	if err != nil {
-		return 0, "", fmt.Errorf("failed to get password hash: %w", err)
-	}
-
-	account, err := s.getAccountFromPasswordHash(ctx, passwordHash)
-	if err != nil {
-		return 0, "", fmt.Errorf("failed to get account: %w", err)
-	}
-	log.Printf("Checking balance for account: %s", account)
-
-	reqBody, err := json.Marshal(map[string]string{
-		"account": account,
-	})
-	if err != nil {
-		return 0, "", fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", s.blockchainAPIEndpoint+"/account/balance", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return 0, "", fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return 0, "", fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, "", fmt.Errorf("blockchain API returned status %d", resp.StatusCode)
-	}
-
-	var result struct {
-		Amount int64 `json:"amount"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, "", fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return result.Amount, passwordHash, nil
-}
-
-func (s *PinsAPIService) setBlockchainBalance(ctx context.Context, seed string, amount int64) (bool, error) {
-	authToken, err := extractAuthTokenFromContext(ctx)
-	if err != nil {
-		return false, fmt.Errorf("failed to extract auth token: %w", err)
-	}
-
-	passwordHash, err := s.userService.GetPasswordHashFromAuthToken(ctx, authToken)
-	if err != nil {
-		return false, fmt.Errorf("failed to get password hash: %w", err)
-	}
-
-	account, err := s.getAccountFromPasswordHash(ctx, passwordHash)
-	if err != nil {
-		return false, fmt.Errorf("failed to get account: %w", err)
-	}
-
-	reqBody, err := json.Marshal(map[string]interface{}{
-		"seed":   seed,
-		"amount": amount,
-		"to":     account,
-	})
-	if err != nil {
-		return false, fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", s.blockchainAPIEndpoint+"/account/set_balance", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return false, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("blockchain API returned status %d: failed to set balance", resp.StatusCode)
-	}
-
-	return true, nil
-}
-
-func (s *PinsAPIService) getAccountFromPasswordHash(ctx context.Context, passwordHash string) (string, error) {
-	reqBody, err := json.Marshal(map[string]string{
-		"seed": "//" + passwordHash,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", s.blockchainAPIEndpoint+"/account/seeded", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var errorResponse struct {
-			Message     string `json:"message"`
-			Description string `json:"description"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&errorResponse); err != nil {
-			return "", fmt.Errorf("blockchain API returned status %d", resp.StatusCode)
-		}
-		return "", fmt.Errorf("%s: %s", errorResponse.Message, errorResponse.Description)
-	}
-
-	var successResponse struct {
-		Seed    string `json:"seed"`
-		Account string `json:"account"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&successResponse); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return successResponse.Account, nil
 }
 
 func (s *PinsAPIService) pinToIPFSCluster(ctx context.Context, cid string) error {

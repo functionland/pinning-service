@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -38,19 +37,10 @@ func main() {
 	}
 
 	// Get and validate environment variables
-	masterSeed := os.Getenv("MASTER_SEED")
-	poolSeed := os.Getenv("POOL_SEED")
-	blockchainAPIEndpoint := os.Getenv("BLOCKCHAIN_API_ENDPOINT")
 	credentialsFile := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
-	poolIdStr := os.Getenv("POOL_ID")
 
-	if masterSeed == "" || poolSeed == "" || blockchainAPIEndpoint == "" || credentialsFile == "" {
-		log.Fatal("Missing required environment variables: MASTER_SEED, POOL_SEED, BLOCKCHAIN_API_ENDPOINT, GOOGLE_APPLICATION_CREDENTIALS")
-	}
-
-	poolId, err := strconv.Atoi(poolIdStr)
-	if err != nil {
-		log.Fatalf("Error converting POOL_ID to integer: %v", err)
+	if credentialsFile == "" {
+		log.Fatal("Missing required environment variable: GOOGLE_APPLICATION_CREDENTIALS")
 	}
 
 	// Initialize FirestoreService
@@ -94,7 +84,7 @@ func main() {
 	}
 
 	// Initialize PinsAPIService
-	pinsAPIService := openapi.NewPinsAPIService(firestoreService, userService, ipfsAPI, ipfsClusterApi, blockchainAPIEndpoint, masterSeed, poolSeed, poolId)
+	pinsAPIService := openapi.NewPinsAPIService(firestoreService, userService, ipfsAPI, ipfsClusterApi)
 
 	// Create PinsAPIController
 	pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)

@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -45,29 +44,8 @@ func main() {
 		log.Printf("Warning: .env file not found, using environment variables")
 	}
 
-	// Get and validate environment variables
-	masterSeed := os.Getenv("MASTER_SEED")
-	poolSeed := os.Getenv("POOL_SEED")
-	blockchainAPIEndpoint := os.Getenv("BLOCKCHAIN_API_ENDPOINT")
-	poolIdStr := os.Getenv("POOL_ID")
+	// Get configuration from environment variables
 	dbPath := os.Getenv("DATABASE_PATH")
-
-	// In test mode, use defaults if not provided
-	if testMode {
-		if masterSeed == "" {
-			masterSeed = "test-master-seed-for-compliance-testing"
-		}
-		if poolSeed == "" {
-			poolSeed = "test-pool-seed-for-compliance-testing"
-		}
-		if blockchainAPIEndpoint == "" {
-			blockchainAPIEndpoint = "http://localhost:9999" // Dummy endpoint for test mode
-		}
-	}
-
-	if masterSeed == "" || poolSeed == "" || blockchainAPIEndpoint == "" {
-		log.Fatal("Missing required environment variables: MASTER_SEED, POOL_SEED, BLOCKCHAIN_API_ENDPOINT")
-	}
 
 	// Default database path
 	if dbPath == "" {
@@ -78,12 +56,6 @@ func main() {
 	dataDir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		log.Fatalf("Failed to create data directory: %v", err)
-	}
-
-	poolId, err := strconv.Atoi(poolIdStr)
-	if err != nil {
-		log.Printf("Warning: Invalid POOL_ID, defaulting to 1")
-		poolId = 1
 	}
 
 	// Initialize SQLite Service
@@ -139,7 +111,7 @@ func main() {
 	}
 
 	// Initialize PinsAPIService with SQLite backend
-	pinsAPIService := openapi.NewPinsAPIServiceSQLite(sqliteService, userService, ipfsAPI, ipfsClusterApi, blockchainAPIEndpoint, masterSeed, poolSeed, poolId)
+	pinsAPIService := openapi.NewPinsAPIServiceSQLite(sqliteService, userService, ipfsAPI, ipfsClusterApi)
 
 	// Create PinsAPIController
 	pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)

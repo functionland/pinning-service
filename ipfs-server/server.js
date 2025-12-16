@@ -1,45 +1,104 @@
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
-const admin = require('firebase-admin');
 const path = require('path');
+const Database = require('better-sqlite3');
 
 let create, fileTypeFromBuffer;
 
+// Configuration from environment variables
+const config = {
+  port: parseInt(process.env.PORT || '3300', 10),
+  ipfsApiUrl: process.env.IPFS_API_URL || 'http://127.0.0.1:5001',
+  databasePath: process.env.DATABASE_PATH || path.join(process.cwd(), '..', 'data', 'pinning.db'),
+  uploadDir: process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads'),
+  maxFileSize: parseInt(process.env.MAX_FILE_SIZE || String(800 * 1024 * 1024), 10), // 800MB default
+  ipfsTimeout: parseInt(process.env.IPFS_TIMEOUT || '60000', 10), // 60 second timeout
+};
+
+// Ensure upload directory exists
+if (!fs.existsSync(config.uploadDir)) {
+  fs.mkdirSync(config.uploadDir, { recursive: true });
+}
+
 (async () => {
+  // Dynamic imports for ESM modules
   const kuboRpcClient = await import('kubo-rpc-client');
   create = kuboRpcClient.create;
   
   const fileType = await import('file-type');
   fileTypeFromBuffer = fileType.fileTypeFromBuffer;
 
-  function initializeFirebase() {
-    const firebasePath = path.join(process.cwd(), 'firebase.json');
-    const serviceAccount = JSON.parse(fs.readFileSync(firebasePath, 'utf8'));
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-    return admin.firestore();
+  // Initialize SQLite database (read-only)
+  let db;
+  function initializeDatabase() {
+    const dbPath = config.databasePath;
+    
+    if (!fs.existsSync(dbPath)) {
+      console.error(`Database file not found: ${dbPath}`);
+      console.error('Make sure the pinning service has been started at least once to create the database.');
+      process.exit(1);
+    }
+
+    // Open database in read-only mode for security
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    
+    // Prepare statements for better performance
+    db.validateSession = db.prepare('SELECT username FROM sessions WHERE session_token = ?');
+    db.getUserPoolId = db.prepare('SELECT pool_id FROM users WHERE username = ?');
+    
+    console.log(`SQLite database connected (read-only): ${dbPath}`);
+    return db;
   }
 
-  const db = initializeFirebase();
+  db = initializeDatabase();
 
   const app = express();
-  app.use(express.json({ limit: '800mb' }));
-  app.use(express.urlencoded({ limit: '800mb', extended: true }));
-  const upload = multer({ 
-    dest: 'uploads/',
-    limits: {
-      fileSize: 800 * 1024 * 1024  // 800MB in bytes
+  
+  // Security headers middleware
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    next();
+  });
+
+  // Request logging middleware
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      console.log(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
+    });
+    next();
+  });
+
+  app.use(express.json({ limit: '10mb' })); // Smaller limit for JSON
+  app.use(express.urlencoded({ limit: '10mb', extended: true }));
+  
+  // Configure multer with disk storage for large files
+  const storage = multer.diskStorage({
+    destination: config.uploadDir,
+    filename: (req, file, cb) => {
+      // Use timestamp + random string to avoid collisions
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      cb(null, uniqueSuffix + path.extname(file.originalname));
     }
   });
 
-  // Create an IPFS client with aggressive timeout settings
+  const upload = multer({ 
+    storage,
+    limits: {
+      fileSize: config.maxFileSize
+    }
+  });
+
+  // Create IPFS client
   const ipfs = create({
-    url: 'http://127.0.0.1:5001',
-    timeout: 30000, // 30 second timeout
+    url: config.ipfsApiUrl,
+    timeout: config.ipfsTimeout,
     headers: {
-      'User-Agent': 'ipfs-gateway/1.0.0'
+      'User-Agent': 'ipfs-gateway/2.0.0'
     }
   });
 
@@ -49,18 +108,47 @@ let create, fileTypeFromBuffer;
     console.log('IPFS connection successful, version:', version.version);
   } catch (error) {
     console.error('IPFS connection failed:', error.message);
-    console.error('Make sure IPFS daemon is running on http://127.0.0.1:5001');
+    console.error(`Make sure IPFS daemon is running on ${config.ipfsApiUrl}`);
+  }
+
+  // Validate session token using SQLite (synchronous for better performance)
+  function validateSession(token) {
+    // Handle "Bearer " prefix
+    const sessionToken = token.startsWith('Bearer ') ? token.slice(7) : token;
+    
+    const row = db.validateSession.get(sessionToken);
+    if (!row) {
+      return null;
+    }
+    return row.username;
+  }
+
+  // Get user's pool ID from SQLite
+  function getUserPoolId(username) {
+    const defaultPoolId = 1;
+    
+    const row = db.getUserPoolId.get(username);
+    if (!row || row.pool_id === null || row.pool_id === undefined) {
+      return defaultPoolId;
+    }
+    return row.pool_id;
   }
 
   // Authentication middleware
-  async function authenticate(req, res, next) {
+  function authenticate(req, res, next) {
     const authToken = req.headers['authorization'];
     if (!authToken) {
       return res.status(401).json({ error: 'No authentication token provided' });
     }
 
     try {
-      const poolId = await getUserPoolFromSession(authToken);
+      const username = validateSession(authToken);
+      if (!username) {
+        return res.status(401).json({ error: 'Invalid or expired session token' });
+      }
+
+      const poolId = getUserPoolId(username);
+      req.username = username;
       req.poolId = poolId;
       next();
     } catch (error) {
@@ -69,107 +157,52 @@ let create, fileTypeFromBuffer;
     }
   }
 
-  async function getUserPoolFromSession(authToken) {
-    const defaultPoolID = "1";
-
-    try {
-      // Query the sessions collection
-      const sessionSnapshot = await db.collection('sessions')
-        .where('session_token', '==', authToken)
-        .get();
-
-      if (sessionSnapshot.empty) {
-        throw new Error('Invalid or expired session token');
-      }
-
-      const username = sessionSnapshot.docs[0].data().username;
-
-      // Query the users collection
-      const userSnapshot = await db.collection('users')
-        .where('username', '==', username)
-        .get();
-
-      if (userSnapshot.empty) {
-        return defaultPoolID;
-      }
-
-      const poolId = userSnapshot.docs[0].data().pool_id;
-      console.log("pool_id="+poolId);
-
-      if (poolId && typeof poolId === 'string') {
-        return poolId;
-      } else {
-        throw new Error('pool_id is not found');
-      }
-    } catch (error) {
-      console.error('Error in getUserPoolFromSession:', error);
-      return defaultPoolID;
-    }
-  }
-
-  app.post('/upload', authenticate, upload.single('file'), async (req, res) => {
-    console.log('Upload request received, authenticated');
-
-    if (!req.file) {
-      console.log('No file in request');
-      return res.status(400).send('No file uploaded.');
-    }
-
-    console.log('File received:', {
-      originalname: req.file.originalname,
-      size: req.file.size,
-      mimetype: req.file.mimetype,
-      path: req.file.path
+  // Health check endpoint
+  app.get('/health', (req, res) => {
+    res.json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      ipfs: config.ipfsApiUrl,
+      database: 'connected'
     });
+  });
+
+  // Upload endpoint (requires authentication)
+  app.post('/upload', authenticate, upload.single('file'), async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const filePath = req.file.path;
 
     try {
-      // Read the file from the upload directory
-      console.log('Reading file from disk...');
-      const fileData = fs.readFileSync(req.file.path);
-      console.log('File read successfully, size:', fileData.length);
-
-      // Add the file to IPFS with minimal network interaction
-      console.log('Adding file to IPFS...');
-      console.log('File size:', fileData.length, 'bytes');
-
-      const result = await ipfs.add(fileData, {
+      // Stream file to IPFS for better memory efficiency with large files
+      const fileStream = fs.createReadStream(filePath);
+      
+      const result = await ipfs.add(fileStream, {
         cidVersion: 1,
         hashAlg: 'sha2-256',
-        pin: false, // Don't pin to avoid network delays
-        onlyHash: false, // We want to actually add it
+        pin: false, // Don't pin - pinning service handles this
         wrapWithDirectory: false,
-        chunker: 'size-262144', // Use smaller chunks
-        progress: (bytes) => {
-          console.log(`Upload progress: ${bytes} bytes`);
-        }
+        chunker: 'size-262144',
       });
 
-      console.log('File added to IPFS successfully, CID:', result.cid.toString());
+      // Clean up temporary file
+      fs.unlink(filePath, (err) => {
+        if (err) console.error('Error removing temp file:', err);
+      });
 
-      // Remove the temporary file
-      fs.unlinkSync(req.file.path);
-      console.log('Temporary file removed');
-
-      // Return the IPFS CID and the user's pool ID
       res.json({
         cid: result.cid.toString(),
-        poolId: req.poolId
+        poolId: req.poolId,
+        size: req.file.size
       });
-      console.log('Response sent successfully');
 
     } catch (error) {
-      console.error('Error during upload process:', error);
-      console.error('Error stack:', error.stack);
+      console.error('Upload error:', error.message);
 
-      // Clean up temporary file if it exists
-      try {
-        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
-          fs.unlinkSync(req.file.path);
-          console.log('Cleaned up temporary file after error');
-        }
-      } catch (cleanupError) {
-        console.error('Error cleaning up temporary file:', cleanupError);
-      }
+      // Clean up temporary file on error
+      fs.unlink(filePath, () => {});
 
       res.status(500).json({
         error: 'Error uploading file to IPFS',
@@ -178,82 +211,123 @@ let create, fileTypeFromBuffer;
     }
   });
 
+  // CORS preflight for gateway
   app.options('/gateway/:ipfs_cid', (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
-    res.sendStatus(200);
+    res.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
+    res.sendStatus(204);
   });
 
+  // IPFS Gateway endpoint (public, no authentication required)
   app.get('/gateway/:ipfs_cid', async (req, res) => {
     const cid = req.params.ipfs_cid;
     const isRawRequest = 'raw' in req.query;
     
+    // Set CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    
+    // Cache headers for gateway responses
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+
     try {
-      // Set CORS headers
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', '*');
-  
       if (isRawRequest) {
         // Handle raw block request
-        try {
-          const block = await ipfs.block.get(cid);
-          res.setHeader('Content-Type', 'application/vnd.ipld.raw');
-          res.setHeader('Content-Length', block.length);
-          // Send the raw buffer directly
-          res.send(Buffer.from(block));
-          return;
-        } catch (error) {
-          console.error(error);
-          throw error;
-        }
+        const block = await ipfs.block.get(cid);
+        res.setHeader('Content-Type', 'application/vnd.ipld.raw');
+        res.setHeader('Content-Length', block.length);
+        res.send(Buffer.from(block));
       } else {
-        // Original behavior for regular requests
+        // Stream content for better memory efficiency
         const chunks = [];
+        let totalSize = 0;
+        const maxSize = 100 * 1024 * 1024; // 100MB limit for gateway
+
         for await (const chunk of ipfs.cat(cid)) {
+          totalSize += chunk.length;
+          if (totalSize > maxSize) {
+            return res.status(413).json({ error: 'Content too large for gateway' });
+          }
           chunks.push(chunk);
         }
+        
         const content = Buffer.concat(chunks);
-  
-        // Determine the content type
-        let contentType = 'application/octet-stream'; // Default content type
+
+        // Determine content type
+        let contentType = 'application/octet-stream';
         
         try {
           const type = await fileTypeFromBuffer(content);
           if (type) {
             contentType = type.mime;
           } else {
-            // If file-type can't determine the type, check if it's text
-            if (content.toString().trim().length === content.length) {
-              contentType = 'text/plain';
+            // Check if it's valid UTF-8 text
+            const text = content.toString('utf8');
+            if (Buffer.from(text, 'utf8').equals(content)) {
+              contentType = 'text/plain; charset=utf-8';
             }
           }
-        } catch (error) {
-          console.error('Error determining content type:', error);
+        } catch (typeError) {
+          // Ignore type detection errors, use default
         }
-  
-        // Set the appropriate headers
+
         res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Length', content.length);
-  
-        // Send the content
         res.send(content);
       }
     } catch (error) {
-      console.error('Error fetching from IPFS:', error);
-      res.status(500).send('Error fetching content from IPFS');
+      console.error('Gateway error:', error.message);
+      
+      if (error.message.includes('not found') || error.message.includes('no link')) {
+        res.status(404).json({ error: 'Content not found' });
+      } else {
+        res.status(500).json({ error: 'Error fetching content from IPFS' });
+      }
     }
   });
-  
-  
 
-  // Serve ACME challenge files
-  app.use('/.well-known/acme-challenge', express.static(path.join(__dirname, '.well-known', 'acme-challenge'), { dotfiles: 'allow' }));
+  // Serve ACME challenge files for SSL certificates
+  app.use('/.well-known/acme-challenge', express.static(
+    path.join(__dirname, '.well-known', 'acme-challenge'), 
+    { dotfiles: 'allow' }
+  ));
 
-  const PORT = process.env.PORT || 3300;
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+  // 404 handler
+  app.use((req, res) => {
+    res.status(404).json({ error: 'Not found' });
   });
 
-})().catch(console.error);
+  // Error handler
+  app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  });
+
+  // Graceful shutdown
+  process.on('SIGTERM', () => {
+    console.log('SIGTERM received, shutting down gracefully...');
+    db.close();
+    process.exit(0);
+  });
+
+  process.on('SIGINT', () => {
+    console.log('SIGINT received, shutting down gracefully...');
+    db.close();
+    process.exit(0);
+  });
+
+  // Start server
+  app.listen(config.port, () => {
+    console.log(`IPFS Gateway Server running on port ${config.port}`);
+    console.log(`  - IPFS API: ${config.ipfsApiUrl}`);
+    console.log(`  - Database: ${config.databasePath}`);
+    console.log(`  - Max file size: ${Math.round(config.maxFileSize / 1024 / 1024)}MB`);
+  });
+
+})().catch(error => {
+  console.error('Failed to start server:', error);
+  process.exit(1);
+});

@@ -1,17 +1,38 @@
 [Unit]
-Description=IPFS Gateway Server
-After=network.target
+Description=IPFS Gateway and Upload Server
+Documentation=https://github.com/functionland/pinning-service
+After=network.target ipfs.service fula-pinning-service.service
+Wants=network-online.target
 
 [Service]
-ExecStart=/home/ubuntu/pinning-service/ipfs-server/dist/ipfs-gateway
+Type=simple
+ExecStart=${INSTALL_DIR}/ipfs-server/dist/ipfs-gateway
 Restart=on-failure
-RestartSec=30
+RestartSec=10
 User=root
+WorkingDirectory=${INSTALL_DIR}/ipfs-server
 Environment=PATH=/usr/bin:/usr/local/bin
 Environment=NODE_ENV=production
-WorkingDirectory=/home/ubuntu/pinning-service
-StartLimitBurst=3
-StartLimitIntervalSec=0
+EnvironmentFile=${INSTALL_DIR}/ipfs-server/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=${INSTALL_DIR}/ipfs-server/uploads
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=2G
+
+# Restart limits
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fula-upload-server
 
 [Install]
 WantedBy=multi-user.target

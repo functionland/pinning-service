@@ -15,27 +15,19 @@ import (
 
 // PinsAPIServiceSQLite implements PinsAPIServicer using SQLite
 type PinsAPIServiceSQLite struct {
-	db                    *SQLiteService
-	userService           *UserServiceSQLite
-	ipfsAPI               *ipfsrpc.HttpApi
-	ipfsClusterAPI        clusterapi.Client
-	blockchainAPIEndpoint string
-	masterSeed            string
-	poolSeed              string
-	poolId                int
+	db             *SQLiteService
+	userService    *UserServiceSQLite
+	ipfsAPI        *ipfsrpc.HttpApi
+	ipfsClusterAPI clusterapi.Client
 }
 
 // NewPinsAPIServiceSQLite creates a new pins API service with SQLite backend
-func NewPinsAPIServiceSQLite(db *SQLiteService, userService *UserServiceSQLite, ipfsAPI *ipfsrpc.HttpApi, ipfsClusterAPI clusterapi.Client, blockchainAPIEndpoint, masterSeed, poolSeed string, poolId int) *PinsAPIServiceSQLite {
+func NewPinsAPIServiceSQLite(db *SQLiteService, userService *UserServiceSQLite, ipfsAPI *ipfsrpc.HttpApi, ipfsClusterAPI clusterapi.Client) *PinsAPIServiceSQLite {
 	return &PinsAPIServiceSQLite{
-		db:                    db,
-		userService:           userService,
-		ipfsAPI:               ipfsAPI,
-		ipfsClusterAPI:        ipfsClusterAPI,
-		blockchainAPIEndpoint: blockchainAPIEndpoint,
-		masterSeed:            masterSeed,
-		poolSeed:              poolSeed,
-		poolId:                poolId,
+		db:             db,
+		userService:    userService,
+		ipfsAPI:        ipfsAPI,
+		ipfsClusterAPI: ipfsClusterAPI,
 	}
 }
 

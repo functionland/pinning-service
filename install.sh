@@ -311,6 +311,10 @@ build_webui() {
     cd "$target_dir/pinning-webui"
     npm install --production --ignore-scripts=false
     
+    # Rebuild native modules with current Node version
+    print_info "Rebuilding native modules for Node $(node -v)..."
+    npm rebuild
+    
     verify_step "WebUI build" "[ -d '$target_dir/pinning-webui/dist/public' ]"
 }
 
@@ -966,6 +970,9 @@ create_webui_nginx_config() {
     
     local config_file="$NGINX_AVAILABLE/$domain"
     
+    # Remove old config if exists (may have broken SSL blocks)
+    rm -f "$config_file" "$NGINX_ENABLED/$domain" 2>/dev/null || true
+    
     cat > "$config_file" << EOF
 # Nginx configuration for IPFS Pinning WebUI
 # Domain: $domain
@@ -1081,6 +1088,9 @@ create_ipfs_server_nginx_config() {
     print_info "Creating nginx configuration for IPFS Server at $domain..."
     
     local config_file="$NGINX_AVAILABLE/$domain"
+    
+    # Remove old config if exists (may have broken SSL blocks)
+    rm -f "$config_file" "$NGINX_ENABLED/$domain" 2>/dev/null || true
     
     cat > "$config_file" << EOF
 # Nginx configuration for IPFS Server (Gateway/Upload)
@@ -1245,6 +1255,9 @@ create_pinning_nginx_config() {
     print_info "Creating nginx configuration for Pinning API at $domain..."
     
     local config_file="$NGINX_AVAILABLE/$domain"
+    
+    # Remove old config if exists (may have broken SSL blocks)
+    rm -f "$config_file" "$NGINX_ENABLED/$domain" 2>/dev/null || true
     
     cat > "$config_file" << EOF
 # Nginx configuration for IPFS Pinning Service API

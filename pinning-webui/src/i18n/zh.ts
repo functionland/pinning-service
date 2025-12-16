@@ -86,6 +86,8 @@ export const zh: Translations = {
     copied: '已复制！',
     close: '关闭',
     noResults: '未找到匹配的固定',
+    actions: '操作',
+    refresh: '刷新状态',
   },
   profile: {
     title: '个人资料',

@@ -104,6 +104,8 @@ export interface Translations {
     copied: string;
     close: string;
     noResults: string;
+    actions: string;
+    refresh: string;
   };
   profile: {
     title: string;

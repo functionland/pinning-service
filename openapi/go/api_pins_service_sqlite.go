@@ -15,19 +15,21 @@ import (
 
 // PinsAPIServiceSQLite implements PinsAPIServicer using SQLite
 type PinsAPIServiceSQLite struct {
-	db             *SQLiteService
-	userService    *UserServiceSQLite
-	ipfsAPI        *ipfsrpc.HttpApi
-	ipfsClusterAPI clusterapi.Client
+	db                *SQLiteService
+	userService       *UserServiceSQLite
+	ipfsAPI           *ipfsrpc.HttpApi
+	ipfsClusterAPI    clusterapi.Client
+	enableIPFSPinning bool // If true, pin to both IPFS and IPFS Cluster; if false, only IPFS Cluster
 }
 
 // NewPinsAPIServiceSQLite creates a new pins API service with SQLite backend
-func NewPinsAPIServiceSQLite(db *SQLiteService, userService *UserServiceSQLite, ipfsAPI *ipfsrpc.HttpApi, ipfsClusterAPI clusterapi.Client) *PinsAPIServiceSQLite {
+func NewPinsAPIServiceSQLite(db *SQLiteService, userService *UserServiceSQLite, ipfsAPI *ipfsrpc.HttpApi, ipfsClusterAPI clusterapi.Client, enableIPFSPinning bool) *PinsAPIServiceSQLite {
 	return &PinsAPIServiceSQLite{
-		db:             db,
-		userService:    userService,
-		ipfsAPI:        ipfsAPI,
-		ipfsClusterAPI: ipfsClusterAPI,
+		db:                db,
+		userService:       userService,
+		ipfsAPI:           ipfsAPI,
+		ipfsClusterAPI:    ipfsClusterAPI,
+		enableIPFSPinning: enableIPFSPinning,
 	}
 }
 
@@ -82,13 +84,28 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 	// Get delegates from IPFS cluster or use default
 	delegates := s.getDelegates(ctx)
 
+	// Pin to IPFS Cluster asynchronously
+	go func(cid, name string) {
+		pinCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		if err := s.pinToCluster(pinCtx, cid, name); err != nil {
+			log.Printf("Warning: failed to pin to cluster: %v", err)
+			// Update status to failed in DB
+			s.db.UpdatePinStatusAndSize(pinCtx, requestId, "failed", 0)
+		} else {
+			// Update status to pinning
+			s.db.UpdatePinStatusAndSize(pinCtx, requestId, "pinning", 0)
+		}
+	}(pin.Cid, pin.Name)
+
 	status := PinStatus{
 		Requestid: requestId,
 		Status:    QUEUED,
 		Created:   time.Now(),
 		Pin:       pin,
 		Delegates: delegates,
-		Info:      map[string]string{"status_details": "Queue position: 0 of 0"},
+		Info:      map[string]string{"status_details": "Submitted to IPFS Cluster"},
 	}
 
 	return Response(http.StatusAccepted, status), nil
@@ -100,7 +117,7 @@ func (s *PinsAPIServiceSQLite) DeletePinByRequestId(ctx context.Context, request
 		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "requestid is required"), errors.New("requestid is required")
 	}
 
-	_, username, err := s.db.GetPinByRequestID(ctx, requestid)
+	pinStatus, username, err := s.db.GetPinByRequestID(ctx, requestid)
 	if err != nil {
 		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
 	}
@@ -113,6 +130,16 @@ func (s *PinsAPIServiceSQLite) DeletePinByRequestId(ctx context.Context, request
 	if username != userID {
 		return createErrorResponse(http.StatusForbidden, "FORBIDDEN", "You don't have permission to delete this pin"), errors.New("unauthorized")
 	}
+
+	// Unpin from IPFS Cluster asynchronously
+	go func(cid string) {
+		unpinCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		if err := s.unpinFromCluster(unpinCtx, cid); err != nil {
+			log.Printf("Warning: failed to unpin from cluster: %v", err)
+		}
+	}(pinStatus.Pin.Cid)
 
 	// Mark pin as deleted
 	if err := s.db.MarkPinAsDeleted(ctx, requestid); err != nil {
@@ -336,6 +363,129 @@ func (s *PinsAPIServiceSQLite) getClusterStatus(ctx context.Context, cidStr stri
 	}
 
 	return "queued", nil
+}
+
+// pinToCluster sends a pin request to IPFS Cluster (and optionally IPFS directly)
+func (s *PinsAPIServiceSQLite) pinToCluster(ctx context.Context, cidStr string, name string) error {
+	var clusterErr, ipfsErr error
+
+	// Pin to IPFS Cluster
+	if s.ipfsClusterAPI != nil {
+		cid, err := api.DecodeCid(cidStr)
+		if err != nil {
+			return err
+		}
+
+		// Create pin options with name
+		opts := api.PinOptions{
+			Name: name,
+			Mode: api.PinModeRecursive,
+		}
+
+		// Pin to cluster
+		_, clusterErr = s.ipfsClusterAPI.Pin(ctx, cid, opts)
+		if clusterErr != nil {
+			log.Printf("Error pinning to cluster: %v", clusterErr)
+		} else {
+			log.Printf("Successfully submitted pin to cluster: %s", cidStr)
+		}
+	} else {
+		log.Printf("Warning: IPFS Cluster API not available, skipping cluster pin")
+	}
+
+	// Also pin to IPFS directly if enabled
+	if s.enableIPFSPinning && s.ipfsAPI != nil {
+		path, err := ipfspath.NewPath("/ipfs/" + cidStr)
+		if err != nil {
+			log.Printf("Error creating path for IPFS pin: %v", err)
+		} else {
+			ipfsErr = s.ipfsAPI.Pin().Add(ctx, path)
+			if ipfsErr != nil {
+				log.Printf("Error pinning to IPFS: %v", ipfsErr)
+			} else {
+				log.Printf("Successfully pinned to IPFS: %s", cidStr)
+			}
+		}
+	}
+
+	// Return cluster error as primary (IPFS pinning is secondary)
+	if clusterErr != nil {
+		return clusterErr
+	}
+	return ipfsErr
+}
+
+// unpinFromCluster removes a pin from IPFS Cluster (and optionally IPFS directly)
+func (s *PinsAPIServiceSQLite) unpinFromCluster(ctx context.Context, cidStr string) error {
+	var clusterErr, ipfsErr error
+
+	// Unpin from IPFS Cluster
+	if s.ipfsClusterAPI != nil {
+		cid, err := api.DecodeCid(cidStr)
+		if err != nil {
+			return err
+		}
+
+		// Unpin from cluster
+		_, clusterErr = s.ipfsClusterAPI.Unpin(ctx, cid)
+		if clusterErr != nil {
+			log.Printf("Error unpinning from cluster: %v", clusterErr)
+		} else {
+			log.Printf("Successfully unpinned from cluster: %s", cidStr)
+		}
+	} else {
+		log.Printf("Warning: IPFS Cluster API not available, skipping cluster unpin")
+	}
+
+	// Also unpin from IPFS directly if enabled
+	if s.enableIPFSPinning && s.ipfsAPI != nil {
+		path, err := ipfspath.NewPath("/ipfs/" + cidStr)
+		if err != nil {
+			log.Printf("Error creating path for IPFS unpin: %v", err)
+		} else {
+			ipfsErr = s.ipfsAPI.Pin().Rm(ctx, path)
+			if ipfsErr != nil {
+				log.Printf("Error unpinning from IPFS: %v", ipfsErr)
+			} else {
+				log.Printf("Successfully unpinned from IPFS: %s", cidStr)
+			}
+		}
+	}
+
+	// Return cluster error as primary (IPFS unpinning is secondary)
+	if clusterErr != nil {
+		return clusterErr
+	}
+	return ipfsErr
+}
+
+// syncStatusAndSize fetches status from cluster and size from IPFS, updates DB
+func (s *PinsAPIServiceSQLite) syncStatusAndSize(ctx context.Context, requestId, cidStr string) (Status, int64, error) {
+	var status Status = QUEUED
+	var size int64 = 0
+
+	// Get status from cluster
+	if s.ipfsClusterAPI != nil {
+		clusterStatus, err := s.getClusterStatus(ctx, cidStr)
+		if err == nil {
+			status = mapStatus(clusterStatus)
+		}
+	}
+
+	// Get size from IPFS (only if pinned or pinning)
+	if s.ipfsAPI != nil && (status == PINNED || status == PINNING) {
+		fetchedSize, err := s.getCIDSize(ctx, cidStr)
+		if err == nil && fetchedSize > 0 {
+			size = fetchedSize
+		}
+	}
+
+	// Update database
+	if err := s.db.UpdatePinStatusAndSize(ctx, requestId, string(status), size); err != nil {
+		log.Printf("Warning: failed to update pin status/size for %s: %v", requestId, err)
+	}
+
+	return status, size, nil
 }
 
 // Note: generateRequestID is defined in api_pins_service.go

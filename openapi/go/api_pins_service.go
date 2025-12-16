@@ -500,12 +500,22 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 }
 func mapStatus(ipfsStatus string) Status {
 	switch ipfsStatus {
-	case "pin_error", "unpinned":
-		return "failed"
-	case "pin_queued", "remote":
-		return "queued"
+	case "pin_error", "unpin_error":
+		return FAILED
+	case "pin_queued", "unpin_queued":
+		return QUEUED
+	case "pinning", "unpinning":
+		return PINNING
+	case "pinned":
+		return PINNED
+	case "remote":
+		// Remote means pinned on other cluster peers
+		return PINNED
+	case "unpinned":
+		// Unpinned content - treat as failed for our purposes
+		return FAILED
 	default:
-		return Status(ipfsStatus) // Use the original status if no custom mapping is required
+		return QUEUED // Default to queued for unknown statuses
 	}
 }
 

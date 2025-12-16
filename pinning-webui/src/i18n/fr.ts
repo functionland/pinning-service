@@ -86,6 +86,8 @@ export const fr: Translations = {
     copied: 'Copié!',
     close: 'Fermer',
     noResults: 'Aucune épingle trouvée',
+    actions: 'Actions',
+    refresh: 'Actualiser le statut',
   },
   profile: {
     title: 'Profil',

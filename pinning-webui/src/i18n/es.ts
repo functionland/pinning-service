@@ -86,6 +86,8 @@ export const es: Translations = {
     copied: '¡Copiado!',
     close: 'Cerrar',
     noResults: 'No se encontraron fijaciones',
+    actions: 'Acciones',
+    refresh: 'Actualizar estado',
   },
   profile: {
     title: 'Perfil',

@@ -86,6 +86,8 @@ export const hi: Translations = {
     copied: 'कॉपी हो गया!',
     close: 'बंद करें',
     noResults: 'कोई मेल खाते पिन नहीं मिले',
+    actions: 'क्रियाएं',
+    refresh: 'स्थिति अपडेट करें',
   },
   profile: {
     title: 'प्रोफ़ाइल',

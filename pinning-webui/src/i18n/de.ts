@@ -86,6 +86,8 @@ export const de: Translations = {
     copied: 'Kopiert!',
     close: 'Schließen',
     noResults: 'Keine passenden Pins gefunden',
+    actions: 'Aktionen',
+    refresh: 'Status aktualisieren',
   },
   profile: {
     title: 'Profil',

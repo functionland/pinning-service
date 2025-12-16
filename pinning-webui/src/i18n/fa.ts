@@ -86,6 +86,8 @@ export const fa: Translations = {
     copied: 'کپی شد!',
     close: 'بستن',
     noResults: 'پینی با این جستجو یافت نشد',
+    actions: 'عملیات',
+    refresh: 'بروزرسانی وضعیت',
   },
   profile: {
     title: 'پروفایل',

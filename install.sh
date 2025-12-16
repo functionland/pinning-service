@@ -16,6 +16,8 @@ NC='\033[0m' # No Color
 DEFAULT_TARGET_DIR="/home/root/pinning-service"
 DEFAULT_PORT="6000"
 DEFAULT_IPFS_API_ADDR="/ip4/127.0.0.1/tcp/5001"
+DEFAULT_IPFS_CLUSTER_API_ADDR="/ip4/127.0.0.1/tcp/9094"
+DEFAULT_ENABLE_IPFS_PINNING="false"
 DEFAULT_DB_PATH="data/pinning.db"
 
 # Pinning service
@@ -358,6 +360,8 @@ DATABASE_PATH=${DATABASE_PATH}
 
 # IPFS Configuration
 IPFS_API_ADDR=${IPFS_API_ADDR}
+IPFS_CLUSTER_API_ADDR=${IPFS_CLUSTER_API_ADDR}
+ENABLE_IPFS_PINNING=${ENABLE_IPFS_PINNING}
 
 # Domain Configuration (for nginx/SSL)
 PINNING_DOMAIN=${PINNING_DOMAIN}
@@ -1619,6 +1623,8 @@ main() {
     prompt_value "Pinning service port" "${PORT:-$DEFAULT_PORT}" "PORT"
     prompt_value "Database path (relative to install dir)" "${DATABASE_PATH:-$DEFAULT_DB_PATH}" "DATABASE_PATH"
     prompt_value "IPFS API address" "${IPFS_API_ADDR:-$DEFAULT_IPFS_API_ADDR}" "IPFS_API_ADDR"
+    prompt_value "IPFS Cluster API address" "${IPFS_CLUSTER_API_ADDR:-$DEFAULT_IPFS_CLUSTER_API_ADDR}" "IPFS_CLUSTER_API_ADDR"
+    prompt_value "Enable direct IPFS pinning (true=IPFS+Cluster, false=Cluster only)" "${ENABLE_IPFS_PINNING:-$DEFAULT_ENABLE_IPFS_PINNING}" "ENABLE_IPFS_PINNING"
     prompt_value "Pinning API domain (e.g., api.cloud.fx.land, leave empty to skip nginx)" "${PINNING_DOMAIN:-}" "PINNING_DOMAIN"
     
     # ===========================================

@@ -31,6 +31,7 @@ export default function Pins() {
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedValue, setExpandedValue] = useState<{ type: string; value: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [refreshingPins, setRefreshingPins] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchPins();
@@ -69,6 +70,30 @@ export default function Pins() {
     await navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const refreshPin = async (requestId: string) => {
+    setRefreshingPins(prev => new Set(prev).add(requestId));
+    try {
+      const res = await fetch(`/api/pins/${requestId}/refresh`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || 'Failed to refresh pin');
+      }
+      // Refresh the pins list to get updated data
+      await fetchPins();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to refresh pin');
+    } finally {
+      setRefreshingPins(prev => {
+        const next = new Set(prev);
+        next.delete(requestId);
+        return next;
+      });
+    }
   };
 
   const addPin = async (e: React.FormEvent) => {
@@ -281,6 +306,9 @@ export default function Pins() {
                     <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden lg:table-cell">
                       {t.pins.requestId}
                     </th>
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                      {t.pins.actions || 'Actions'}
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -328,6 +356,23 @@ export default function Pins() {
                             </svg>
                           </button>
                         </div>
+                      </td>
+                      <td className="px-4 py-4">
+                        <button
+                          onClick={() => refreshPin(pin.request_id)}
+                          disabled={refreshingPins.has(pin.request_id)}
+                          className="p-2 text-gray-500 hover:text-primary-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                          title={t.pins.refresh || 'Refresh status'}
+                        >
+                          <svg 
+                            className={`w-4 h-4 ${refreshingPins.has(pin.request_id) ? 'animate-spin' : ''}`} 
+                            fill="none" 
+                            stroke="currentColor" 
+                            viewBox="0 0 24 24"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                          </svg>
+                        </button>
                       </td>
                     </tr>
                   ))}

@@ -104,14 +104,33 @@ func main() {
 	}
 
 	// Initialize IPFS Cluster connection
-	ipfsClusterConfig := ipfsCluster.Config{}
+	ipfsClusterAddr := os.Getenv("IPFS_CLUSTER_API_ADDR")
+	if ipfsClusterAddr == "" {
+		ipfsClusterAddr = "/ip4/127.0.0.1/tcp/9094"
+	}
+	clusterMultiAddr, err := ma.NewMultiaddr(ipfsClusterAddr)
+	if err != nil {
+		log.Fatalf("Invalid IPFS Cluster multiaddress %s: %v", ipfsClusterAddr, err)
+	}
+	ipfsClusterConfig := ipfsCluster.Config{
+		APIAddr: clusterMultiAddr,
+	}
 	ipfsClusterApi, err := ipfsCluster.NewDefaultClient(&ipfsClusterConfig)
 	if err != nil {
 		log.Fatalf("Error initializing IPFS cluster API: %v", err)
 	}
+	log.Printf("IPFS Cluster API connected at: %s", ipfsClusterAddr)
+
+	// Check if direct IPFS pinning is enabled (in addition to IPFS Cluster)
+	enableIPFSPinning := strings.ToLower(os.Getenv("ENABLE_IPFS_PINNING")) == "true" || os.Getenv("ENABLE_IPFS_PINNING") == "1"
+	if enableIPFSPinning {
+		log.Printf("Direct IPFS pinning ENABLED - pins will be sent to both IPFS and IPFS Cluster")
+	} else {
+		log.Printf("Direct IPFS pinning DISABLED - pins will only be sent to IPFS Cluster")
+	}
 
 	// Initialize PinsAPIService with SQLite backend
-	pinsAPIService := openapi.NewPinsAPIServiceSQLite(sqliteService, userService, ipfsAPI, ipfsClusterApi)
+	pinsAPIService := openapi.NewPinsAPIServiceSQLite(sqliteService, userService, ipfsAPI, ipfsClusterApi, enableIPFSPinning)
 
 	// Create PinsAPIController
 	pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)

@@ -1045,6 +1045,33 @@ func (s *SQLiteService) UpdatePinSizeByCID(ctx context.Context, cid string, size
 	return nil
 }
 
+// UpdatePinStatusAndSize updates both status and size of a pin by request ID
+func (s *SQLiteService) UpdatePinStatusAndSize(ctx context.Context, requestID string, status string, size int64) error {
+	if requestID == "" {
+		return errors.New("requestID cannot be empty")
+	}
+
+	// Only update size if it's greater than 0
+	var err error
+	if size > 0 {
+		_, err = s.db.ExecContext(ctx,
+			"UPDATE pins SET status = ?, size = ?, updated_at = CURRENT_TIMESTAMP WHERE requestid = ?",
+			status, size, requestID,
+		)
+	} else {
+		_, err = s.db.ExecContext(ctx,
+			"UPDATE pins SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE requestid = ?",
+			status, requestID,
+		)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to update pin status and size: %w", err)
+	}
+
+	return nil
+}
+
 // StorageUsage represents storage usage statistics
 type StorageUsage struct {
 	TotalSize  int64  `json:"total_size"`

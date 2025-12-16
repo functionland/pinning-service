@@ -419,6 +419,47 @@ app.post('/api/pins', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
+// Refresh pin status and size from pinning service
+app.post('/api/pins/:requestId/refresh', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { requestId } = req.params;
+    
+    // Get user's API key to call the pinning service
+    const keys = dbOps.getApiKeys(req.session.user!.email);
+    if (!keys || keys.length === 0) {
+      return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
+    }
+    
+    // Call the pinning service to get updated status
+    const pinningApiUrl = process.env.PINNING_API_URL || 'http://localhost:6000';
+    const response = await fetch(`${pinningApiUrl}/pins/${requestId}`, {
+      headers: {
+        'Authorization': `Bearer ${keys[0].token}`
+      }
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[webui] Error refreshing pin:', errorText);
+      return res.status(response.status).json({ error: 'Failed to refresh pin status' });
+    }
+    
+    const pinData = await response.json();
+    
+    // The pinning service updates the database, so we just return the updated data
+    res.json({
+      request_id: pinData.requestid,
+      status: pinData.status,
+      cid: pinData.pin?.cid,
+      name: pinData.pin?.name,
+      refreshed: true
+    });
+  } catch (error) {
+    console.error('[webui] Error refreshing pin:', error);
+    res.status(500).json({ error: 'Failed to refresh pin status' });
+  }
+});
+
 app.get('/api/stats', requireAuth, (req: Request, res: Response) => {
   try {
     const stats = dbOps.getUserStats(req.session.user!.email);

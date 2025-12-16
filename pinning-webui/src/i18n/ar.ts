@@ -86,6 +86,8 @@ export const ar: Translations = {
     copied: 'تم النسخ!',
     close: 'إغلاق',
     noResults: 'لم يتم العثور على تثبيتات مطابقة',
+    actions: 'إجراءات',
+    refresh: 'تحديث الحالة',
   },
   profile: {
     title: 'الملف الشخصي',

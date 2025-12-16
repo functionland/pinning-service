@@ -27,6 +27,11 @@ GATEWAY_SERVICE_NAME="fula-upload-server"
 GATEWAY_SERVICE_FILE="/etc/systemd/system/${GATEWAY_SERVICE_NAME}.service"
 DEFAULT_GATEWAY_PORT="3300"
 
+# WebUI server
+WEBUI_SERVICE_NAME="fula-pinning-webui"
+WEBUI_SERVICE_FILE="/etc/systemd/system/${WEBUI_SERVICE_NAME}.service"
+DEFAULT_WEBUI_PORT="3001"
+
 # Nginx configuration
 NGINX_AVAILABLE="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
@@ -139,6 +144,15 @@ stop_gateway_service() {
     fi
 }
 
+# Stop existing webui service if running
+stop_webui_service() {
+    if systemctl is-active --quiet "$WEBUI_SERVICE_NAME" 2>/dev/null; then
+        print_info "Stopping existing WebUI service..."
+        systemctl stop "$WEBUI_SERVICE_NAME"
+        sleep 2
+    fi
+}
+
 # Build the application
 build_app() {
     local source_dir=$1
@@ -196,6 +210,43 @@ build_gateway() {
     verify_step "Gateway build" "[ -f '$target_dir/ipfs-server/dist/ipfs-gateway' ]"
 }
 
+# Build the WebUI
+build_webui() {
+    local source_dir=$1
+    local target_dir=$2
+    
+    print_info "Building Pinning WebUI..."
+    
+    # Check if Node.js is installed
+    if ! command -v node &> /dev/null; then
+        print_warning "Node.js not found. Skipping WebUI build."
+        return 1
+    fi
+    
+    # Check Node.js version
+    NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
+    if [ "$NODE_VERSION" -lt 18 ]; then
+        print_warning "Node.js 18+ required. Found: $(node -v). Skipping WebUI build."
+        return 1
+    fi
+    
+    cd "$source_dir/pinning-webui"
+    
+    # Install dependencies
+    print_info "Installing WebUI dependencies..."
+    npm install
+    
+    # Build the application
+    print_info "Building WebUI..."
+    npm run build
+    
+    # Copy to target
+    mkdir -p "$target_dir/pinning-webui/dist"
+    cp -r dist/* "$target_dir/pinning-webui/dist/"
+    
+    verify_step "WebUI build" "[ -d '$target_dir/pinning-webui/dist/public' ]"
+}
+
 # Create directory structure
 create_directories() {
     local target_dir=$1
@@ -208,6 +259,7 @@ create_directories() {
     mkdir -p "$target_dir/ipfs-server/dist"
     mkdir -p "$target_dir/ipfs-server/uploads"
     mkdir -p "$target_dir/ipfs-server/.well-known/acme-challenge"
+    mkdir -p "$target_dir/pinning-webui/dist"
     
     verify_step "Directory creation" "[ -d '$target_dir/data' ] && [ -d '$target_dir/ipfs-server' ]"
 }
@@ -366,6 +418,124 @@ EOF
     chmod 644 "$GATEWAY_SERVICE_FILE"
     
     verify_step "Gateway service file creation" "[ -f '$GATEWAY_SERVICE_FILE' ]"
+}
+
+# Generate WebUI .env file
+generate_webui_env_file() {
+    local target_dir=$1
+    
+    print_info "Generating WebUI .env file..."
+    
+    # Generate a random session secret
+    SESSION_SECRET=$(openssl rand -hex 32 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 64 | head -n 1)
+    
+    cat > "$target_dir/pinning-webui/.env" << EOF
+# FULA Pinning WebUI Configuration
+# Generated on $(date)
+
+# Server port
+WEBUI_PORT=${WEBUI_PORT}
+
+# Node environment
+NODE_ENV=production
+
+# Database path (same as pinning service)
+DATABASE_PATH=${target_dir}/${DATABASE_PATH}
+
+# Google OAuth Client ID
+# Get this from: https://console.cloud.google.com/apis/credentials
+# Both variables use the same value - backend needs GOOGLE_CLIENT_ID, frontend needs VITE_ prefix
+GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+VITE_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+
+# Session secret (auto-generated)
+SESSION_SECRET=${SESSION_SECRET}
+
+# Pinning service URL
+PINNING_SERVICE_URL=http://localhost:${PORT}
+EOF
+
+    chmod 600 "$target_dir/pinning-webui/.env"
+    
+    verify_step "WebUI .env file creation" "[ -f '$target_dir/pinning-webui/.env' ]"
+}
+
+# Create WebUI systemd service file
+create_webui_service_file() {
+    local target_dir=$1
+    
+    print_info "Creating WebUI systemd service file..."
+    
+    cat > "$WEBUI_SERVICE_FILE" << EOF
+[Unit]
+Description=FULA Pinning Service WebUI
+Documentation=https://github.com/functionland/pinning-service
+After=network.target fula-pinning-service.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node ${target_dir}/pinning-webui/dist/server.mjs
+Restart=on-failure
+RestartSec=10
+User=root
+WorkingDirectory=${target_dir}/pinning-webui
+Environment=PATH=/usr/bin:/usr/local/bin
+Environment=NODE_ENV=production
+EnvironmentFile=${target_dir}/pinning-webui/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=${target_dir}/data
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=512M
+
+# Restart limits
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=${WEBUI_SERVICE_NAME}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    chmod 644 "$WEBUI_SERVICE_FILE"
+    
+    verify_step "WebUI service file creation" "[ -f '$WEBUI_SERVICE_FILE' ]"
+}
+
+# Configure and start WebUI service
+configure_webui_service() {
+    print_info "Configuring WebUI systemd service..."
+    
+    systemctl daemon-reload
+    systemctl enable "$WEBUI_SERVICE_NAME"
+    
+    verify_step "WebUI service configuration" "systemctl is-enabled '$WEBUI_SERVICE_NAME'"
+}
+
+# Start WebUI service
+start_webui_service() {
+    print_info "Starting WebUI service..."
+    
+    systemctl start "$WEBUI_SERVICE_NAME"
+    sleep 3
+    
+    if systemctl is-active --quiet "$WEBUI_SERVICE_NAME"; then
+        print_success "WebUI service started successfully"
+    else
+        print_error "WebUI service failed to start"
+        journalctl -u "$WEBUI_SERVICE_NAME" -n 20 --no-pager
+        return 1
+    fi
 }
 
 # Configure systemd service
@@ -874,6 +1044,7 @@ main() {
         # Stop existing services
         stop_service
         stop_gateway_service
+        stop_webui_service
     else
         print_info "Fresh installation detected."
     fi
@@ -890,6 +1061,19 @@ main() {
     echo ""
     print_info "IPFS Gateway/Upload Server Configuration:"
     prompt_value "Gateway server port" "${GATEWAY_PORT:-$DEFAULT_GATEWAY_PORT}" "GATEWAY_PORT"
+    
+    echo ""
+    print_info "WebUI Configuration (optional):"
+    echo "  The WebUI provides a web interface for users to manage their pins and API keys."
+    echo "  Leave Google Client ID empty to skip WebUI installation."
+    prompt_value "WebUI port" "${WEBUI_PORT:-$DEFAULT_WEBUI_PORT}" "WEBUI_PORT"
+    prompt_value "Google OAuth Client ID (from console.cloud.google.com)" "${GOOGLE_CLIENT_ID:-}" "GOOGLE_CLIENT_ID"
+    
+    INSTALL_WEBUI=false
+    if [ -n "$GOOGLE_CLIENT_ID" ]; then
+        INSTALL_WEBUI=true
+        prompt_value "WebUI domain (e.g., portal.example.com, leave empty for localhost)" "${WEBUI_DOMAIN:-}" "WEBUI_DOMAIN"
+    fi
     
     echo ""
     print_info "Nginx and SSL Configuration (optional):"
@@ -945,6 +1129,28 @@ main() {
         GATEWAY_INSTALLED=false
     fi
     
+    # Build and install WebUI (optional - requires Node.js and Google Client ID)
+    WEBUI_INSTALLED=false
+    if [ "$INSTALL_WEBUI" = true ]; then
+        echo ""
+        print_info "Installing Pinning WebUI..."
+        
+        if build_webui "$SOURCE_DIR" "$TARGET_DIR"; then
+            # Generate WebUI configuration
+            generate_webui_env_file "$TARGET_DIR"
+            
+            # Create and configure WebUI service
+            create_webui_service_file "$TARGET_DIR"
+            configure_webui_service
+            
+            # Start WebUI service
+            start_webui_service
+            WEBUI_INSTALLED=true
+        else
+            print_warning "WebUI was not installed (Node.js 18+ required)"
+        fi
+    fi
+    
     # Setup Nginx and SSL if domain was provided
     NGINX_CONFIGURED=false
     if [ "$SETUP_NGINX" = true ] && [ -n "$DOMAIN" ]; then
@@ -970,6 +1176,12 @@ main() {
         echo ""
     fi
     
+    if [ "$WEBUI_INSTALLED" = true ]; then
+        echo "WebUI Service Status:"
+        systemctl status "$WEBUI_SERVICE_NAME" --no-pager -l || true
+        echo ""
+    fi
+    
     if [ "$NGINX_CONFIGURED" = true ]; then
         echo "Nginx Status:"
         systemctl status nginx --no-pager -l || true
@@ -989,6 +1201,13 @@ main() {
         echo ""
     fi
     
+    if [ "$WEBUI_INSTALLED" = true ]; then
+        echo "  WebUI Service:"
+        echo "    - View logs:    journalctl -u $WEBUI_SERVICE_NAME -f"
+        echo "    - Restart:      systemctl restart $WEBUI_SERVICE_NAME"
+        echo ""
+    fi
+    
     if [ "$NGINX_CONFIGURED" = true ]; then
         echo "  Nginx:"
         echo "    - View logs:    tail -f /var/log/nginx/${DOMAIN}_access.log"
@@ -1000,6 +1219,9 @@ main() {
     echo "Configuration files:"
     echo "  - Pinning:  $TARGET_DIR/.env"
     echo "  - Gateway:  $TARGET_DIR/ipfs-server/.env"
+    if [ "$WEBUI_INSTALLED" = true ]; then
+        echo "  - WebUI:    $TARGET_DIR/pinning-webui/.env"
+    fi
     if [ "$NGINX_CONFIGURED" = true ]; then
         echo "  - Nginx:    $NGINX_AVAILABLE/$DOMAIN"
     fi
@@ -1019,6 +1241,19 @@ main() {
             echo "  - Gateway:     http://localhost:$GATEWAY_PORT/gateway/{cid}"
             echo "  - Upload:      http://localhost:$GATEWAY_PORT/upload"
         fi
+    fi
+    
+    if [ "$WEBUI_INSTALLED" = true ]; then
+        if [ -n "$WEBUI_DOMAIN" ]; then
+            echo "  - WebUI:       https://$WEBUI_DOMAIN"
+        else
+            echo "  - WebUI:       http://localhost:$WEBUI_PORT"
+        fi
+        echo ""
+        print_info "WebUI Setup Notes:"
+        echo "  - Ensure Google OAuth is configured with the correct redirect URI"
+        echo "  - Add 'http://localhost:$WEBUI_PORT' (or your domain) to authorized origins"
+        echo "  - Users sign in with Google and get automatic API keys"
     fi
     echo ""
     

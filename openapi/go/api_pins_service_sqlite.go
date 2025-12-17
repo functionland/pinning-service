@@ -185,17 +185,24 @@ func (s *PinsAPIServiceSQLite) GetPinByRequestId(ctx context.Context, requestid 
 		pinStatus.Delegates = s.getDelegates(ctx)
 	}
 
-	// Update status from IPFS cluster if available
+	// Update status from IPFS cluster if available and persist to database
 	if s.ipfsClusterAPI != nil {
 		clusterStatus, err := s.getClusterStatus(ctx, pinStatus.Pin.Cid)
 		if err == nil {
-			pinStatus.Status = mapStatus(clusterStatus)
+			newStatus := mapStatus(clusterStatus)
+			pinStatus.Status = newStatus
+			// Persist the updated status to database
+			if updateErr := s.db.UpdatePinStatusAndSize(ctx, requestid, string(newStatus), 0); updateErr != nil {
+				log.Printf("Warning: failed to update pin status for %s: %v", requestid, updateErr)
+			} else {
+				log.Printf("Updated pin %s status to %s from cluster", requestid, newStatus)
+			}
 		}
 	}
 
 	// Try to fetch and update size asynchronously (fire and forget with timeout)
 	if s.ipfsAPI != nil {
-		go func(reqID, cid string) {
+		go func(reqID, cid string, currentStatus Status) {
 			// Use a short timeout to avoid blocking on remote content
 			timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -204,9 +211,11 @@ func (s *PinsAPIServiceSQLite) GetPinByRequestId(ctx context.Context, requestid 
 			if sizeErr == nil && size > 0 {
 				if updateErr := s.db.UpdatePinSize(timeoutCtx, reqID, size); updateErr != nil {
 					log.Printf("Warning: failed to update pin size for %s: %v", reqID, updateErr)
+				} else {
+					log.Printf("Updated pin %s size to %d bytes", reqID, size)
 				}
 			}
-		}(requestid, pinStatus.Pin.Cid)
+		}(requestid, pinStatus.Pin.Cid, pinStatus.Status)
 	}
 
 	return Response(http.StatusOK, pinStatus), nil

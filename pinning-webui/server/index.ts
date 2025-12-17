@@ -412,15 +412,39 @@ app.post('/api/pins', requireAuth, async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid CID format' });
     }
     
-    const requestId = dbOps.addPin(req.session.user!.email, cid, name);
-    res.json({ requestId, cid, status: 'queued' });
+    // Get user's API key to call the pinning service
+    const keys = dbOps.getApiKeys(req.session.user!.email);
+    if (!keys || keys.length === 0) {
+      return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
+    }
+    
+    // Call the Go pinning service API to add the pin (this triggers IPFS Cluster pinning)
+    const fullUrl = 'http://127.0.0.1:6000/pins';
+    console.log(`[webui] Adding pin ${cid} via pinning service`);
+    
+    const response = await httpPost(fullUrl, 
+      { 'Authorization': `Bearer ${keys[0].key_id}`, 'Content-Type': 'application/json' },
+      JSON.stringify({ cid, name: name || '' })
+    );
+    
+    if (response.status !== 200 && response.status !== 202) {
+      console.error('[webui] Error adding pin:', response.status, response.data);
+      return res.status(response.status).json({ error: 'Failed to add pin' });
+    }
+    
+    const pinData = JSON.parse(response.data);
+    res.json({ 
+      requestId: pinData.requestid, 
+      cid: pinData.pin?.cid || cid, 
+      status: pinData.status || 'queued' 
+    });
   } catch (error) {
     console.error('[webui] Error adding pin:', error);
     res.status(500).json({ error: 'Failed to add pin' });
   }
 });
 
-// Helper function to make HTTP requests using Node's http module (avoids fetch issues)
+// Helper function to make HTTP GET requests using Node's http module (avoids fetch issues)
 function httpGet(url: string, headers: Record<string, string>): Promise<{ status: number; data: string }> {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
@@ -449,6 +473,43 @@ function httpGet(url: string, headers: Record<string, string>): Promise<{ status
       reject(new Error('Request timeout'));
     });
     
+    req.end();
+  });
+}
+
+// Helper function to make HTTP POST requests using Node's http module
+function httpPost(url: string, headers: Record<string, string>, body: string): Promise<{ status: number; data: string }> {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url);
+    const options = {
+      hostname: urlObj.hostname,
+      port: parseInt(urlObj.port) || 80,
+      path: urlObj.pathname + urlObj.search,
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Content-Length': Buffer.byteLength(body)
+      }
+    };
+    
+    const req = http.request(options, (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => {
+        resolve({ status: response.statusCode || 500, data });
+      });
+    });
+    
+    req.on('error', (error) => {
+      reject(error);
+    });
+    
+    req.setTimeout(30000, () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+    
+    req.write(body);
     req.end();
   });
 }

@@ -29,10 +29,9 @@ export default function Layout() {
             {/* Logo */}
             <div className="flex items-center space-x-3">
               <img 
-                src="https://fx.land/wp-content/uploads/2024/10/FULA_GRNLockup2_Lrg_green.png" 
+                src="/logo.svg" 
                 alt="FULA" 
-                style={{ maxWidth: '180px' }}
-                className="w-auto"
+                className="h-10 w-auto"
               />
               <span className="text-lg font-semibold text-gray-900">Pinning Service</span>
             </div>

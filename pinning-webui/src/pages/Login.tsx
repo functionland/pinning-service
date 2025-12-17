@@ -176,9 +176,9 @@ export default function Login() {
         {/* Logo and title */}
         <div className="text-center mb-8">
           <img
-            src="https://fx.land/wp-content/uploads/2024/10/FULA_GRNLockup2_Lrg_green.png"
+            src="/logo.svg"
             alt="FULA"
-            className="mx-auto mb-6"
+            className="mx-auto mb-6 h-24"
           />
           <h1 className="text-3xl font-bold text-gray-900 mb-2">
             {t.login.title}

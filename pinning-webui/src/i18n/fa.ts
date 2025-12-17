@@ -85,9 +85,12 @@ export const fa: Translations = {
     copy: 'کپی',
     copied: 'کپی شد!',
     close: 'بستن',
-    noResults: 'پینی با این جستجو یافت نشد',
+    noResults: 'پینی مطابق با جستجوی شما یافت نشد',
     actions: 'عملیات',
     refresh: 'بروزرسانی وضعیت',
+    selected: 'انتخاب شده',
+    unpin: 'حذف پین',
+    unpinConfirm: 'آیا مطمئن هستید که می‌خواهید {count} مورد را از پین خارج کنید؟ این کار آنها را از IPFS Cluster حذف می‌کند.',
   },
   profile: {
     title: 'پروفایل',

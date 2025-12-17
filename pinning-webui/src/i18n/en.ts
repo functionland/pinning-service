@@ -88,6 +88,9 @@ export const en: Translations = {
     noResults: 'No pins found matching your search',
     actions: 'Actions',
     refresh: 'Refresh status',
+    selected: 'selected',
+    unpin: 'Unpin',
+    unpinConfirm: 'Are you sure you want to unpin {count} item(s)? This will remove them from IPFS Cluster.',
   },
   profile: {
     title: 'Profile',

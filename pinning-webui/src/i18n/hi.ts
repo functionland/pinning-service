@@ -85,9 +85,12 @@ export const hi: Translations = {
     copy: 'कॉपी करें',
     copied: 'कॉपी हो गया!',
     close: 'बंद करें',
-    noResults: 'कोई मेल खाते पिन नहीं मिले',
+    noResults: 'आपकी खोज से मेल खाने वाले कोई पिन नहीं मिले',
     actions: 'क्रियाएं',
     refresh: 'स्थिति अपडेट करें',
+    selected: 'चयनित',
+    unpin: 'अनपिन करें',
+    unpinConfirm: 'क्या आप वाकई {count} आइटम(ओं) को अनपिन करना चाहते हैं? यह उन्हें IPFS Cluster से हटा देगा।',
   },
   profile: {
     title: 'प्रोफ़ाइल',

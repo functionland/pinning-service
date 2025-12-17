@@ -85,9 +85,12 @@ export const de: Translations = {
     copy: 'Kopieren',
     copied: 'Kopiert!',
     close: 'Schließen',
-    noResults: 'Keine passenden Pins gefunden',
+    noResults: 'Keine Pins gefunden, die Ihrer Suche entsprechen',
     actions: 'Aktionen',
     refresh: 'Status aktualisieren',
+    selected: 'ausgewählt',
+    unpin: 'Lösen',
+    unpinConfirm: 'Sind Sie sicher, dass Sie {count} Element(e) lösen möchten? Dies entfernt sie aus dem IPFS Cluster.',
   },
   profile: {
     title: 'Profil',

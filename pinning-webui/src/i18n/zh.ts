@@ -85,9 +85,12 @@ export const zh: Translations = {
     copy: '复制',
     copied: '已复制！',
     close: '关闭',
-    noResults: '未找到匹配的固定',
+    noResults: '未找到匹配搜索的图钉',
     actions: '操作',
     refresh: '刷新状态',
+    selected: '已选择',
+    unpin: '取消固定',
+    unpinConfirm: '您确定要取消固定 {count} 个项目吗？这将从 IPFS Cluster 中删除它们。',
   },
   profile: {
     title: '个人资料',

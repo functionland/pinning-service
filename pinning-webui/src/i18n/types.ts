@@ -106,6 +106,9 @@ export interface Translations {
     noResults: string;
     actions: string;
     refresh: string;
+    selected: string;
+    unpin: string;
+    unpinConfirm: string;
   };
   profile: {
     title: string;

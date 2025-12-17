@@ -32,6 +32,8 @@ export default function Pins() {
   const [expandedValue, setExpandedValue] = useState<{ type: string; value: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [refreshingPins, setRefreshingPins] = useState<Set<string>>(new Set());
+  const [selectedPins, setSelectedPins] = useState<Set<string>>(new Set());
+  const [unpinning, setUnpinning] = useState(false);
 
   useEffect(() => {
     fetchPins();
@@ -64,6 +66,61 @@ export default function Pins() {
   const clearSearch = () => {
     setSearchQuery('');
     setPage(1);
+  };
+
+  const toggleSelectPin = (requestId: string) => {
+    setSelectedPins(prev => {
+      const next = new Set(prev);
+      if (next.has(requestId)) {
+        next.delete(requestId);
+      } else {
+        next.add(requestId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (!data) return;
+    if (selectedPins.size === data.pins.length) {
+      setSelectedPins(new Set());
+    } else {
+      setSelectedPins(new Set(data.pins.map(p => p.request_id)));
+    }
+  };
+
+  const unpinSelected = async () => {
+    if (selectedPins.size === 0) return;
+    
+    const confirmed = window.confirm(
+      t.pins.unpinConfirm?.replace('{count}', String(selectedPins.size)) ||
+      `Are you sure you want to unpin ${selectedPins.size} item(s)?`
+    );
+    if (!confirmed) return;
+
+    setUnpinning(true);
+    setError(null);
+    try {
+      const requestIds = Array.from(selectedPins);
+      const res = await fetch('/api/pins/bulk-unpin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ requestIds }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to unpin');
+      }
+
+      setSelectedPins(new Set());
+      await fetchPins();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to unpin');
+    } finally {
+      setUnpinning(false);
+    }
   };
 
   const copyToClipboard = async (text: string) => {
@@ -160,6 +217,31 @@ export default function Pins() {
           + {t.pins.addPin}
         </button>
       </div>
+
+      {/* Bulk action bar */}
+      {selectedPins.size > 0 && (
+        <div className="bg-primary-50 border border-primary-200 rounded-xl p-4 flex items-center justify-between">
+          <span className="text-primary-700 font-medium">
+            {selectedPins.size} {t.pins.selected || 'selected'}
+          </span>
+          <button
+            onClick={unpinSelected}
+            disabled={unpinning}
+            className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
+          >
+            {unpinning ? (
+              <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            ) : (
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            )}
+            {t.pins.unpin || 'Unpin'}
+          </button>
+        </div>
+      )}
 
       {/* Search bar */}
       <form onSubmit={handleSearch} className="flex gap-2">
@@ -291,6 +373,14 @@ export default function Pins() {
               <table className="w-full">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 w-10">
+                      <input
+                        type="checkbox"
+                        checked={data.pins.length > 0 && selectedPins.size === data.pins.length}
+                        onChange={toggleSelectAll}
+                        className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                      />
+                    </th>
                     <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
                       {t.pins.cid}
                     </th>
@@ -313,7 +403,15 @@ export default function Pins() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {data.pins.map((pin: Pin) => (
-                    <tr key={pin.request_id} className="hover:bg-gray-50">
+                    <tr key={pin.request_id} className={`hover:bg-gray-50 ${selectedPins.has(pin.request_id) ? 'bg-primary-50' : ''}`}>
+                      <td className="px-4 py-4">
+                        <input
+                          type="checkbox"
+                          checked={selectedPins.has(pin.request_id)}
+                          onChange={() => toggleSelectPin(pin.request_id)}
+                          className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                        />
+                      </td>
                       <td className="px-4 py-4">
                         <div className="flex items-center gap-1">
                           <code className="text-sm font-mono text-gray-700">

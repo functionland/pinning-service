@@ -85,9 +85,12 @@ export const fr: Translations = {
     copy: 'Copier',
     copied: 'Copié!',
     close: 'Fermer',
-    noResults: 'Aucune épingle trouvée',
+    noResults: 'Aucun pin trouvé correspondant à votre recherche',
     actions: 'Actions',
     refresh: 'Actualiser le statut',
+    selected: 'sélectionné(s)',
+    unpin: 'Désépingler',
+    unpinConfirm: 'Êtes-vous sûr de vouloir désépingler {count} élément(s) ? Cela les supprimera du IPFS Cluster.',
   },
   profile: {
     title: 'Profil',

@@ -85,9 +85,12 @@ export const es: Translations = {
     copy: 'Copiar',
     copied: '¡Copiado!',
     close: 'Cerrar',
-    noResults: 'No se encontraron fijaciones',
+    noResults: 'No se encontraron pines que coincidan con tu búsqueda',
     actions: 'Acciones',
     refresh: 'Actualizar estado',
+    selected: 'seleccionados',
+    unpin: 'Desfijar',
+    unpinConfirm: '¿Estás seguro de que quieres desfijar {count} elemento(s)? Esto los eliminará del IPFS Cluster.',
   },
   profile: {
     title: 'Perfil',

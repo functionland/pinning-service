@@ -514,6 +514,92 @@ function httpPost(url: string, headers: Record<string, string>, body: string): P
   });
 }
 
+// Helper function to make HTTP DELETE requests using Node's http module
+function httpDelete(url: string, headers: Record<string, string>): Promise<{ status: number; data: string }> {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url);
+    const options = {
+      hostname: urlObj.hostname,
+      port: parseInt(urlObj.port) || 80,
+      path: urlObj.pathname + urlObj.search,
+      method: 'DELETE',
+      headers: headers
+    };
+    
+    const req = http.request(options, (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => {
+        resolve({ status: response.statusCode || 500, data });
+      });
+    });
+    
+    req.on('error', (error) => {
+      reject(error);
+    });
+    
+    req.setTimeout(30000, () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+    
+    req.end();
+  });
+}
+
+// Bulk unpin - delete multiple pins
+app.post('/api/pins/bulk-unpin', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { requestIds } = req.body;
+    
+    if (!requestIds || !Array.isArray(requestIds) || requestIds.length === 0) {
+      return res.status(400).json({ error: 'requestIds array is required' });
+    }
+    
+    // Get user's API key to call the pinning service
+    const keys = dbOps.getApiKeys(req.session.user!.email);
+    if (!keys || keys.length === 0) {
+      return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
+    }
+    
+    console.log(`[webui] Bulk unpinning ${requestIds.length} pins`);
+    
+    const results: { requestId: string; success: boolean; error?: string }[] = [];
+    
+    // Delete each pin via the pinning service API
+    for (const requestId of requestIds) {
+      try {
+        const fullUrl = `http://127.0.0.1:6000/pins/${requestId}`;
+        const response = await httpDelete(fullUrl, {
+          'Authorization': `Bearer ${keys[0].key_id}`
+        });
+        
+        if (response.status === 200 || response.status === 202 || response.status === 204) {
+          results.push({ requestId, success: true });
+        } else {
+          console.error(`[webui] Failed to unpin ${requestId}:`, response.status, response.data);
+          results.push({ requestId, success: false, error: 'Failed to unpin' });
+        }
+      } catch (err) {
+        console.error(`[webui] Error unpinning ${requestId}:`, err);
+        results.push({ requestId, success: false, error: 'Request failed' });
+      }
+    }
+    
+    const successCount = results.filter(r => r.success).length;
+    console.log(`[webui] Bulk unpin complete: ${successCount}/${requestIds.length} successful`);
+    
+    res.json({ 
+      success: true, 
+      results,
+      summary: { total: requestIds.length, successful: successCount, failed: requestIds.length - successCount }
+    });
+  } catch (error) {
+    console.error('[webui] Error in bulk unpin:', error);
+    res.status(500).json({ error: 'Failed to unpin' });
+  }
+});
+
 // Refresh pin status and size from pinning service
 app.post('/api/pins/:requestId/refresh', requireAuth, async (req: Request, res: Response) => {
   try {

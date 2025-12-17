@@ -1,12 +1,13 @@
 import 'dotenv/config';
-import express, { Request, Response, NextFunction } from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import session from 'express-session';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import cookieParser from 'cookie-parser';
-import path from 'path';
 import { fileURLToPath } from 'url';
+import path from 'path';
+import http from 'http';
 import Database from 'better-sqlite3';
 import { OAuth2Client } from 'google-auth-library';
 import { v4 as uuidv4 } from 'uuid';
@@ -419,6 +420,39 @@ app.post('/api/pins', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
+// Helper function to make HTTP requests using Node's http module (avoids fetch issues)
+function httpGet(url: string, headers: Record<string, string>): Promise<{ status: number; data: string }> {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url);
+    const options = {
+      hostname: urlObj.hostname,
+      port: parseInt(urlObj.port) || 80,
+      path: urlObj.pathname + urlObj.search,
+      method: 'GET',
+      headers: headers
+    };
+    
+    const req = http.request(options, (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => {
+        resolve({ status: response.statusCode || 500, data });
+      });
+    });
+    
+    req.on('error', (error) => {
+      reject(error);
+    });
+    
+    req.setTimeout(10000, () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+    
+    req.end();
+  });
+}
+
 // Refresh pin status and size from pinning service
 app.post('/api/pins/:requestId/refresh', requireAuth, async (req: Request, res: Response) => {
   try {
@@ -430,25 +464,20 @@ app.post('/api/pins/:requestId/refresh', requireAuth, async (req: Request, res: 
       return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
     }
     
-    // Call the pinning service to get updated status
-    // Use hardcoded default to avoid any env var parsing issues
-    const pinningApiUrl = 'http://127.0.0.1:6000';
-    const fullUrl = `${pinningApiUrl}/pins/${requestId}`;
+    // Call the pinning service to get updated status using http module
+    const fullUrl = `http://127.0.0.1:6000/pins/${requestId}`;
     console.log(`[webui] Refreshing pin ${requestId} via ${fullUrl} (key: ${keys[0].key_id?.substring(0, 8)}...)`);
     
-    const response = await fetch(fullUrl, {
-      headers: {
-        'Authorization': `Bearer ${keys[0].key_id}`
-      }
+    const response = await httpGet(fullUrl, {
+      'Authorization': `Bearer ${keys[0].key_id}`
     });
     
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('[webui] Error refreshing pin:', response.status, errorText);
+    if (response.status !== 200) {
+      console.error('[webui] Error refreshing pin:', response.status, response.data);
       return res.status(response.status).json({ error: 'Failed to refresh pin status' });
     }
     
-    const pinData = await response.json();
+    const pinData = JSON.parse(response.data);
     
     // The pinning service updates the database, so we just return the updated data
     res.json({

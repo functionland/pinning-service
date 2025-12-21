@@ -1,0 +1,660 @@
+{
+  "info": {
+    "_postman_id": "fula-pinning-service-api",
+    "name": "FULA Pinning Service API",
+    "description": "Complete API collection for the FULA IPFS Pinning Service.\n\n## Services\n- **Pinning Service API** (port 6000): IPFS Pinning Service API spec compliant endpoints\n- **Admin API** (port 6000): System administration endpoints\n- **IPFS Upload Server** (port 3300): File upload and gateway endpoints\n\n## Authentication\n- Pinning Service: Bearer token (API key from WebUI)\n- Admin API: X-System-Key header or Bearer token\n- Upload Server: Bearer token (session token)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://api.cloud.fx.land",
+      "description": "Production API base URL"
+    },
+    {
+      "key": "localUrl",
+      "value": "http://localhost:6000",
+      "description": "Local development API URL"
+    },
+    {
+      "key": "uploadServerUrl",
+      "value": "https://ipfs.cloud.fx.land",
+      "description": "IPFS Upload/Gateway server URL"
+    },
+    {
+      "key": "apiKey",
+      "value": "your-api-key-here",
+      "description": "API key obtained from WebUI"
+    },
+    {
+      "key": "systemKey",
+      "value": "your-system-key-here",
+      "description": "System API key for admin endpoints"
+    }
+  ],
+  "item": [
+    {
+      "name": "Pinning Service API",
+      "description": "IPFS Pinning Service API endpoints following the standard spec (https://ipfs.github.io/pinning-services-api-spec/)",
+      "item": [
+        {
+          "name": "List Pins",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pins?limit=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["pins"],
+              "query": [
+                {
+                  "key": "cid",
+                  "value": "",
+                  "description": "Filter by CID(s), comma-separated",
+                  "disabled": true
+                },
+                {
+                  "key": "name",
+                  "value": "",
+                  "description": "Filter by name",
+                  "disabled": true
+                },
+                {
+                  "key": "match",
+                  "value": "exact",
+                  "description": "Text matching strategy: exact, iexact, partial, ipartial",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "pinned",
+                  "description": "Filter by status: queued, pinning, pinned, failed",
+                  "disabled": true
+                },
+                {
+                  "key": "before",
+                  "value": "",
+                  "description": "Filter pins created before this date (RFC3339)",
+                  "disabled": true
+                },
+                {
+                  "key": "after",
+                  "value": "",
+                  "description": "Filter pins created after this date (RFC3339)",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "10",
+                  "description": "Maximum number of results (1-1000, default 10)"
+                },
+                {
+                  "key": "meta",
+                  "value": "",
+                  "description": "Filter by metadata (JSON object)",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "List all pin objects matching optional filters. Returns paginated results."
+          },
+          "response": []
+        },
+        {
+          "name": "Add Pin",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cid\": \"QmExample1234567890abcdefghijklmnopqrstuvwxyz\",\n  \"name\": \"my-file.txt\",\n  \"origins\": [],\n  \"meta\": {\n    \"app\": \"postman-test\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/pins",
+              "host": ["{{baseUrl}}"],
+              "path": ["pins"]
+            },
+            "description": "Add a new pin object. The CID will be pinned to IPFS Cluster.\n\n**Required fields:**\n- `cid`: Content Identifier to pin\n\n**Optional fields:**\n- `name`: Human-readable name\n- `origins`: Multiaddrs of origins for the content\n- `meta`: Additional metadata as key-value pairs"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Pin by Request ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pins/:requestid",
+              "host": ["{{baseUrl}}"],
+              "path": ["pins", ":requestid"],
+              "variable": [
+                {
+                  "key": "requestid",
+                  "value": "your-request-id-here",
+                  "description": "The unique request ID returned when the pin was created"
+                }
+              ]
+            },
+            "description": "Get the status and details of a specific pin by its request ID. This also refreshes the status from IPFS Cluster."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Pin (Unpin)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pins/:requestid",
+              "host": ["{{baseUrl}}"],
+              "path": ["pins", ":requestid"],
+              "variable": [
+                {
+                  "key": "requestid",
+                  "value": "your-request-id-here",
+                  "description": "The unique request ID of the pin to delete"
+                }
+              ]
+            },
+            "description": "Remove a pin object. This will unpin the content from IPFS Cluster."
+          },
+          "response": []
+        },
+        {
+          "name": "Replace Pin",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cid\": \"QmNewCid1234567890abcdefghijklmnopqrstuvwxyz\",\n  \"name\": \"updated-file.txt\",\n  \"meta\": {\n    \"version\": \"2\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/pins/:requestid",
+              "host": ["{{baseUrl}}"],
+              "path": ["pins", ":requestid"],
+              "variable": [
+                {
+                  "key": "requestid",
+                  "value": "your-request-id-here",
+                  "description": "The request ID of the pin to replace"
+                }
+              ]
+            },
+            "description": "Replace an existing pin with a new one. Useful for updating content while maintaining the same request ID."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin API",
+      "description": "System administration endpoints. Requires X-System-Key header.",
+      "item": [
+        {
+          "name": "Get System Stats",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-System-Key",
+                "value": "{{systemKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "stats"]
+            },
+            "description": "Get system-wide statistics including total users, pins, sessions, and pin status breakdown."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Pending Pins",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-System-Key",
+                "value": "{{systemKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/pins/pending?after=2024-01-01T00:00:00Z&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "pins", "pending"],
+              "query": [
+                {
+                  "key": "after",
+                  "value": "2024-01-01T00:00:00Z",
+                  "description": "Required: Start time filter (RFC3339)"
+                },
+                {
+                  "key": "before",
+                  "value": "",
+                  "description": "Optional: End time filter (RFC3339)",
+                  "disabled": true
+                },
+                {
+                  "key": "username",
+                  "value": "",
+                  "description": "Optional: Filter by username",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "pending",
+                  "description": "Optional: Filter by status (default: pending)",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "Optional: Max results (default: 200, max: 1000)"
+                }
+              ]
+            },
+            "description": "Get pins with pending/queued status for batch processing by external workers."
+          },
+          "response": []
+        },
+        {
+          "name": "Batch Update Pin Status",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-System-Key",
+                "value": "{{systemKey}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"updates\": [\n    {\n      \"cid\": \"QmExample1234567890abcdefghijklmnopqrstuvwxyz\",\n      \"status\": \"pinned\"\n    },\n    {\n      \"cid\": \"QmAnotherCid1234567890abcdefghijklmnopqrstuv\",\n      \"status\": \"failed\",\n      \"upload_status\": \"failed\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/pins/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "pins", "status"]
+            },
+            "description": "Batch update pin status for multiple CIDs.\n\n**Valid status values:** queued, pinning, pinned, failed\n**Valid upload_status values:** pending, uploaded, failed, manifest_uploaded"
+          },
+          "response": []
+        },
+        {
+          "name": "Batch Update Pin Size",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-System-Key",
+                "value": "{{systemKey}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"updates\": [\n    {\n      \"cid\": \"QmExample1234567890abcdefghijklmnopqrstuvwxyz\",\n      \"size\": 1048576\n    },\n    {\n      \"cid\": \"QmAnotherCid1234567890abcdefghijklmnopqrstuv\",\n      \"size\": 2097152\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/pins/size",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "pins", "size"]
+            },
+            "description": "Batch update pin sizes for multiple CIDs. Size is in bytes."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Total Storage",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-System-Key",
+                "value": "{{systemKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/storage",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "storage"]
+            },
+            "description": "Get total storage statistics across all users."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Storage by User",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-System-Key",
+                "value": "{{systemKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/storage/user/:username",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "storage", "user", ":username"],
+              "variable": [
+                {
+                  "key": "username",
+                  "value": "user@example.com",
+                  "description": "Username/email to get storage for"
+                }
+              ]
+            },
+            "description": "Get storage usage for a specific user, including breakdown by session."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Storage by Session",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-System-Key",
+                "value": "{{systemKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/storage/session/:token",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "storage", "session", ":token"],
+              "variable": [
+                {
+                  "key": "token",
+                  "value": "session-token-here",
+                  "description": "Session token (API key) to get storage for"
+                }
+              ]
+            },
+            "description": "Get storage usage for a specific session/API key."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "IPFS Upload Server",
+      "description": "File upload and IPFS gateway endpoints",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{uploadServerUrl}}/health",
+              "host": ["{{uploadServerUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Check if the upload server is running and connected to IPFS."
+          },
+          "response": []
+        },
+        {
+          "name": "Upload File",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "File to upload (max 800MB)"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{uploadServerUrl}}/upload",
+              "host": ["{{uploadServerUrl}}"],
+              "path": ["upload"]
+            },
+            "description": "Upload a file to IPFS. Returns the CID of the uploaded content.\n\n**Note:** The file is added to IPFS but not automatically pinned. Use the pinning service to pin the returned CID."
+          },
+          "response": []
+        },
+        {
+          "name": "Gateway - Get Content",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{uploadServerUrl}}/gateway/:cid",
+              "host": ["{{uploadServerUrl}}"],
+              "path": ["gateway", ":cid"],
+              "variable": [
+                {
+                  "key": "cid",
+                  "value": "QmExample1234567890abcdefghijklmnopqrstuvwxyz",
+                  "description": "CID of content to retrieve"
+                }
+              ]
+            },
+            "description": "Retrieve content from IPFS by CID. Public endpoint, no authentication required.\n\nAdd `?raw` query parameter to get the raw block data."
+          },
+          "response": []
+        },
+        {
+          "name": "Gateway - Get Raw Block",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{uploadServerUrl}}/gateway/:cid?raw",
+              "host": ["{{uploadServerUrl}}"],
+              "path": ["gateway", ":cid"],
+              "query": [
+                {
+                  "key": "raw",
+                  "value": null,
+                  "description": "Return raw block data"
+                }
+              ],
+              "variable": [
+                {
+                  "key": "cid",
+                  "value": "QmExample1234567890abcdefghijklmnopqrstuvwxyz",
+                  "description": "CID of block to retrieve"
+                }
+              ]
+            },
+            "description": "Retrieve raw IPLD block data from IPFS by CID."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Examples & Workflows",
+      "description": "Common workflows and usage examples",
+      "item": [
+        {
+          "name": "1. Pin a CID",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cid\": \"bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi\",\n  \"name\": \"hello-world\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/pins",
+              "host": ["{{baseUrl}}"],
+              "path": ["pins"]
+            },
+            "description": "Example: Pin the IPFS hello-world example CID"
+          },
+          "response": []
+        },
+        {
+          "name": "2. Check Pin Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pins?status=pinned&limit=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["pins"],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "pinned"
+                },
+                {
+                  "key": "limit",
+                  "value": "5"
+                }
+              ]
+            },
+            "description": "Example: List all successfully pinned content"
+          },
+          "response": []
+        },
+        {
+          "name": "3. List Failed Pins",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pins?status=failed",
+              "host": ["{{baseUrl}}"],
+              "path": ["pins"],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "failed"
+                }
+              ]
+            },
+            "description": "Example: List pins that failed to complete"
+          },
+          "response": []
+        },
+        {
+          "name": "4. Search Pins by Name",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pins?name=photo&match=partial",
+              "host": ["{{baseUrl}}"],
+              "path": ["pins"],
+              "query": [
+                {
+                  "key": "name",
+                  "value": "photo"
+                },
+                {
+                  "key": "match",
+                  "value": "partial"
+                }
+              ]
+            },
+            "description": "Example: Search for pins with 'photo' in the name"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

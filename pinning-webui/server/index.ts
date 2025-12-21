@@ -11,6 +11,7 @@ import http from 'http';
 import Database from 'better-sqlite3';
 import { OAuth2Client } from 'google-auth-library';
 import { v4 as uuidv4 } from 'uuid';
+import jwt from 'jsonwebtoken';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,6 +22,7 @@ const config = {
   databasePath: process.env.DATABASE_PATH || '../data/pinning.db',
   googleClientId: process.env.GOOGLE_CLIENT_ID || '',
   sessionSecret: process.env.SESSION_SECRET || 'change-this-in-production-' + uuidv4(),
+  jwtSecret: process.env.JWT_SECRET || process.env.SESSION_SECRET || 'change-this-jwt-secret-in-production',
   nodeEnv: process.env.NODE_ENV || 'development',
   pinningServiceUrl: process.env.PINNING_SERVICE_URL || 'http://localhost:8080',
 };
@@ -87,6 +89,18 @@ declare module 'express-session' {
   }
 }
 
+// Generate JWT API key
+function generateJwtApiKey(email: string): string {
+  const payload = {
+    sub: email,
+    iat: Math.floor(Date.now() / 1000),
+    scope: 'storage:read storage:write',
+    jti: uuidv4(), // Unique token ID to ensure each key is unique
+  };
+  
+  return jwt.sign(payload, config.jwtSecret, { algorithm: 'HS256' });
+}
+
 // Database operations
 const dbOps = {
   getOrCreateUser(email: string, name: string, picture: string) {
@@ -102,7 +116,7 @@ const dbOps = {
       .run(email, name, picture);
     
     // Create first API key automatically
-    const keyId = uuidv4();
+    const keyId = generateJwtApiKey(email);
     db.prepare('INSERT INTO api_keys (key_id, user_email) VALUES (?, ?)').run(keyId, email);
     
     // Also create entry in main users/sessions tables for pinning service compatibility
@@ -131,7 +145,7 @@ const dbOps = {
   },
   
   createApiKey(email: string): string {
-    const keyId = uuidv4();
+    const keyId = generateJwtApiKey(email);
     db.prepare('INSERT INTO api_keys (key_id, user_email) VALUES (?, ?)').run(keyId, email);
     
     // Also create corresponding session for pinning service

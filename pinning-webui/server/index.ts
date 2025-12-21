@@ -27,6 +27,13 @@ const config = {
   pinningServiceUrl: process.env.PINNING_SERVICE_URL || 'http://localhost:8080',
 };
 
+// Debug .env loading
+console.log('[webui] Configuration loaded:');
+console.log(`[webui]   JWT_SECRET: ${config.jwtSecret.substring(0, 10)}...`);
+console.log(`[webui]   SESSION_SECRET: ${config.sessionSecret.substring(0, 10)}...`);
+console.log(`[webui]   DATABASE_PATH: ${config.databasePath}`);
+console.log(`[webui]   NODE_ENV: ${config.nodeEnv}`);
+
 // Initialize Google OAuth client
 const googleClient = new OAuth2Client(config.googleClientId);
 

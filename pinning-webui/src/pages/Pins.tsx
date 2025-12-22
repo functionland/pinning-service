@@ -133,9 +133,8 @@ export default function Pins() {
 
     try {
       console.log('[Decryption] Deriving key for user:', user.id, user.email);
-      // Derive key from Google user ID and email (format: "google:{userId}")
-      const combinedId = `google:${user.id}`;
-      const key = await deriveEncryptionKey(combinedId, user.email);
+      // Derive key from Google user ID and email (deriveEncryptionKey adds "google:" prefix internally)
+      const key = await deriveEncryptionKey(user.id, user.email);
       console.log('[Decryption] Key derived successfully');
       
       const keyBytes = await exportKey(key);

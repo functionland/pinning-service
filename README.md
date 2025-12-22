@@ -258,3 +258,18 @@ go build -o ./ipfs-pinning main.go
 ```
 
 Note: Firebase backend requires `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
+
+
+## UPDATE webui
+
+```
+# cd ~/pinning-service/pinning-webui/
+~/pinning-service/pinning-webui# git pull
+~/pinning-service/pinning-webui# VITE_GOOGLE_CLIENT_ID={YOUR GOGLE VITE} npm run build
+~/pinning-service/pinning-webui# cp -r dist/* /home/root/pinning-service/pinning-webui/dist/
+/pinning-service/pinning-webui# cp package.json package-lock.json /home/root/pinning-service/pinning-webui/
+~/pinning-service/pinning-webui# cd /home/root/pinning-service/pinning-webui
+/home/root/pinning-service/pinning-webui# npm install --production --ignore-scripts=false
+/home/root/pinning-service/pinning-webui# npm rebuild
+# systemctl restart fula-pinning-webui
+```

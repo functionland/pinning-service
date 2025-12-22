@@ -188,11 +188,20 @@ export async function retrieveEncryptionKey(
         );
         console.log('[SecureStorage] Decrypted successfully, length:', decrypted.byteLength);
         
-        // Update last accessed time
-        storedKey.lastAccessedAt = Date.now();
-        store.put(storedKey);
+        // Return the decrypted key first (transaction may have closed due to async ops)
+        const result = new Uint8Array(decrypted);
         
-        resolve(new Uint8Array(decrypted));
+        // Update last accessed time in a new transaction (non-blocking)
+        try {
+          const updateTx = database.transaction([STORE_NAME], 'readwrite');
+          const updateStore = updateTx.objectStore(STORE_NAME);
+          storedKey.lastAccessedAt = Date.now();
+          updateStore.put(storedKey);
+        } catch (updateErr) {
+          console.warn('[SecureStorage] Failed to update lastAccessedAt:', updateErr);
+        }
+        
+        resolve(result);
       } catch (error) {
         // Decryption failed - wrong session or corrupted
         console.error('[SecureStorage] Decryption failed:', error);

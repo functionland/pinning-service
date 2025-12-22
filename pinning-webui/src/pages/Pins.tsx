@@ -74,8 +74,11 @@ export default function Pins() {
 
   // Setup encryption key from user credentials
   const setupEncryptionKey = async () => {
+    console.log('[Decryption] setupEncryptionKey called, user:', user);
+    
     if (!user?.id || !user?.email) {
-      setDecryptionError('User not logged in');
+      console.error('[Decryption] User missing id or email:', { id: user?.id, email: user?.email });
+      setDecryptionError('User not logged in or session expired. Please log out and log in again.');
       return;
     }
 
@@ -83,16 +86,23 @@ export default function Pins() {
     setDecryptionError(null);
 
     try {
-      // Derive key from Google user ID and email
-      const key = await deriveEncryptionKey(user.id, user.email);
+      console.log('[Decryption] Deriving key for user:', user.id, user.email);
+      // Derive key from Google user ID and email (format: "google:{userId}")
+      const combinedId = `google:${user.id}`;
+      const key = await deriveEncryptionKey(combinedId, user.email);
+      console.log('[Decryption] Key derived successfully');
+      
       const keyBytes = await exportKey(key);
+      console.log('[Decryption] Key exported, storing...');
       
       // Store key securely
       await storeEncryptionKey(user.email, keyBytes, user.email);
+      console.log('[Decryption] Key stored successfully');
       
       setEncryptionKeyReady(true);
       setShowSetupModal(false);
     } catch (err) {
+      console.error('[Decryption] Setup failed:', err);
       setDecryptionError(err instanceof Error ? err.message : 'Failed to setup encryption key');
     } finally {
       setSettingUpKey(false);
@@ -101,6 +111,8 @@ export default function Pins() {
 
   // Download and decrypt a pin
   const downloadDecrypted = async (pin: Pin) => {
+    console.log('[Decryption] downloadDecrypted called for pin:', pin.cid);
+    
     if (!user?.email) {
       setDecryptionError('User not logged in');
       return;
@@ -108,6 +120,7 @@ export default function Pins() {
 
     // Check if key is ready, if not show setup modal
     if (!encryptionKeyReady) {
+      console.log('[Decryption] Key not ready, showing setup modal');
       setShowSetupModal(true);
       return;
     }
@@ -117,14 +130,17 @@ export default function Pins() {
 
     try {
       // Retrieve the stored key
+      console.log('[Decryption] Retrieving stored key...');
       const keyBytes = await retrieveEncryptionKey(user.email, user.email);
       if (!keyBytes) {
+        console.log('[Decryption] No key found, showing setup modal');
         setEncryptionKeyReady(false);
         setShowSetupModal(true);
         return;
       }
 
       const key = await importKey(keyBytes);
+      console.log('[Decryption] Key imported, fetching and decrypting...');
 
       // Fetch and decrypt from IPFS gateway
       const { data, mimeType } = await fetchAndDecrypt(
@@ -132,6 +148,7 @@ export default function Pins() {
         key,
         'https://ipfs.cloud.fx.land/gateway'
       );
+      console.log('[Decryption] Decrypted successfully, mimeType:', mimeType);
 
       // Generate filename
       const ext = getExtensionFromMimeType(mimeType);
@@ -140,8 +157,10 @@ export default function Pins() {
         : `decrypted-${pin.cid.slice(0, 8)}${ext}`;
 
       // Trigger download
+      console.log('[Decryption] Downloading as:', filename);
       downloadBlob(data, filename, mimeType);
     } catch (err) {
+      console.error('[Decryption] Download failed:', err);
       const message = err instanceof Error ? err.message : 'Decryption failed';
       if (message.includes('Decryption failed')) {
         setDecryptionError('This file may not be encrypted or was encrypted with a different key');

@@ -91,6 +91,13 @@ export const es: Translations = {
     selected: 'seleccionados',
     unpin: 'Desfijar',
     unpinConfirm: '¿Estás seguro de que quieres desfijar {count} elemento(s)? Esto los eliminará del IPFS Cluster.',
+    downloadDecrypted: 'Descargar descifrado',
+    setupDecryption: 'Configurar descifrado',
+    decryptionInfo: 'Acerca del descifrado',
+    decryptionInfoText: 'Tu clave de cifrado se derivará de las credenciales de tu cuenta de Google. Esta clave se almacena de forma segura en tu navegador y nunca se envía a nuestros servidores.',
+    decryptionWarning: 'Solo los archivos subidos a través de la aplicación FxFiles con cifrado habilitado pueden ser descifrados. Los archivos no cifrados no podrán descifrarse.',
+    settingUp: 'Configurando...',
+    enableDecryption: 'Habilitar descifrado',
   },
   profile: {
     title: 'Perfil',

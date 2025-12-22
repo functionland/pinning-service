@@ -1,6 +1,8 @@
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { clearAllKeys } from '../services/secureStorage';
 
 interface User {
+  id: string; // Google user ID for encryption key derivation
   email: string;
   name: string;
   picture: string;
@@ -59,6 +61,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: 'POST',
       credentials: 'include',
     });
+    // Clear encryption keys from secure storage
+    try {
+      await clearAllKeys();
+    } catch (e) {
+      console.error('Failed to clear secure storage:', e);
+    }
     setUser(null);
   };
 

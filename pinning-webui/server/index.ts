@@ -84,6 +84,7 @@ function initializeDatabase(): Database.Database {
 
 // Session user type
 interface SessionUser {
+  id: string; // Google user ID (sub claim)
   email: string;
   name: string;
   picture: string;
@@ -331,10 +332,15 @@ app.post('/auth/google', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid token' });
     }
     
-    const { email, name, picture } = payload;
+    const { sub, email, name, picture } = payload;
+    if (!sub) {
+      return res.status(400).json({ error: 'Invalid token: missing user ID' });
+    }
+    
     const user = dbOps.getOrCreateUser(email, name || '', picture || '');
     
     req.session.user = {
+      id: sub, // Google user ID for encryption key derivation
       email: email,
       name: name || '',
       picture: picture || '',

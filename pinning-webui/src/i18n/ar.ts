@@ -91,6 +91,13 @@ export const ar: Translations = {
     selected: 'محدد',
     unpin: 'إلغاء التثبيت',
     unpinConfirm: 'هل أنت متأكد أنك تريد إلغاء تثبيت {count} عنصر(ات)؟ سيؤدي هذا إلى إزالتها من IPFS Cluster.',
+    downloadDecrypted: 'تحميل مفكك التشفير',
+    setupDecryption: 'إعداد فك التشفير',
+    decryptionInfo: 'حول فك التشفير',
+    decryptionInfoText: 'سيتم اشتقاق مفتاح التشفير الخاص بك من بيانات اعتماد حساب Google الخاص بك. يتم تخزين هذا المفتاح بشكل آمن في متصفحك ولا يتم إرساله أبدًا إلى خوادمنا.',
+    decryptionWarning: 'يمكن فك تشفير الملفات التي تم تحميلها عبر تطبيق FxFiles مع تمكين التشفير فقط. ستفشل الملفات غير المشفرة في فك التشفير.',
+    settingUp: 'جارٍ الإعداد...',
+    enableDecryption: 'تمكين فك التشفير',
   },
   profile: {
     title: 'الملف الشخصي',

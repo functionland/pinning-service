@@ -91,6 +91,13 @@ export const fr: Translations = {
     selected: 'sélectionné(s)',
     unpin: 'Désépingler',
     unpinConfirm: 'Êtes-vous sûr de vouloir désépingler {count} élément(s) ? Cela les supprimera du IPFS Cluster.',
+    downloadDecrypted: 'Télécharger déchiffré',
+    setupDecryption: 'Configurer le déchiffrement',
+    decryptionInfo: 'À propos du déchiffrement',
+    decryptionInfoText: 'Votre clé de chiffrement sera dérivée des identifiants de votre compte Google. Cette clé est stockée en toute sécurité dans votre navigateur et n\'est jamais envoyée à nos serveurs.',
+    decryptionWarning: 'Seuls les fichiers téléchargés via l\'application FxFiles avec le chiffrement activé peuvent être déchiffrés. Les fichiers non chiffrés ne pourront pas être déchiffrés.',
+    settingUp: 'Configuration...',
+    enableDecryption: 'Activer le déchiffrement',
   },
   profile: {
     title: 'Profil',

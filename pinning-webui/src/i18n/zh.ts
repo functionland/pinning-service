@@ -91,6 +91,13 @@ export const zh: Translations = {
     selected: '已选择',
     unpin: '取消固定',
     unpinConfirm: '您确定要取消固定 {count} 个项目吗？这将从 IPFS Cluster 中删除它们。',
+    downloadDecrypted: '下载解密文件',
+    setupDecryption: '设置解密',
+    decryptionInfo: '关于解密',
+    decryptionInfoText: '您的加密密钥将从您的 Google 账户凭据派生。此密钥安全存储在浏览器中，永远不会发送到我们的服务器。',
+    decryptionWarning: '只有通过 FxFiles 应用启用加密上传的文件才能解密。未加密的文件将无法解密。',
+    settingUp: '设置中...',
+    enableDecryption: '启用解密',
   },
   profile: {
     title: '个人资料',

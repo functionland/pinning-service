@@ -91,6 +91,13 @@ export const en: Translations = {
     selected: 'selected',
     unpin: 'Unpin',
     unpinConfirm: 'Are you sure you want to unpin {count} item(s)? This will remove them from IPFS Cluster.',
+    downloadDecrypted: 'Download Decrypted',
+    setupDecryption: 'Setup Decryption',
+    decryptionInfo: 'About Decryption',
+    decryptionInfoText: 'Your encryption key will be derived from your Google account credentials. This key is stored securely in your browser and never sent to our servers.',
+    decryptionWarning: 'Only files uploaded via the FxFiles app with encryption enabled can be decrypted. Unencrypted files will fail to decrypt.',
+    settingUp: 'Setting up...',
+    enableDecryption: 'Enable Decryption',
   },
   profile: {
     title: 'Profile',

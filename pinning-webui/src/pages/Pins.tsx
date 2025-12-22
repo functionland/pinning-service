@@ -1,5 +1,19 @@
 import { useState, useEffect } from 'react';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
+import {
+  deriveEncryptionKey,
+  exportKey,
+  importKey,
+  fetchAndDecrypt,
+  downloadBlob,
+  getExtensionFromMimeType,
+} from '../services/encryptionService';
+import {
+  storeEncryptionKey,
+  retrieveEncryptionKey,
+  hasValidKey,
+} from '../services/secureStorage';
 
 interface Pin {
   request_id: string;
@@ -34,10 +48,114 @@ export default function Pins() {
   const [refreshingPins, setRefreshingPins] = useState<Set<string>>(new Set());
   const [selectedPins, setSelectedPins] = useState<Set<string>>(new Set());
   const [unpinning, setUnpinning] = useState(false);
+  
+  // Decryption state
+  const { user } = useAuth();
+  const [encryptionKeyReady, setEncryptionKeyReady] = useState(false);
+  const [decryptingPins, setDecryptingPins] = useState<Set<string>>(new Set());
+  const [decryptionError, setDecryptionError] = useState<string | null>(null);
+  const [showSetupModal, setShowSetupModal] = useState(false);
+  const [settingUpKey, setSettingUpKey] = useState(false);
 
   useEffect(() => {
     fetchPins();
   }, [page, searchQuery]);
+
+  // Check if encryption key is available on mount
+  useEffect(() => {
+    const checkEncryptionKey = async () => {
+      if (user?.email) {
+        const hasKey = await hasValidKey(user.email);
+        setEncryptionKeyReady(hasKey);
+      }
+    };
+    checkEncryptionKey();
+  }, [user]);
+
+  // Setup encryption key from user credentials
+  const setupEncryptionKey = async () => {
+    if (!user?.id || !user?.email) {
+      setDecryptionError('User not logged in');
+      return;
+    }
+
+    setSettingUpKey(true);
+    setDecryptionError(null);
+
+    try {
+      // Derive key from Google user ID and email
+      const key = await deriveEncryptionKey(user.id, user.email);
+      const keyBytes = await exportKey(key);
+      
+      // Store key securely
+      await storeEncryptionKey(user.email, keyBytes, user.email);
+      
+      setEncryptionKeyReady(true);
+      setShowSetupModal(false);
+    } catch (err) {
+      setDecryptionError(err instanceof Error ? err.message : 'Failed to setup encryption key');
+    } finally {
+      setSettingUpKey(false);
+    }
+  };
+
+  // Download and decrypt a pin
+  const downloadDecrypted = async (pin: Pin) => {
+    if (!user?.email) {
+      setDecryptionError('User not logged in');
+      return;
+    }
+
+    // Check if key is ready, if not show setup modal
+    if (!encryptionKeyReady) {
+      setShowSetupModal(true);
+      return;
+    }
+
+    setDecryptingPins(prev => new Set(prev).add(pin.request_id));
+    setDecryptionError(null);
+
+    try {
+      // Retrieve the stored key
+      const keyBytes = await retrieveEncryptionKey(user.email, user.email);
+      if (!keyBytes) {
+        setEncryptionKeyReady(false);
+        setShowSetupModal(true);
+        return;
+      }
+
+      const key = await importKey(keyBytes);
+
+      // Fetch and decrypt from IPFS gateway
+      const { data, mimeType } = await fetchAndDecrypt(
+        pin.cid,
+        key,
+        'https://ipfs.cloud.fx.land/gateway'
+      );
+
+      // Generate filename
+      const ext = getExtensionFromMimeType(mimeType);
+      const filename = pin.name 
+        ? (pin.name.includes('.') ? pin.name : `${pin.name}${ext}`)
+        : `decrypted-${pin.cid.slice(0, 8)}${ext}`;
+
+      // Trigger download
+      downloadBlob(data, filename, mimeType);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Decryption failed';
+      if (message.includes('Decryption failed')) {
+        setDecryptionError('This file may not be encrypted or was encrypted with a different key');
+      } else {
+        setDecryptionError(message);
+      }
+    } finally {
+      setDecryptingPins(prev => {
+        const next = new Set(prev);
+        next.delete(pin.request_id);
+        return next;
+      });
+    }
+  };
 
   const fetchPins = async () => {
     setLoading(true);
@@ -272,6 +390,90 @@ export default function Pins() {
         </div>
       )}
 
+      {/* Decryption error message */}
+      {decryptionError && (
+        <div className="bg-orange-50 border border-orange-200 rounded-xl p-4 text-orange-700 flex justify-between items-center">
+          <div className="flex items-center gap-2">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <span>{decryptionError}</span>
+          </div>
+          <button onClick={() => setDecryptionError(null)} className="text-orange-500 hover:text-orange-700">✕</button>
+        </div>
+      )}
+
+      {/* Encryption key setup modal */}
+      {showSetupModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md">
+            <div className="p-6 border-b border-gray-100">
+              <h2 className="text-xl font-semibold text-gray-900">
+                {t.pins.setupDecryption || 'Setup Decryption'}
+              </h2>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="flex items-start gap-3 p-4 bg-blue-50 rounded-lg">
+                <svg className="w-6 h-6 text-blue-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div className="text-sm text-blue-800">
+                  <p className="font-medium mb-1">{t.pins.decryptionInfo || 'About Decryption'}</p>
+                  <p>{t.pins.decryptionInfoText || 'Your encryption key will be derived from your Google account credentials. This key is stored securely in your browser and never sent to our servers.'}</p>
+                </div>
+              </div>
+              
+              <div className="flex items-start gap-3 p-4 bg-amber-50 rounded-lg">
+                <svg className="w-6 h-6 text-amber-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <div className="text-sm text-amber-800">
+                  <p>{t.pins.decryptionWarning || 'Only files uploaded via the FxFiles app with encryption enabled can be decrypted. Unencrypted files will fail to decrypt.'}</p>
+                </div>
+              </div>
+
+              {decryptionError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                  {decryptionError}
+                </div>
+              )}
+
+              <div className="flex justify-end space-x-3 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowSetupModal(false)}
+                  className="btn-secondary"
+                >
+                  {t.pins.cancel || 'Cancel'}
+                </button>
+                <button
+                  type="button"
+                  onClick={setupEncryptionKey}
+                  disabled={settingUpKey}
+                  className="btn-primary flex items-center gap-2"
+                >
+                  {settingUpKey ? (
+                    <>
+                      <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      {t.pins.settingUp || 'Setting up...'}
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                      </svg>
+                      {t.pins.enableDecryption || 'Enable Decryption'}
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Expand modal */}
       {expandedValue && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setExpandedValue(null)}>
@@ -456,21 +658,41 @@ export default function Pins() {
                         </div>
                       </td>
                       <td className="px-4 py-4">
-                        <button
-                          onClick={() => refreshPin(pin.request_id)}
-                          disabled={refreshingPins.has(pin.request_id)}
-                          className="p-2 text-gray-500 hover:text-primary-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
-                          title={t.pins.refresh || 'Refresh status'}
-                        >
-                          <svg 
-                            className={`w-4 h-4 ${refreshingPins.has(pin.request_id) ? 'animate-spin' : ''}`} 
-                            fill="none" 
-                            stroke="currentColor" 
-                            viewBox="0 0 24 24"
+                        <div className="flex items-center gap-1">
+                          {/* Download Decrypted button */}
+                          <button
+                            onClick={() => downloadDecrypted(pin)}
+                            disabled={decryptingPins.has(pin.request_id)}
+                            className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors disabled:opacity-50"
+                            title={t.pins.downloadDecrypted || 'Download Decrypted'}
                           >
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                          </svg>
-                        </button>
+                            {decryptingPins.has(pin.request_id) ? (
+                              <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                              </svg>
+                            ) : (
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                              </svg>
+                            )}
+                          </button>
+                          {/* Refresh button */}
+                          <button
+                            onClick={() => refreshPin(pin.request_id)}
+                            disabled={refreshingPins.has(pin.request_id)}
+                            className="p-2 text-gray-500 hover:text-primary-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                            title={t.pins.refresh || 'Refresh status'}
+                          >
+                            <svg 
+                              className={`w-4 h-4 ${refreshingPins.has(pin.request_id) ? 'animate-spin' : ''}`} 
+                              fill="none" 
+                              stroke="currentColor" 
+                              viewBox="0 0 24 24"
+                            >
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

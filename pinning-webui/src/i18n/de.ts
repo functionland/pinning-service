@@ -91,6 +91,13 @@ export const de: Translations = {
     selected: 'ausgewählt',
     unpin: 'Lösen',
     unpinConfirm: 'Sind Sie sicher, dass Sie {count} Element(e) lösen möchten? Dies entfernt sie aus dem IPFS Cluster.',
+    downloadDecrypted: 'Entschlüsselt herunterladen',
+    setupDecryption: 'Entschlüsselung einrichten',
+    decryptionInfo: 'Über Entschlüsselung',
+    decryptionInfoText: 'Ihr Verschlüsselungsschlüssel wird aus Ihren Google-Kontodaten abgeleitet. Dieser Schlüssel wird sicher in Ihrem Browser gespeichert und niemals an unsere Server gesendet.',
+    decryptionWarning: 'Nur Dateien, die über die FxFiles-App mit aktivierter Verschlüsselung hochgeladen wurden, können entschlüsselt werden. Unverschlüsselte Dateien können nicht entschlüsselt werden.',
+    settingUp: 'Einrichten...',
+    enableDecryption: 'Entschlüsselung aktivieren',
   },
   profile: {
     title: 'Profil',

@@ -109,6 +109,13 @@ export interface Translations {
     selected: string;
     unpin: string;
     unpinConfirm: string;
+    downloadDecrypted: string;
+    setupDecryption: string;
+    decryptionInfo: string;
+    decryptionInfoText: string;
+    decryptionWarning: string;
+    settingUp: string;
+    enableDecryption: string;
   };
   profile: {
     title: string;

@@ -73,12 +73,26 @@ export default function Pins() {
     checkEncryptionKey();
   }, [user]);
 
+  // Timeout for download operations (5 minutes)
+  const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+
   // Download and decrypt a pin with provided key bytes (used after setup)
   const downloadDecryptedWithKey = async (pin: Pin, keyBytes: Uint8Array) => {
     console.log('[Decryption] downloadDecryptedWithKey called for pin:', pin.cid);
     
     setDecryptingPins(prev => new Set(prev).add(pin.request_id));
     setDecryptionError(null);
+
+    // Set timeout to auto-clear loading state in case of stuck operation
+    const timeoutId = setTimeout(() => {
+      console.warn('[Decryption] Download timeout reached, clearing loading state');
+      setDecryptingPins(prev => {
+        const next = new Set(prev);
+        next.delete(pin.request_id);
+        return next;
+      });
+      setDecryptionError('Download timed out. Please try again.');
+    }, DOWNLOAD_TIMEOUT_MS);
 
     try {
       const key = await importKey(keyBytes);
@@ -110,6 +124,7 @@ export default function Pins() {
         setDecryptionError(message);
       }
     } finally {
+      clearTimeout(timeoutId);
       setDecryptingPins(prev => {
         const next = new Set(prev);
         next.delete(pin.request_id);
@@ -183,13 +198,30 @@ export default function Pins() {
     setDecryptingPins(prev => new Set(prev).add(pin.request_id));
     setDecryptionError(null);
 
+    // Set timeout to auto-clear loading state in case of stuck operation
+    const timeoutId = setTimeout(() => {
+      console.warn('[Decryption] Download timeout reached, clearing loading state');
+      setDecryptingPins(prev => {
+        const next = new Set(prev);
+        next.delete(pin.request_id);
+        return next;
+      });
+      setDecryptionError('Download timed out. Please try again.');
+    }, DOWNLOAD_TIMEOUT_MS);
+
     try {
       // Retrieve the stored key
       console.log('[Decryption] Retrieving stored key...');
       const keyBytes = await retrieveEncryptionKey(user.email, user.email);
       if (!keyBytes) {
         console.log('[Decryption] No key found, showing setup modal');
+        clearTimeout(timeoutId);
         setEncryptionKeyReady(false);
+        setDecryptingPins(prev => {
+          const next = new Set(prev);
+          next.delete(pin.request_id);
+          return next;
+        });
         setShowSetupModal(true);
         return;
       }
@@ -223,6 +255,7 @@ export default function Pins() {
         setDecryptionError(message);
       }
     } finally {
+      clearTimeout(timeoutId);
       setDecryptingPins(prev => {
         const next = new Set(prev);
         next.delete(pin.request_id);

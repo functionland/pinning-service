@@ -56,6 +56,7 @@ export default function Pins() {
   const [decryptionError, setDecryptionError] = useState<string | null>(null);
   const [showSetupModal, setShowSetupModal] = useState(false);
   const [settingUpKey, setSettingUpKey] = useState(false);
+  const [pendingDecryptPin, setPendingDecryptPin] = useState<Pin | null>(null);
 
   useEffect(() => {
     fetchPins();
@@ -71,6 +72,51 @@ export default function Pins() {
     };
     checkEncryptionKey();
   }, [user]);
+
+  // Download and decrypt a pin with provided key bytes (used after setup)
+  const downloadDecryptedWithKey = async (pin: Pin, keyBytes: Uint8Array) => {
+    console.log('[Decryption] downloadDecryptedWithKey called for pin:', pin.cid);
+    
+    setDecryptingPins(prev => new Set(prev).add(pin.request_id));
+    setDecryptionError(null);
+
+    try {
+      const key = await importKey(keyBytes);
+      console.log('[Decryption] Key imported, fetching and decrypting...');
+
+      // Fetch and decrypt from IPFS gateway
+      const { data, mimeType } = await fetchAndDecrypt(
+        pin.cid,
+        key,
+        'https://ipfs.cloud.fx.land/gateway'
+      );
+      console.log('[Decryption] Decrypted successfully, mimeType:', mimeType);
+
+      // Generate filename
+      const ext = getExtensionFromMimeType(mimeType);
+      const filename = pin.name 
+        ? (pin.name.includes('.') ? pin.name : `${pin.name}${ext}`)
+        : `decrypted-${pin.cid.slice(0, 8)}${ext}`;
+
+      // Trigger download
+      console.log('[Decryption] Downloading as:', filename);
+      downloadBlob(data, filename, mimeType);
+    } catch (err) {
+      console.error('[Decryption] Download failed:', err);
+      const message = err instanceof Error ? err.message : 'Decryption failed';
+      if (message.includes('Decryption failed')) {
+        setDecryptionError('This file may not be encrypted or was encrypted with a different key');
+      } else {
+        setDecryptionError(message);
+      }
+    } finally {
+      setDecryptingPins(prev => {
+        const next = new Set(prev);
+        next.delete(pin.request_id);
+        return next;
+      });
+    }
+  };
 
   // Setup encryption key from user credentials
   const setupEncryptionKey = async () => {
@@ -101,6 +147,15 @@ export default function Pins() {
       
       setEncryptionKeyReady(true);
       setShowSetupModal(false);
+      
+      // If there's a pending pin to decrypt, trigger it now
+      if (pendingDecryptPin) {
+        console.log('[Decryption] Auto-triggering download for pending pin:', pendingDecryptPin.cid);
+        const pinToDownload = pendingDecryptPin;
+        setPendingDecryptPin(null);
+        // Use setTimeout to allow state to update first
+        setTimeout(() => downloadDecryptedWithKey(pinToDownload, keyBytes), 100);
+      }
     } catch (err) {
       console.error('[Decryption] Setup failed:', err);
       setDecryptionError(err instanceof Error ? err.message : 'Failed to setup encryption key');
@@ -121,6 +176,7 @@ export default function Pins() {
     // Check if key is ready, if not show setup modal
     if (!encryptionKeyReady) {
       console.log('[Decryption] Key not ready, showing setup modal');
+      setPendingDecryptPin(pin); // Store the pin to download after setup
       setShowSetupModal(true);
       return;
     }

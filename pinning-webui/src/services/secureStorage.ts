@@ -95,6 +95,7 @@ export async function storeEncryptionKey(
   encryptionKey: Uint8Array,
   userEmail: string
 ): Promise<void> {
+  console.log('[SecureStorage] storeEncryptionKey called, keyId:', keyId, 'keyLength:', encryptionKey.length);
   const database = await openDB();
   const sessionKey = await deriveSessionKey(userEmail);
   
@@ -107,6 +108,7 @@ export async function storeEncryptionKey(
     sessionKey,
     encryptionKey.buffer as ArrayBuffer
   );
+  console.log('[SecureStorage] Encrypted key, length:', encrypted.byteLength);
   
   const storedKey: StoredKey = {
     id: keyId,
@@ -121,8 +123,14 @@ export async function storeEncryptionKey(
     const store = transaction.objectStore(STORE_NAME);
     const request = store.put(storedKey);
     
-    request.onerror = () => reject(new Error('Failed to store key'));
-    request.onsuccess = () => resolve();
+    request.onerror = () => {
+      console.error('[SecureStorage] Failed to store key');
+      reject(new Error('Failed to store key'));
+    };
+    request.onsuccess = () => {
+      console.log('[SecureStorage] Key stored successfully in IndexedDB');
+      resolve();
+    };
   });
 }
 
@@ -148,6 +156,7 @@ export async function retrieveEncryptionKey(
     
     request.onsuccess = async () => {
       const storedKey = request.result as StoredKey | undefined;
+      console.log('[SecureStorage] Retrieved stored key:', storedKey ? 'found' : 'not found');
       
       if (!storedKey) {
         resolve(null);
@@ -155,23 +164,29 @@ export async function retrieveEncryptionKey(
       }
       
       // Check expiry
-      if (Date.now() - storedKey.lastAccessedAt > KEY_EXPIRY_MS) {
+      const age = Date.now() - storedKey.lastAccessedAt;
+      console.log('[SecureStorage] Key age:', age, 'ms, expiry:', KEY_EXPIRY_MS, 'ms');
+      if (age > KEY_EXPIRY_MS) {
         // Key expired, delete it
+        console.log('[SecureStorage] Key expired, deleting');
         store.delete(keyId);
         resolve(null);
         return;
       }
       
       try {
+        console.log('[SecureStorage] Deriving session key for decryption...');
         const sessionKey = await deriveSessionKey(userEmail);
         const iv = base64ToUint8Array(storedKey.iv);
         const encryptedKey = base64ToUint8Array(storedKey.encryptedKey);
+        console.log('[SecureStorage] Decrypting stored key, iv length:', iv.length, 'encrypted length:', encryptedKey.length);
         
         const decrypted = await crypto.subtle.decrypt(
           { name: 'AES-GCM', iv: iv.buffer as ArrayBuffer },
           sessionKey,
           encryptedKey.buffer as ArrayBuffer
         );
+        console.log('[SecureStorage] Decrypted successfully, length:', decrypted.byteLength);
         
         // Update last accessed time
         storedKey.lastAccessedAt = Date.now();
@@ -180,6 +195,7 @@ export async function retrieveEncryptionKey(
         resolve(new Uint8Array(decrypted));
       } catch (error) {
         // Decryption failed - wrong session or corrupted
+        console.error('[SecureStorage] Decryption failed:', error);
         resolve(null);
       }
     };

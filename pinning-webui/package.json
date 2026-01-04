@@ -11,13 +11,16 @@
     "build:client": "vite build",
     "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --outfile=dist/server.mjs --external:better-sqlite3 --external:fs --external:path --external:crypto --external:os --external:http --external:https --external:stream --external:url --external:util --external:events --external:buffer --external:querystring --external:zlib --external:net --external:tls --external:child_process --packages=external",
     "start": "node dist/server.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "better-sqlite3": "^12.5.0",
-    "dotenv": "^16.5.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.2.1",
     "express-session": "^1.18.2",
@@ -27,27 +30,31 @@
     "uuid": "^13.0.0"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.18",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express-session": "^1.18.2",
+    "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^25.0.2",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
-    "@types/jsonwebtoken": "^9.0.7",
+    "@types/supertest": "^6.0.3",
     "@types/uuid": "^10.0.0",
-    "@tailwindcss/postcss": "^4.1.18",
     "@vitejs/plugin-react": "^5.1.2",
+    "@vitest/coverage-v8": "^4.0.16",
     "concurrently": "^9.2.1",
     "esbuild": "^0.27.1",
     "postcss": "^8.5.6",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-router-dom": "^7.10.1",
+    "supertest": "^7.1.4",
     "tailwindcss": "^4.1.18",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vite": "^7.3.0"
+    "vite": "^7.3.0",
+    "vitest": "^4.0.16"
   },
   "engines": {
     "node": ">=20.0.0"

@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useState, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import LanguageSelector from '../components/LanguageSelector';
@@ -81,10 +81,12 @@ declare global {
 export default function Login() {
   const { user, login } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { t } = useLanguage();
   const [totalSize, setTotalSize] = useState(0);
   const animatedSize = useAnimatedCounter(totalSize, 5000);
   const formattedSize = formatStorageSize(animatedSize);
+  const returnTo = searchParams.get('returnTo');
 
   // Fetch public stats on mount
   useEffect(() => {
@@ -103,6 +105,16 @@ export default function Login() {
     try {
       const result = await login(response.credential);
       console.log('[Login] Login successful, isNew:', result.isNew);
+
+      // If there's a returnTo parameter, navigate there after login
+      if (returnTo) {
+        // Validate returnTo is a local path (starts with /)
+        if (returnTo.startsWith('/')) {
+          navigate(returnTo, { replace: true });
+          return;
+        }
+      }
+
       if (result.isNew) {
         navigate('/?welcome=true');
       } else {
@@ -112,11 +124,16 @@ export default function Login() {
       console.error('[Login] Login failed:', error);
       alert('Login failed: ' + (error instanceof Error ? error.message : 'Unknown error'));
     }
-  }, [login, navigate]);
+  }, [login, navigate, returnTo]);
 
   useEffect(() => {
     if (user) {
-      navigate('/');
+      // If there's a returnTo parameter, navigate there
+      if (returnTo && returnTo.startsWith('/')) {
+        navigate(returnTo, { replace: true });
+      } else {
+        navigate('/');
+      }
       return;
     }
 
@@ -163,7 +180,7 @@ export default function Login() {
       
       return () => clearInterval(checkGoogle);
     }
-  }, [user, navigate, handleCredentialResponse]);
+  }, [user, navigate, handleCredentialResponse, returnTo]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary-50 to-gray-100 flex flex-col items-center justify-center p-4">

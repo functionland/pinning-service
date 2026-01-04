@@ -400,15 +400,35 @@ app.delete('/api/keys/:keyId', requireAuth, (req: Request, res: Response) => {
   try {
     const { keyId } = req.params;
     const success = dbOps.deleteApiKey(req.session.user!.email, keyId);
-    
+
     if (!success) {
       return res.status(404).json({ error: 'API key not found' });
     }
-    
+
     res.json({ success: true });
   } catch (error) {
     console.error('[webui] Error deleting API key:', error);
     res.status(500).json({ error: 'Failed to delete API key' });
+  }
+});
+
+// Get or create an active API key - used by external apps to get a valid key
+app.get('/api/keys/active', requireAuth, (req: Request, res: Response) => {
+  try {
+    const email = req.session.user!.email;
+    let keys = dbOps.getApiKeys(email);
+
+    // If no active keys exist, create one
+    if (!keys || keys.length === 0) {
+      const newKeyId = dbOps.createApiKey(email);
+      keys = [{ key_id: newKeyId, created_at: new Date().toISOString(), last_used_at: null }];
+    }
+
+    // Return the most recently created active key (first in the list since ordered by created_at DESC)
+    res.json({ key: keys[0].key_id });
+  } catch (error) {
+    console.error('[webui] Error getting active API key:', error);
+    res.status(500).json({ error: 'Failed to get API key' });
   }
 });
 

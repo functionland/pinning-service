@@ -74,6 +74,149 @@ This starts both the Vite dev server (port 5173) and the backend API (port 3001)
 | `SESSION_SECRET` | Session encryption key | (auto-generated) |
 | `PINNING_SERVICE_URL` | Pinning API endpoint | http://localhost:8080 |
 
+## Native App Integration (Get API Key)
+
+The `/get-key` endpoint allows native applications to obtain an API key through the browser. This enables apps to authenticate users via Google OAuth and receive an API key for subsequent API calls.
+
+### Endpoint
+
+```
+GET /get-key?redirect={URL_ENCODED_REDIRECT_URL}
+```
+
+### Request Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `redirect` | string | Yes | URL-encoded redirect URL where the user will be sent after authentication. Must use an allowed scheme. |
+
+### Allowed Redirect Schemes
+
+| Scheme | Example |
+|--------|---------|
+| `fxblox://` | `fxblox://auth-callback` |
+| `fxfiles://` | `fxfiles://auth-callback` |
+| `files://` | `files://auth-callback` |
+| `http://` | `http://localhost:3000/callback` |
+| `https://` | `https://app.example.com/callback` |
+
+### Response
+
+After successful authentication, the user is redirected to:
+
+```
+{redirect_url}?key={API_KEY}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `key` | string | JWT API key for authenticating with the Pinning Service API |
+
+### Flow Diagram
+
+```
+┌─────────────────┐                    ┌──────────────────────┐
+│   Native App    │                    │    Pinning WebUI     │
+└────────┬────────┘                    └──────────┬───────────┘
+         │                                        │
+         │  1. Open browser:                      │
+         │     /get-key?redirect=fxblox://cb      │
+         │ ──────────────────────────────────────>│
+         │                                        │
+         │                    2. If not logged in,│
+         │                       show login page  │
+         │                                        │
+         │                    3. User signs in    │
+         │                       with Google      │
+         │                                        │
+         │                    4. Create account   │
+         │                       if new user      │
+         │                                        │
+         │                    5. Get/create       │
+         │                       API key          │
+         │                                        │
+         │  6. Redirect to:                       │
+         │     fxblox://cb?key={JWT_API_KEY}      │
+         │ <──────────────────────────────────────│
+         │                                        │
+         │  7. App reads key from URL             │
+         │                                        │
+```
+
+### Example Usage
+
+**1. Native App Opens Browser**
+
+```
+https://your-pinning-service.com/get-key?redirect=fxblox%3A%2F%2Fauth-callback
+```
+
+**2. Handle Deep Link Callback (iOS Swift Example)**
+
+```swift
+func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+    if url.scheme == "fxblox" {
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let keyParam = components.queryItems?.first(where: { $0.name == "key" }) {
+            let apiKey = keyParam.value
+            // Store the API key securely
+            KeychainHelper.save(apiKey, forKey: "pinning_api_key")
+            return true
+        }
+    }
+    return false
+}
+```
+
+**3. Handle Deep Link Callback (Android Kotlin Example)**
+
+```kotlin
+override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+
+    intent?.data?.let { uri ->
+        if (uri.scheme == "fxblox") {
+            val apiKey = uri.getQueryParameter("key")
+            // Store the API key securely
+            securePreferences.edit().putString("pinning_api_key", apiKey).apply()
+        }
+    }
+}
+```
+
+**4. Handle Deep Link Callback (React Native Example)**
+
+```javascript
+import { Linking } from 'react-native';
+
+Linking.addEventListener('url', (event) => {
+  const url = new URL(event.url);
+  if (url.protocol === 'fxblox:') {
+    const apiKey = url.searchParams.get('key');
+    // Store the API key securely
+    await SecureStore.setItemAsync('pinning_api_key', apiKey);
+  }
+});
+```
+
+### Using the API Key
+
+Once obtained, use the API key in the `Authorization` header for all Pinning Service API requests:
+
+```
+Authorization: Bearer {API_KEY}
+```
+
+### Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Missing `redirect` parameter | Shows error page with message |
+| Invalid redirect URL format | Shows error page with message |
+| Unsupported URL scheme | Shows error page listing allowed schemes |
+| User cancels login | Stays on login page |
+| API key fetch fails | Shows error page with retry option |
+
 ## Google OAuth Setup
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)

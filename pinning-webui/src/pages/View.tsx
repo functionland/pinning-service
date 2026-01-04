@@ -4,24 +4,37 @@ import { useLanguage } from '../context/LanguageContext';
 import {
   parseCurrentShareUrl,
   fetchSharedContent,
-  isShareExpired,
-  formatExpiry,
+  decryptSharePayload,
   getViewerType,
   createBlobUrl,
   revokeBlobUrl,
   type SharePayload,
-  type ShareToken,
+  type DecryptedShareData,
   type ViewerType,
 } from '../services/sharingService';
-import { downloadBlob, getExtensionFromMimeType } from '../services/encryptionService';
+import { downloadBlob } from '../services/encryptionService';
 import LanguageSelector from '../components/LanguageSelector';
+
+// Format expiry from date string
+function formatExpiryFromDate(expiresAt: string): string {
+  const expiry = new Date(expiresAt).getTime();
+  const now = Date.now();
+  const seconds = Math.max(0, Math.floor((expiry - now) / 1000));
+
+  if (seconds <= 0) return 'Expired';
+  if (seconds < 60) return `${seconds} seconds`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours`;
+  return `${Math.floor(seconds / 86400)} days`;
+}
 
 interface ViewState {
   loading: boolean;
   error: string | null;
   needsPassword: boolean;
   payload: SharePayload | null;
-  token: ShareToken | null;
+  decryptedData: DecryptedShareData | null;
+  expiresAt: string | null;
   content: {
     data: Uint8Array;
     mimeType: string;
@@ -40,7 +53,8 @@ export default function View() {
     error: null,
     needsPassword: false,
     payload: null,
-    token: null,
+    decryptedData: null,
+    expiresAt: null,
     content: null,
   });
 
@@ -50,7 +64,7 @@ export default function View() {
 
   // Parse URL on mount
   useEffect(() => {
-    const parseUrl = () => {
+    const parseUrl = async () => {
       try {
         const parsed = parseCurrentShareUrl();
 
@@ -63,50 +77,61 @@ export default function View() {
           return;
         }
 
-        // Parse the token from payload
-        let token: ShareToken;
-        try {
-          token = JSON.parse(parsed.payload.t) as ShareToken;
-        } catch {
-          setState(s => ({
-            ...s,
-            loading: false,
-            error: 'Invalid share token format.',
-          }));
-          return;
-        }
+        const { payload } = parsed;
 
-        // Check if expired
-        if (isShareExpired(token)) {
-          setState(s => ({
-            ...s,
-            loading: false,
-            error: 'This share link has expired.',
-            token,
-          }));
-          return;
-        }
-
-        // Check if password-protected
-        if (parsed.payload.pwd) {
+        // Check if password-protected (payload.p is boolean in FxFiles format)
+        if (payload.p) {
           setState(s => ({
             ...s,
             loading: false,
             needsPassword: true,
-            payload: parsed.payload,
-            token,
+            payload: payload,
           }));
           return;
         }
 
-        // Public link - decrypt automatically
-        setState(s => ({
-          ...s,
-          payload: parsed.payload,
-          token,
-        }));
+        // Public link - decrypt automatically using the key in payload
+        if (!payload.k) {
+          setState(s => ({
+            ...s,
+            loading: false,
+            error: 'Invalid share link. Missing decryption key.',
+          }));
+          return;
+        }
 
-        loadContent(parsed.payload);
+        try {
+          const decryptedData = await decryptSharePayload(payload);
+
+          setState(s => ({
+            ...s,
+            payload: payload,
+            decryptedData,
+            expiresAt: decryptedData.expiresAt || null,
+          }));
+
+          // Check if expired
+          if (decryptedData.expiresAt) {
+            const expiry = new Date(decryptedData.expiresAt).getTime();
+            if (expiry < Date.now()) {
+              setState(s => ({
+                ...s,
+                loading: false,
+                error: 'This share link has expired.',
+              }));
+              return;
+            }
+          }
+
+          loadContent(payload, decryptedData);
+        } catch (error) {
+          console.error('[View] Decryption error:', error);
+          setState(s => ({
+            ...s,
+            loading: false,
+            error: 'Failed to decrypt share link.',
+          }));
+        }
       } catch (error) {
         console.error('[View] Parse error:', error);
         setState(s => ({
@@ -121,17 +146,19 @@ export default function View() {
   }, [shareId]);
 
   // Load and decrypt content
-  const loadContent = useCallback(async (payload: SharePayload, pwd?: string) => {
+  const loadContent = useCallback(async (payload: SharePayload, decryptedData: DecryptedShareData, pwd?: string) => {
     setState(s => ({ ...s, loading: true, error: null }));
 
     try {
-      const { data, mimeType, filename } = await fetchSharedContent(payload, pwd);
+      const { data, mimeType, filename } = await fetchSharedContent(payload, decryptedData, pwd);
       const blobUrl = createBlobUrl(data, mimeType);
 
       setState(s => ({
         ...s,
         loading: false,
         needsPassword: false,
+        decryptedData,
+        expiresAt: decryptedData.expiresAt || null,
         content: { data, mimeType, filename, blobUrl },
       }));
     } catch (error) {
@@ -153,8 +180,26 @@ export default function View() {
     setDecrypting(true);
 
     try {
-      await loadContent(state.payload, password);
+      // Decrypt the payload with password
+      const decryptedData = await decryptSharePayload(state.payload, password);
+
+      // Check if expired
+      if (decryptedData.expiresAt) {
+        const expiry = new Date(decryptedData.expiresAt).getTime();
+        if (expiry < Date.now()) {
+          setState(s => ({
+            ...s,
+            loading: false,
+            error: 'This share link has expired.',
+          }));
+          setDecrypting(false);
+          return;
+        }
+      }
+
+      await loadContent(state.payload, decryptedData, password);
     } catch (error) {
+      console.error('[View] Password decryption error:', error);
       setState(s => ({
         ...s,
         error: 'Incorrect password or decryption failed.',
@@ -207,9 +252,9 @@ export default function View() {
               {t.view?.errorTitle || 'Unable to Access'}
             </h1>
             <p className="text-gray-600 mb-6">{state.error}</p>
-            {state.token && (
+            {state.expiresAt && (
               <p className="text-sm text-gray-500 mb-4">
-                {t.view?.expiredAt || 'Expired'}: {state.token.expiresAt}
+                {t.view?.expiredAt || 'Expired'}: {new Date(state.expiresAt).toLocaleString()}
               </p>
             )}
             <button
@@ -244,15 +289,6 @@ export default function View() {
                 {t.view?.passwordDesc || 'This content is password-protected. Enter the password to continue.'}
               </p>
             </div>
-
-            {state.token && (
-              <div className="bg-gray-50 rounded-lg p-4 mb-6">
-                <p className="text-sm text-gray-600">
-                  <span className="font-medium">{t.view?.expiresIn || 'Expires in'}:</span>{' '}
-                  {formatExpiry(state.token)}
-                </p>
-              </div>
-            )}
 
             {state.error && (
               <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4 text-red-700 text-sm">
@@ -318,9 +354,9 @@ export default function View() {
             <h1 className="text-white font-medium truncate max-w-md">
               {state.content.filename}
             </h1>
-            {state.token && (
+            {state.expiresAt && (
               <span className="text-gray-400 text-sm hidden sm:inline">
-                {t.view?.expiresIn || 'Expires in'}: {formatExpiry(state.token)}
+                {t.view?.expiresIn || 'Expires in'}: {formatExpiryFromDate(state.expiresAt)}
               </span>
             )}
           </div>

@@ -270,6 +270,7 @@ Note: Firebase backend requires `GOOGLE_APPLICATION_CREDENTIALS` environment var
 /pinning-service/pinning-webui# cp package.json package-lock.json /home/root/pinning-service/pinning-webui/
 ~/pinning-service/pinning-webui# cd /home/root/pinning-service/pinning-webui
 /home/root/pinning-service/pinning-webui# npm install --production --ignore-scripts=false
+/home/root/pinning-service/pinning-webui# npm audit fix
 /home/root/pinning-service/pinning-webui# npm rebuild
 # systemctl restart fula-pinning-webui
 ```

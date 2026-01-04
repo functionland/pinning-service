@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -14,6 +14,12 @@ import {
   retrieveEncryptionKey,
   hasValidKey,
 } from '../services/secureStorage';
+import {
+  OutgoingShare,
+  Playlist,
+  parseOutgoingShares,
+  parsePlaylists,
+} from '../services/sharingService';
 
 interface Pin {
   request_id: string;
@@ -32,8 +38,36 @@ interface PinsResponse {
   totalPages: number;
 }
 
+interface SharedWithMeItem {
+  cid: string;
+  name: string;
+  sharedBy: string;
+  sharedAt: string;
+  expiresAt?: string;
+  permissions: string[];
+}
+
+interface SharedWithMeResponse {
+  shares: SharedWithMeItem[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
+type TabType = 'myPins' | 'sharedWithMe' | 'sharedByMe' | 'playlists';
+
 export default function Pins() {
   const { t } = useLanguage();
+  const { user } = useAuth();
+
+  // Active tab state
+  const [activeTab, setActiveTab] = useState<TabType>('myPins');
+
+  // Track which tabs have been loaded (for lazy loading)
+  const [loadedTabs, setLoadedTabs] = useState<Set<TabType>>(new Set(['myPins']));
+
+  // My Pins state
   const [data, setData] = useState<PinsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -48,9 +82,27 @@ export default function Pins() {
   const [refreshingPins, setRefreshingPins] = useState<Set<string>>(new Set());
   const [selectedPins, setSelectedPins] = useState<Set<string>>(new Set());
   const [unpinning, setUnpinning] = useState(false);
-  
+
+  // Shared With Me state
+  const [sharedWithMeData, setSharedWithMeData] = useState<SharedWithMeResponse | null>(null);
+  const [sharedWithMeLoading, setSharedWithMeLoading] = useState(false);
+  const [sharedWithMeError, setSharedWithMeError] = useState<string | null>(null);
+  const [sharedWithMePage, setSharedWithMePage] = useState(1);
+
+  // Shared By Me state
+  const [sharedByMeData, setSharedByMeData] = useState<OutgoingShare[]>([]);
+  const [sharedByMeLoading, setSharedByMeLoading] = useState(false);
+  const [sharedByMeError, setSharedByMeError] = useState<string | null>(null);
+  const [sharedByMePage, setSharedByMePage] = useState(1);
+  const ITEMS_PER_PAGE = 20;
+
+  // Playlists state
+  const [playlistsData, setPlaylistsData] = useState<Playlist[]>([]);
+  const [playlistsLoading, setPlaylistsLoading] = useState(false);
+  const [playlistsError, setPlaylistsError] = useState<string | null>(null);
+  const [playlistsPage, setPlaylistsPage] = useState(1);
+
   // Decryption state
-  const { user } = useAuth();
   const [encryptionKeyReady, setEncryptionKeyReady] = useState(false);
   const [decryptingPins, setDecryptingPins] = useState<Set<string>>(new Set());
   const [decryptionError, setDecryptionError] = useState<string | null>(null);
@@ -58,8 +110,33 @@ export default function Pins() {
   const [settingUpKey, setSettingUpKey] = useState(false);
   const [pendingDecryptPin, setPendingDecryptPin] = useState<Pin | null>(null);
 
+  // Load tab data on tab change (lazy loading)
   useEffect(() => {
-    fetchPins();
+    if (!loadedTabs.has(activeTab)) {
+      setLoadedTabs(prev => new Set(prev).add(activeTab));
+    }
+
+    // Fetch data for the active tab
+    switch (activeTab) {
+      case 'myPins':
+        fetchPins();
+        break;
+      case 'sharedWithMe':
+        if (!sharedWithMeData) fetchSharedWithMe();
+        break;
+      case 'sharedByMe':
+        if (sharedByMeData.length === 0 && !sharedByMeLoading) fetchSharedByMe();
+        break;
+      case 'playlists':
+        if (playlistsData.length === 0 && !playlistsLoading) fetchPlaylists();
+        break;
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'myPins') {
+      fetchPins();
+    }
   }, [page, searchQuery]);
 
   // Check if encryption key is available on mount
@@ -282,6 +359,83 @@ export default function Pins() {
     }
   };
 
+  // Fetch shared with me data from fula API
+  const fetchSharedWithMe = async () => {
+    setSharedWithMeLoading(true);
+    setSharedWithMeError(null);
+    try {
+      const params = new URLSearchParams({
+        page: String(sharedWithMePage),
+        limit: String(ITEMS_PER_PAGE)
+      });
+      const res = await fetch(`/api/shares/with-me?${params}`, { credentials: 'include' });
+      if (!res.ok) {
+        if (res.status === 404) {
+          // No shares endpoint yet, show empty state
+          setSharedWithMeData({ shares: [], total: 0, page: 1, limit: ITEMS_PER_PAGE, totalPages: 0 });
+          return;
+        }
+        throw new Error('Failed to fetch shared items');
+      }
+      const result = await res.json();
+      setSharedWithMeData(result);
+    } catch (err) {
+      setSharedWithMeError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setSharedWithMeLoading(false);
+    }
+  };
+
+  // Fetch shared by me data from encrypted file in IPFS
+  const fetchSharedByMe = async () => {
+    if (!user?.id) return;
+    setSharedByMeLoading(true);
+    setSharedByMeError(null);
+    try {
+      const res = await fetch(`/api/shares/by-me`, { credentials: 'include' });
+      if (!res.ok) {
+        if (res.status === 404) {
+          // No shares yet
+          setSharedByMeData([]);
+          return;
+        }
+        throw new Error('Failed to fetch outgoing shares');
+      }
+      const result = await res.json();
+      // Parse using the sharing service
+      const shares = parseOutgoingShares(result.shares || []);
+      setSharedByMeData(shares);
+    } catch (err) {
+      setSharedByMeError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setSharedByMeLoading(false);
+    }
+  };
+
+  // Fetch playlists
+  const fetchPlaylists = async () => {
+    setPlaylistsLoading(true);
+    setPlaylistsError(null);
+    try {
+      const res = await fetch(`/api/playlists`, { credentials: 'include' });
+      if (!res.ok) {
+        if (res.status === 404) {
+          // No playlists yet
+          setPlaylistsData([]);
+          return;
+        }
+        throw new Error('Failed to fetch playlists');
+      }
+      const result = await res.json();
+      const playlists = parsePlaylists(result.playlists || []);
+      setPlaylistsData(playlists);
+    } catch (err) {
+      setPlaylistsError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setPlaylistsLoading(false);
+    }
+  };
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setPage(1);
@@ -428,21 +582,49 @@ export default function Pins() {
     }
   };
 
-  return (
-    <div className="space-y-6">
-      {/* Page header */}
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">{t.pins.title}</h1>
-          <p className="text-gray-600 mt-1">
-            {data ? `${data.total} ${t.pins.totalPins}` : t.common.loading}
-          </p>
-        </div>
-        <button onClick={() => setShowAddModal(true)} className="btn-primary">
-          + {t.pins.addPin}
-        </button>
-      </div>
+  // Tab definitions
+  const tabs: { id: TabType; label: string; icon: JSX.Element }[] = [
+    {
+      id: 'myPins',
+      label: t.pins.tabMyPins || 'My Pins',
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+        </svg>
+      ),
+    },
+    {
+      id: 'sharedWithMe',
+      label: t.pins.tabSharedWithMe || 'Shared with Me',
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 4H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-2m-4-1v8m0 0l3-3m-3 3L9 8m-5 5h2.586a1 1 0 01.707.293l2.414 2.414a1 1 0 00.707.293h3.172a1 1 0 00.707-.293l2.414-2.414a1 1 0 01.707-.293H20" />
+        </svg>
+      ),
+    },
+    {
+      id: 'sharedByMe',
+      label: t.pins.tabSharedByMe || 'Shared by Me',
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+        </svg>
+      ),
+    },
+    {
+      id: 'playlists',
+      label: t.pins.tabPlaylists || 'Playlists',
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+        </svg>
+      ),
+    },
+  ];
 
+  // Render My Pins Tab Content
+  const renderMyPinsTab = () => (
+    <>
       {/* Bulk action bar */}
       {selectedPins.size > 0 && (
         <div className="bg-primary-50 border border-primary-200 rounded-xl p-4 flex items-center justify-between">
@@ -833,6 +1015,462 @@ export default function Pins() {
             </div>
           )}
         </>
+      )}
+    </>
+  );
+
+  // Render Shared With Me Tab Content
+  const renderSharedWithMeTab = () => {
+    if (sharedWithMeLoading) {
+      return (
+        <div className="card">
+          <div className="animate-pulse space-y-4">
+            {[...Array(5)].map((_, i) => (
+              <div key={i} className="h-12 bg-gray-200 rounded"></div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (sharedWithMeError) {
+      return (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
+          {sharedWithMeError}
+        </div>
+      );
+    }
+
+    if (!sharedWithMeData || sharedWithMeData.shares.length === 0) {
+      return (
+        <div className="card text-center py-12">
+          <div className="text-5xl mb-4">📥</div>
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">
+            {t.pins.noSharedWithMe || 'No shared items'}
+          </h3>
+          <p className="text-gray-600">
+            {t.pins.noSharedWithMeDesc || 'Items shared with you will appear here'}
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <>
+        <div className="card overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-100">
+                <tr>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                    {t.pins.cid}
+                  </th>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden sm:table-cell">
+                    {t.pins.name}
+                  </th>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden md:table-cell">
+                    {t.pins.sharedBy || 'Shared By'}
+                  </th>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden lg:table-cell">
+                    {t.pins.sharedOn || 'Shared On'}
+                  </th>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                    {t.pins.permissions || 'Permissions'}
+                  </th>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                    {t.pins.actions || 'Actions'}
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {sharedWithMeData.shares.map((item, idx) => (
+                  <tr key={`${item.cid}-${idx}`} className="hover:bg-gray-50">
+                    <td className="px-4 py-4">
+                      <code className="text-sm font-mono text-gray-700">
+                        {item.cid.slice(0, 12)}...{item.cid.slice(-6)}
+                      </code>
+                    </td>
+                    <td className="px-4 py-4 text-sm text-gray-600 hidden sm:table-cell">
+                      {item.name || <span className="text-gray-400">—</span>}
+                    </td>
+                    <td className="px-4 py-4 text-sm text-gray-600 hidden md:table-cell">
+                      {item.sharedBy}
+                    </td>
+                    <td className="px-4 py-4 text-sm text-gray-600 hidden lg:table-cell">
+                      {formatDate(item.sharedAt)}
+                    </td>
+                    <td className="px-4 py-4">
+                      <div className="flex gap-1">
+                        {item.permissions.map((perm) => (
+                          <span key={perm} className="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800">
+                            {perm}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4">
+                      <a
+                        href={`/view/${item.cid}`}
+                        className="p-2 text-gray-500 hover:text-primary-600 hover:bg-gray-100 rounded-lg transition-colors inline-block"
+                        title={t.pins.viewContent || 'View content'}
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                      </a>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Pagination for Shared With Me */}
+        {sharedWithMeData.totalPages > 1 && (
+          <div className="flex justify-between items-center">
+            <p className="text-sm text-gray-600">
+              {t.pins.page} {sharedWithMeData.page} {t.pins.of} {sharedWithMeData.totalPages}
+            </p>
+            <div className="flex space-x-2">
+              <button
+                onClick={() => setSharedWithMePage((p) => Math.max(1, p - 1))}
+                disabled={sharedWithMePage === 1}
+                className="btn-secondary disabled:opacity-50"
+              >
+                {t.pins.previous}
+              </button>
+              <button
+                onClick={() => setSharedWithMePage((p) => Math.min(sharedWithMeData.totalPages, p + 1))}
+                disabled={sharedWithMePage === sharedWithMeData.totalPages}
+                className="btn-secondary disabled:opacity-50"
+              >
+                {t.pins.next}
+              </button>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  };
+
+  // Render Shared By Me Tab Content
+  const renderSharedByMeTab = () => {
+    if (sharedByMeLoading) {
+      return (
+        <div className="card">
+          <div className="animate-pulse space-y-4">
+            {[...Array(5)].map((_, i) => (
+              <div key={i} className="h-12 bg-gray-200 rounded"></div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (sharedByMeError) {
+      return (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
+          {sharedByMeError}
+        </div>
+      );
+    }
+
+    if (sharedByMeData.length === 0) {
+      return (
+        <div className="card text-center py-12">
+          <div className="text-5xl mb-4">📤</div>
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">
+            {t.pins.noSharedByMe || 'No shared items'}
+          </h3>
+          <p className="text-gray-600">
+            {t.pins.noSharedByMeDesc || 'Items you share will appear here'}
+          </p>
+        </div>
+      );
+    }
+
+    // Pagination for shared by me
+    const startIdx = (sharedByMePage - 1) * ITEMS_PER_PAGE;
+    const endIdx = startIdx + ITEMS_PER_PAGE;
+    const paginatedShares = sharedByMeData.slice(startIdx, endIdx);
+    const totalPages = Math.ceil(sharedByMeData.length / ITEMS_PER_PAGE);
+
+    return (
+      <>
+        <div className="card overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-100">
+                <tr>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                    {t.pins.cid}
+                  </th>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden sm:table-cell">
+                    {t.pins.name}
+                  </th>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden md:table-cell">
+                    {t.pins.sharedWith || 'Shared With'}
+                  </th>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden lg:table-cell">
+                    {t.pins.expiresOn || 'Expires'}
+                  </th>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                    {t.pins.shareType || 'Type'}
+                  </th>
+                  <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                    {t.pins.actions || 'Actions'}
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {paginatedShares.map((share, idx) => (
+                  <tr key={`${share.cid}-${idx}`} className="hover:bg-gray-50">
+                    <td className="px-4 py-4">
+                      <code className="text-sm font-mono text-gray-700">
+                        {share.cid.slice(0, 12)}...{share.cid.slice(-6)}
+                      </code>
+                    </td>
+                    <td className="px-4 py-4 text-sm text-gray-600 hidden sm:table-cell">
+                      {share.name || <span className="text-gray-400">—</span>}
+                    </td>
+                    <td className="px-4 py-4 text-sm text-gray-600 hidden md:table-cell">
+                      {share.recipientEmail || share.recipientDid?.slice(0, 16) + '...' || t.pins.publicLink || 'Public link'}
+                    </td>
+                    <td className="px-4 py-4 text-sm text-gray-600 hidden lg:table-cell">
+                      {share.expiresAt ? formatDate(share.expiresAt) : (t.pins.noExpiry || 'No expiry')}
+                    </td>
+                    <td className="px-4 py-4">
+                      <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                        share.isPasswordProtected ? 'bg-purple-100 text-purple-800' :
+                        share.recipientDid ? 'bg-green-100 text-green-800' :
+                        'bg-blue-100 text-blue-800'
+                      }`}>
+                        {share.isPasswordProtected ? (t.pins.passwordProtected || 'Password') :
+                         share.recipientDid ? (t.pins.directShare || 'Direct') :
+                         (t.pins.publicLink || 'Public')}
+                      </span>
+                    </td>
+                    <td className="px-4 py-4">
+                      <button
+                        onClick={() => {
+                          const shareUrl = share.shareUrl || `${window.location.origin}/view/${share.cid}`;
+                          navigator.clipboard.writeText(shareUrl);
+                          setCopied(true);
+                          setTimeout(() => setCopied(false), 2000);
+                        }}
+                        className="p-2 text-gray-500 hover:text-primary-600 hover:bg-gray-100 rounded-lg transition-colors"
+                        title={t.pins.copyLink || 'Copy link'}
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                        </svg>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Pagination for Shared By Me */}
+        {totalPages > 1 && (
+          <div className="flex justify-between items-center">
+            <p className="text-sm text-gray-600">
+              {t.pins.page} {sharedByMePage} {t.pins.of} {totalPages}
+            </p>
+            <div className="flex space-x-2">
+              <button
+                onClick={() => setSharedByMePage((p) => Math.max(1, p - 1))}
+                disabled={sharedByMePage === 1}
+                className="btn-secondary disabled:opacity-50"
+              >
+                {t.pins.previous}
+              </button>
+              <button
+                onClick={() => setSharedByMePage((p) => Math.min(totalPages, p + 1))}
+                disabled={sharedByMePage === totalPages}
+                className="btn-secondary disabled:opacity-50"
+              >
+                {t.pins.next}
+              </button>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  };
+
+  // Render Playlists Tab Content
+  const renderPlaylistsTab = () => {
+    if (playlistsLoading) {
+      return (
+        <div className="card">
+          <div className="animate-pulse space-y-4">
+            {[...Array(5)].map((_, i) => (
+              <div key={i} className="h-12 bg-gray-200 rounded"></div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (playlistsError) {
+      return (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
+          {playlistsError}
+        </div>
+      );
+    }
+
+    if (playlistsData.length === 0) {
+      return (
+        <div className="card text-center py-12">
+          <div className="text-5xl mb-4">🎵</div>
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">
+            {t.pins.noPlaylists || 'No playlists'}
+          </h3>
+          <p className="text-gray-600">
+            {t.pins.noPlaylistsDesc || 'Your playlists will appear here'}
+          </p>
+        </div>
+      );
+    }
+
+    // Pagination for playlists
+    const startIdx = (playlistsPage - 1) * ITEMS_PER_PAGE;
+    const endIdx = startIdx + ITEMS_PER_PAGE;
+    const paginatedPlaylists = playlistsData.slice(startIdx, endIdx);
+    const totalPages = Math.ceil(playlistsData.length / ITEMS_PER_PAGE);
+
+    return (
+      <>
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {paginatedPlaylists.map((playlist, idx) => (
+            <div key={`${playlist.id}-${idx}`} className="card hover:shadow-lg transition-shadow">
+              <div className="flex items-start gap-4">
+                <div className="w-16 h-16 bg-gradient-to-br from-primary-400 to-primary-600 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+                  </svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-semibold text-gray-900 truncate">{playlist.name}</h3>
+                  <p className="text-sm text-gray-500">
+                    {playlist.tracks.length} {t.pins.tracks || 'tracks'}
+                  </p>
+                  {playlist.description && (
+                    <p className="text-sm text-gray-600 mt-1 line-clamp-2">{playlist.description}</p>
+                  )}
+                </div>
+              </div>
+              <div className="mt-4 pt-4 border-t border-gray-100">
+                <div className="flex items-center justify-between text-sm text-gray-500">
+                  <span>{t.pins.createdAt}: {formatDate(playlist.createdAt)}</span>
+                  <button
+                    onClick={() => {
+                      // Play or view playlist functionality
+                    }}
+                    className="p-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
+                    title={t.pins.playPlaylist || 'Play playlist'}
+                  >
+                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M8 5v14l11-7z" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Pagination for Playlists */}
+        {totalPages > 1 && (
+          <div className="flex justify-between items-center mt-6">
+            <p className="text-sm text-gray-600">
+              {t.pins.page} {playlistsPage} {t.pins.of} {totalPages}
+            </p>
+            <div className="flex space-x-2">
+              <button
+                onClick={() => setPlaylistsPage((p) => Math.max(1, p - 1))}
+                disabled={playlistsPage === 1}
+                className="btn-secondary disabled:opacity-50"
+              >
+                {t.pins.previous}
+              </button>
+              <button
+                onClick={() => setPlaylistsPage((p) => Math.min(totalPages, p + 1))}
+                disabled={playlistsPage === totalPages}
+                className="btn-secondary disabled:opacity-50"
+              >
+                {t.pins.next}
+              </button>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  };
+
+  // Main return with tabbed interface
+  return (
+    <div className="space-y-6">
+      {/* Page header */}
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">{t.pins.title}</h1>
+          <p className="text-gray-600 mt-1">
+            {activeTab === 'myPins' && data ? `${data.total} ${t.pins.totalPins}` :
+             activeTab === 'sharedWithMe' && sharedWithMeData ? `${sharedWithMeData.total} ${t.pins.items || 'items'}` :
+             activeTab === 'sharedByMe' ? `${sharedByMeData.length} ${t.pins.items || 'items'}` :
+             activeTab === 'playlists' ? `${playlistsData.length} ${t.pins.playlists || 'playlists'}` :
+             t.common.loading}
+          </p>
+        </div>
+        {activeTab === 'myPins' && (
+          <button onClick={() => setShowAddModal(true)} className="btn-primary">
+            + {t.pins.addPin}
+          </button>
+        )}
+      </div>
+
+      {/* Tab navigation */}
+      <div className="border-b border-gray-200">
+        <nav className="-mb-px flex space-x-4 overflow-x-auto" aria-label="Tabs">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`
+                flex items-center gap-2 py-3 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition-colors
+                ${activeTab === tab.id
+                  ? 'border-primary-500 text-primary-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }
+              `}
+            >
+              {tab.icon}
+              <span className="hidden sm:inline">{tab.label}</span>
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {/* Tab content */}
+      <div className="space-y-6">
+        {activeTab === 'myPins' && renderMyPinsTab()}
+        {activeTab === 'sharedWithMe' && renderSharedWithMeTab()}
+        {activeTab === 'sharedByMe' && renderSharedByMeTab()}
+        {activeTab === 'playlists' && renderPlaylistsTab()}
+      </div>
+
+      {/* Copied toast notification */}
+      {copied && (
+        <div className="fixed bottom-4 right-4 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg z-50">
+          {t.pins.copied}
+        </div>
       )}
     </div>
   );

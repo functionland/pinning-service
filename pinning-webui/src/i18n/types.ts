@@ -116,6 +116,55 @@ export interface Translations {
     decryptionWarning: string;
     settingUp: string;
     enableDecryption: string;
+    // Tabs
+    tabMyPins: string;
+    tabSharedWithMe: string;
+    tabSharedByMe: string;
+    tabPlaylists: string;
+    // Shared with me
+    sharedBy: string;
+    sharedOn: string;
+    expires: string;
+    expiresOn: string;
+    noExpiry: string;
+    noSharedWithMe: string;
+    noSharedWithMeDesc: string;
+    permissions: string;
+    viewContent: string;
+    items: string;
+    // Shared by me
+    sharedWith: string;
+    publicLink: string;
+    passwordLink: string;
+    passwordProtected: string;
+    directShare: string;
+    shareType: string;
+    copyLink: string;
+    revoked: string;
+    revokeShare: string;
+    noSharedByMe: string;
+    noSharedByMeDesc: string;
+    // Playlists
+    tracks: string;
+    noPlaylists: string;
+    noPlaylistsDesc: string;
+    playlists: string;
+    playPlaylist: string;
+  };
+  view: {
+    loading: string;
+    errorTitle: string;
+    expiredAt: string;
+    goHome: string;
+    passwordRequired: string;
+    passwordDesc: string;
+    expiresIn: string;
+    password: string;
+    enterPassword: string;
+    decrypting: string;
+    unlock: string;
+    download: string;
+    documentPreview: string;
   };
   profile: {
     title: string;

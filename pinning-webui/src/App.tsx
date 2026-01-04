@@ -7,6 +7,7 @@ import ApiKeys from './pages/ApiKeys';
 import Pins from './pages/Pins';
 import Profile from './pages/Profile';
 import GetKey from './pages/GetKey';
+import View from './pages/View';
 import Layout from './components/Layout';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -34,6 +35,7 @@ function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/get-key" element={<GetKey />} />
+          <Route path="/view/:shareId" element={<View />} />
           <Route path="/" element={
             <PrivateRoute>
               <Layout />

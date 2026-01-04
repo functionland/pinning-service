@@ -740,6 +740,215 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
+  // ============ Shares and Playlists Endpoints ============
+
+  // Get shares with me (items others have shared with the current user)
+  app.get('/api/shares/with-me', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+
+      const keys = dbOps.getApiKeys(req.session.user!.email);
+      if (!keys || keys.length === 0) {
+        return res.status(400).json({ error: 'No API key found' });
+      }
+
+      // Call Fula API to get shares with the user
+      // The Fula API endpoint for shares received by user
+      const fulaApiUrl = `http://127.0.0.1:6000/shares/received?page=${page}&limit=${limit}`;
+
+      try {
+        const response = await httpGet(fulaApiUrl, {
+          'Authorization': `Bearer ${keys[0].key_id}`
+        });
+
+        if (response.status === 200) {
+          const data = JSON.parse(response.data);
+          return res.json({
+            shares: data.shares || [],
+            total: data.total || 0,
+            page: data.page || page,
+            limit: data.limit || limit,
+            totalPages: data.totalPages || Math.ceil((data.total || 0) / limit)
+          });
+        } else if (response.status === 404) {
+          // Endpoint not implemented yet or no shares
+          return res.json({
+            shares: [],
+            total: 0,
+            page,
+            limit,
+            totalPages: 0
+          });
+        } else {
+          console.error('[webui] Error fetching shares with me:', response.status, response.data);
+          return res.status(response.status).json({ error: 'Failed to fetch shared items' });
+        }
+      } catch (apiError) {
+        // Fula API not available, return empty
+        console.warn('[webui] Fula API not available for shares/received:', apiError);
+        return res.json({
+          shares: [],
+          total: 0,
+          page,
+          limit,
+          totalPages: 0
+        });
+      }
+    } catch (error) {
+      console.error('[webui] Error in shares/with-me:', error);
+      res.status(500).json({ error: 'Failed to fetch shared items' });
+    }
+  });
+
+  // Get shares by me (items the current user has shared with others)
+  app.get('/api/shares/by-me', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const keys = dbOps.getApiKeys(req.session.user!.email);
+      if (!keys || keys.length === 0) {
+        return res.status(400).json({ error: 'No API key found' });
+      }
+
+      // Try to fetch from Fula API first
+      // The shares file is at: fula-metadata/.fula/shares/{userId}.json.enc
+      const userId = req.session.user!.id;
+      const fulaApiUrl = `http://127.0.0.1:6000/shares/sent`;
+
+      try {
+        const response = await httpGet(fulaApiUrl, {
+          'Authorization': `Bearer ${keys[0].key_id}`
+        });
+
+        if (response.status === 200) {
+          const data = JSON.parse(response.data);
+          return res.json({
+            shares: data.shares || []
+          });
+        } else if (response.status === 404) {
+          // No shares yet
+          return res.json({ shares: [] });
+        } else {
+          console.error('[webui] Error fetching shares by me:', response.status, response.data);
+          return res.status(response.status).json({ error: 'Failed to fetch outgoing shares' });
+        }
+      } catch (apiError) {
+        // Fula API not available, return empty
+        console.warn('[webui] Fula API not available for shares/sent:', apiError);
+        return res.json({ shares: [] });
+      }
+    } catch (error) {
+      console.error('[webui] Error in shares/by-me:', error);
+      res.status(500).json({ error: 'Failed to fetch outgoing shares' });
+    }
+  });
+
+  // Get user playlists
+  app.get('/api/playlists', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const keys = dbOps.getApiKeys(req.session.user!.email);
+      if (!keys || keys.length === 0) {
+        return res.status(400).json({ error: 'No API key found' });
+      }
+
+      // Playlists are stored at: playlists/user-playlists/*.json
+      // Try to fetch from Fula API
+      const fulaApiUrl = `http://127.0.0.1:6000/playlists`;
+
+      try {
+        const response = await httpGet(fulaApiUrl, {
+          'Authorization': `Bearer ${keys[0].key_id}`
+        });
+
+        if (response.status === 200) {
+          const data = JSON.parse(response.data);
+          return res.json({
+            playlists: data.playlists || []
+          });
+        } else if (response.status === 404) {
+          // No playlists yet
+          return res.json({ playlists: [] });
+        } else {
+          console.error('[webui] Error fetching playlists:', response.status, response.data);
+          return res.status(response.status).json({ error: 'Failed to fetch playlists' });
+        }
+      } catch (apiError) {
+        // Fula API not available, return empty
+        console.warn('[webui] Fula API not available for playlists:', apiError);
+        return res.json({ playlists: [] });
+      }
+    } catch (error) {
+      console.error('[webui] Error in playlists:', error);
+      res.status(500).json({ error: 'Failed to fetch playlists' });
+    }
+  });
+
+  // Get single playlist by ID
+  app.get('/api/playlists/:playlistId', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { playlistId } = req.params;
+      const keys = dbOps.getApiKeys(req.session.user!.email);
+      if (!keys || keys.length === 0) {
+        return res.status(400).json({ error: 'No API key found' });
+      }
+
+      const fulaApiUrl = `http://127.0.0.1:6000/playlists/${playlistId}`;
+
+      try {
+        const response = await httpGet(fulaApiUrl, {
+          'Authorization': `Bearer ${keys[0].key_id}`
+        });
+
+        if (response.status === 200) {
+          const data = JSON.parse(response.data);
+          return res.json({ playlist: data });
+        } else if (response.status === 404) {
+          return res.status(404).json({ error: 'Playlist not found' });
+        } else {
+          return res.status(response.status).json({ error: 'Failed to fetch playlist' });
+        }
+      } catch (apiError) {
+        console.warn('[webui] Fula API not available for playlist:', apiError);
+        return res.status(404).json({ error: 'Playlist not found' });
+      }
+    } catch (error) {
+      console.error('[webui] Error fetching playlist:', error);
+      res.status(500).json({ error: 'Failed to fetch playlist' });
+    }
+  });
+
+  // Revoke a share
+  app.delete('/api/shares/:shareId', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { shareId } = req.params;
+      const keys = dbOps.getApiKeys(req.session.user!.email);
+      if (!keys || keys.length === 0) {
+        return res.status(400).json({ error: 'No API key found' });
+      }
+
+      const fulaApiUrl = `http://127.0.0.1:6000/shares/${shareId}`;
+
+      try {
+        const response = await httpDelete(fulaApiUrl, {
+          'Authorization': `Bearer ${keys[0].key_id}`
+        });
+
+        if (response.status === 200 || response.status === 204) {
+          return res.json({ success: true });
+        } else if (response.status === 404) {
+          return res.status(404).json({ error: 'Share not found' });
+        } else {
+          return res.status(response.status).json({ error: 'Failed to revoke share' });
+        }
+      } catch (apiError) {
+        console.warn('[webui] Fula API not available for share deletion:', apiError);
+        return res.status(500).json({ error: 'Failed to revoke share' });
+      }
+    } catch (error) {
+      console.error('[webui] Error revoking share:', error);
+      res.status(500).json({ error: 'Failed to revoke share' });
+    }
+  });
+
   // Health check
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });

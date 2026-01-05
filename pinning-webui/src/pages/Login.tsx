@@ -84,7 +84,9 @@ export default function Login() {
   const [searchParams] = useSearchParams();
   const { t } = useLanguage();
   const [totalSize, setTotalSize] = useState(0);
+  const [totalPins, setTotalPins] = useState(0);
   const animatedSize = useAnimatedCounter(totalSize, 5000);
+  const animatedPins = useAnimatedCounter(totalPins, 5000);
   const formattedSize = formatStorageSize(animatedSize);
   const returnTo = searchParams.get('returnTo');
 
@@ -95,6 +97,9 @@ export default function Login() {
       .then(data => {
         if (data.totalSize) {
           setTotalSize(data.totalSize);
+        }
+        if (data.totalPins) {
+          setTotalPins(data.totalPins);
         }
       })
       .catch(err => console.error('Failed to fetch stats:', err));
@@ -206,16 +211,32 @@ export default function Login() {
         </div>
 
         {/* Storage counter */}
-        {totalSize > 0 && (
-          <div className="bg-white/80 backdrop-blur rounded-xl shadow-sm p-6 mb-6 text-center">
-            <p className="text-sm text-gray-500 mb-1">{t.login.totalStored}</p>
-            <div className="flex items-baseline justify-center gap-1">
-              <span className="text-4xl font-bold text-primary-600 tabular-nums">
-                {formattedSize.value}
-              </span>
-              <span className="text-xl font-medium text-primary-500">
-                {formattedSize.unit}
-              </span>
+        {(totalSize > 0 || totalPins > 0) && (
+          <div className="bg-white/80 backdrop-blur rounded-xl shadow-sm p-6 mb-6">
+            <div className="flex justify-center gap-8">
+              {totalPins > 0 && (
+                <div className="text-center">
+                  <p className="text-sm text-gray-500 mb-1">{t.login.totalPins}</p>
+                  <div className="flex items-baseline justify-center gap-1">
+                    <span className="text-4xl font-bold text-primary-600 tabular-nums">
+                      {animatedPins.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+              )}
+              {totalSize > 0 && (
+                <div className="text-center">
+                  <p className="text-sm text-gray-500 mb-1">{t.login.totalStored}</p>
+                  <div className="flex items-baseline justify-center gap-1">
+                    <span className="text-4xl font-bold text-primary-600 tabular-nums">
+                      {formattedSize.value}
+                    </span>
+                    <span className="text-xl font-medium text-primary-500">
+                      {formattedSize.unit}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -556,7 +556,13 @@ export default function Pins() {
               Key: obj.Key,
             });
             const getResponse = await s3Client.send(getCommand);
+            console.log('[Playlists] Response body type:', getResponse.Body?.constructor?.name);
             const encryptedBytes = await streamToUint8Array(getResponse.Body as ReadableStream<Uint8Array>);
+
+            // Debug: log received data
+            console.log('[Playlists] Received', encryptedBytes.length, 'bytes');
+            console.log('[Playlists] First 32 bytes (hex):', Array.from(encryptedBytes.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+            console.log('[Playlists] Key bytes length:', keyBytes.length);
 
             // Decrypt
             const decryptedBytes = await decrypt(encryptedBytes, cryptoKey);

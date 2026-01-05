@@ -390,12 +390,12 @@ export default function Pins() {
 
   // Fetch shared by me data - encrypted file from S3, decrypted client-side
   const fetchSharedByMe = async () => {
-    if (!user?.id) return;
+    if (!user?.id || !user?.email) return;
     setSharedByMeLoading(true);
     setSharedByMeError(null);
     try {
       // Get encryption key from storage
-      const keyBytes = await retrieveEncryptionKey();
+      const keyBytes = await retrieveEncryptionKey(user.email, user.email);
       if (!keyBytes) {
         console.log('[Pins] No encryption key available for shares');
         setSharedByMeData([]);
@@ -452,11 +452,12 @@ export default function Pins() {
 
   // Fetch playlists - list from S3, download each encrypted, decrypt client-side
   const fetchPlaylists = async () => {
+    if (!user?.email) return;
     setPlaylistsLoading(true);
     setPlaylistsError(null);
     try {
       // Get encryption key from storage
-      const keyBytes = await retrieveEncryptionKey();
+      const keyBytes = await retrieveEncryptionKey(user.email, user.email);
       if (!keyBytes) {
         console.log('[Pins] No encryption key available for playlists');
         setPlaylistsData([]);

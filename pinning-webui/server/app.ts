@@ -745,227 +745,139 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   // - Playlists: playlists/user-playlists/{playlistId}.json
   // - Outgoing Shares: fula-metadata/.fula/shares/{hashedUserId}.json.enc
   // - Accepted Shares: NOT in cloud (device-only for privacy)
+  //
+  // Server proxies S3 requests and returns encrypted data.
+  // Client handles decryption using existing encryptionService.
 
   const S3_GATEWAY = process.env.S3_GATEWAY_URL || 'https://ipfs.cloud.fx.land';
 
-  // Helper: Derive encryption key (matches FxFiles PBKDF2)
-  async function deriveEncryptionKey(googleUserId: string, email: string): Promise<Buffer> {
-    const crypto = await import('crypto');
-    const combinedId = `google:${googleUserId}`;
-    const salt = `fula-files-v1:${email}`;
-    return crypto.pbkdf2Sync(combinedId, salt, 100000, 32, 'sha256');
-  }
-
-  // Helper: AES-256-GCM decryption (FxFiles format: nonce[12] + tag[16] + ciphertext)
-  async function decryptData(encryptedData: Buffer, key: Buffer): Promise<Buffer> {
-    const crypto = await import('crypto');
-    if (encryptedData.length < 28) {
-      throw new Error('Invalid encrypted data: too short');
-    }
-    const nonce = encryptedData.subarray(0, 12);
-    const tag = encryptedData.subarray(12, 28);
-    const ciphertext = encryptedData.subarray(28);
-
-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, nonce);
-    decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  }
-
-  // Helper: Compute hashed user ID for shares (base64url(SHA256(publicKey)).substring(0, 16))
-  // Note: For now, we use Google user ID hash since we don't have the public key
-  async function computeHashedUserId(googleUserId: string): Promise<string> {
-    const crypto = await import('crypto');
-    const hash = crypto.createHash('sha256').update(`google:${googleUserId}`).digest();
-    // Convert to base64url and take first 16 chars
-    const base64url = hash.toString('base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=/g, '');
-    return base64url.substring(0, 16);
-  }
-
   // Get shares with me (items others have shared with the current user)
   // Note: Accepted shares are NOT synced to cloud by design (privacy)
-  // Users must re-accept share links on web or export from app
   app.get('/api/shares/with-me', requireAuth, async (_req: Request, res: Response) => {
-    // Accepted shares are stored only on device, not in cloud
-    // Return empty with explanation
     return res.json({
       shares: [],
-      total: 0,
-      page: 1,
-      limit: 20,
-      totalPages: 0,
-      note: 'Accepted shares are stored on device only. Paste a share link to access shared content.'
+      note: 'Accepted shares are stored on device only. Use share links to access shared content.'
     });
   });
 
-  // Get shares by me (items the current user has shared with others)
-  // FxFiles stores outgoing shares at: fula-metadata/.fula/shares/{hashedUserId}.json.enc
+  // Get shares by me - returns encrypted data for client-side decryption
+  // Client must provide hashedUserId (computed from public key)
   app.get('/api/shares/by-me', requireAuth, async (req: Request, res: Response) => {
     try {
-      const user = req.session.user!;
-      const googleUserId = user.id;
-      const email = user.email;
+      const { hashedUserId } = req.query;
 
-      // Compute hashed user ID for the shares file path
-      const hashedUserId = await computeHashedUserId(googleUserId);
-
-      console.log('[webui] Fetching outgoing shares for user:', email);
-      console.log('[webui] Hashed user ID:', hashedUserId);
-
-      // Derive encryption key
-      const encryptionKey = await deriveEncryptionKey(googleUserId, email);
-
-      // Try multiple possible URL formats for the shares file
-      const sharesUrls = [
-        `${S3_GATEWAY}/fula-metadata/.fula/shares/${hashedUserId}.json.enc`,
-        `${S3_GATEWAY}/fula-metadata/.fula/shares/${hashedUserId}.json`,
-        `${S3_GATEWAY}/.fula/shares/${hashedUserId}.json.enc`,
-        `${S3_GATEWAY}/shares/${hashedUserId}.json.enc`,
-      ];
-
-      for (const sharesUrl of sharesUrls) {
-        try {
-          console.log('[webui] Trying shares URL:', sharesUrl);
-          const response = await fetch(sharesUrl);
-
-          if (response.status === 404) {
-            console.log('[webui] Not found:', sharesUrl);
-            continue;
-          }
-
-          if (!response.ok) {
-            console.warn('[webui] Error fetching shares:', response.status, sharesUrl);
-            continue;
-          }
-
-          const encryptedData = Buffer.from(await response.arrayBuffer());
-          console.log('[webui] Fetched shares data, size:', encryptedData.length);
-
-          try {
-            // Try decrypting
-            const decryptedData = await decryptData(encryptedData, encryptionKey);
-            const sharesJson = JSON.parse(decryptedData.toString('utf8'));
-
-            console.log('[webui] Decrypted shares, count:', sharesJson.shares?.length || 0);
-
-            // Handle different response formats
-            if (Array.isArray(sharesJson.shares)) {
-              return res.json({ shares: sharesJson.shares });
-            } else if (Array.isArray(sharesJson)) {
-              return res.json({ shares: sharesJson });
-            } else {
-              return res.json({ shares: [] });
-            }
-          } catch (decryptError) {
-            // Maybe it's not encrypted, try parsing directly
-            console.warn('[webui] Decrypt failed, trying raw parse:', decryptError);
-            try {
-              const rawData = encryptedData.toString('utf8');
-              const sharesJson = JSON.parse(rawData);
-
-              if (Array.isArray(sharesJson.shares)) {
-                return res.json({ shares: sharesJson.shares });
-              } else if (Array.isArray(sharesJson)) {
-                return res.json({ shares: sharesJson });
-              }
-            } catch (parseError) {
-              console.warn('[webui] Raw parse also failed:', parseError);
-              continue;
-            }
-          }
-        } catch (fetchError) {
-          console.warn('[webui] Fetch error:', sharesUrl, fetchError);
-          continue;
-        }
+      if (!hashedUserId || typeof hashedUserId !== 'string') {
+        return res.status(400).json({ error: 'hashedUserId query parameter required' });
       }
 
-      console.log('[webui] No shares file found for user');
-      return res.json({ shares: [] });
+      console.log('[webui] Fetching outgoing shares for hashedUserId:', hashedUserId);
+
+      // Fetch encrypted shares file from S3
+      const sharesUrl = `${S3_GATEWAY}/fula-metadata/.fula/shares/${hashedUserId}.json.enc`;
+      console.log('[webui] Fetching from:', sharesUrl);
+
+      const response = await fetch(sharesUrl);
+
+      if (response.status === 404) {
+        console.log('[webui] No shares file found');
+        return res.json({ shares: [], encryptedData: null });
+      }
+
+      if (!response.ok) {
+        console.error('[webui] S3 error:', response.status);
+        return res.json({ shares: [], encryptedData: null });
+      }
+
+      const encryptedData = Buffer.from(await response.arrayBuffer());
+      console.log('[webui] Fetched encrypted shares, size:', encryptedData.length);
+
+      // Return encrypted data as base64 for client-side decryption
+      return res.json({
+        encryptedData: encryptedData.toString('base64')
+      });
     } catch (error) {
       console.error('[webui] Error in shares/by-me:', error);
-      res.status(500).json({ error: 'Failed to fetch outgoing shares' });
+      res.status(500).json({ error: 'Failed to fetch shares' });
     }
   });
 
-  // Get user playlists
-  // FxFiles stores playlists in: playlists/user-playlists/{playlistId}.json (encrypted)
-  // There should be a manifest file at: playlists/user-playlists/_index.json.enc
-  app.get('/api/playlists', requireAuth, async (req: Request, res: Response) => {
+  // List playlist keys from S3 bucket
+  app.get('/api/playlists/list', requireAuth, async (_req: Request, res: Response) => {
     try {
-      const user = req.session.user!;
-      const googleUserId = user.id;
-      const email = user.email;
+      console.log('[webui] Listing playlists from S3');
 
-      console.log('[webui] Fetching playlists for user:', email);
+      // S3 ListObjectsV2: GET /playlists?list-type=2&prefix=user-playlists/
+      const listUrl = `${S3_GATEWAY}/playlists?list-type=2&prefix=user-playlists/`;
+      console.log('[webui] List URL:', listUrl);
 
-      // Derive encryption key
-      const encryptionKey = await deriveEncryptionKey(googleUserId, email);
-      const hashedUserId = await computeHashedUserId(googleUserId);
+      const response = await fetch(listUrl);
 
-      // Try multiple possible manifest file locations
-      const manifestUrls = [
-        `${S3_GATEWAY}/playlists/user-playlists/_index.json.enc`,
-        `${S3_GATEWAY}/playlists/user-playlists/${hashedUserId}/_index.json.enc`,
-        `${S3_GATEWAY}/playlists/_manifest.json.enc`,
-        `${S3_GATEWAY}/playlists/playlists.json.enc`,
-      ];
+      if (!response.ok) {
+        console.error('[webui] S3 list error:', response.status);
+        return res.json({ keys: [] });
+      }
 
-      for (const manifestUrl of manifestUrls) {
-        try {
-          console.log('[webui] Trying playlist manifest:', manifestUrl);
-          const manifestResponse = await fetch(manifestUrl);
+      const listData = await response.text();
+      console.log('[webui] S3 response (first 300):', listData.substring(0, 300));
 
-          if (manifestResponse.ok) {
-            const encryptedData = Buffer.from(await manifestResponse.arrayBuffer());
-            console.log('[webui] Fetched manifest, size:', encryptedData.length);
+      // Parse S3 XML response to extract keys
+      let keys: string[] = [];
 
-            try {
-              const decryptedData = await decryptData(encryptedData, encryptionKey);
-              const manifest = JSON.parse(decryptedData.toString('utf8'));
-              console.log('[webui] Decrypted manifest, playlists:', manifest.playlists?.length || 0);
-
-              // Manifest could contain playlists directly or list of playlist IDs
-              if (Array.isArray(manifest.playlists)) {
-                return res.json({ playlists: manifest.playlists });
-              } else if (Array.isArray(manifest)) {
-                return res.json({ playlists: manifest });
-              } else if (manifest.playlistIds) {
-                // Need to fetch each playlist by ID
-                const playlists = [];
-                for (const playlistId of manifest.playlistIds) {
-                  try {
-                    const playlistUrl = `${S3_GATEWAY}/playlists/user-playlists/${playlistId}.json.enc`;
-                    const playlistResponse = await fetch(playlistUrl);
-                    if (!playlistResponse.ok) continue;
-
-                    const encData = Buffer.from(await playlistResponse.arrayBuffer());
-                    const decData = await decryptData(encData, encryptionKey);
-                    playlists.push(JSON.parse(decData.toString('utf8')));
-                  } catch (e) {
-                    console.warn('[webui] Error fetching playlist:', playlistId, e);
-                  }
-                }
-                return res.json({ playlists });
-              }
-            } catch (decryptError) {
-              console.warn('[webui] Error decrypting manifest:', decryptError);
-              continue;
-            }
+      // Try JSON first (some gateways return JSON)
+      try {
+        const jsonData = JSON.parse(listData);
+        if (jsonData.Contents && Array.isArray(jsonData.Contents)) {
+          keys = jsonData.Contents.map((obj: { Key: string }) => obj.Key);
+        }
+      } catch {
+        // Parse S3 XML format
+        const keyMatches = listData.matchAll(/<Key>([^<]+)<\/Key>/g);
+        for (const match of keyMatches) {
+          if (match[1].endsWith('.json')) {
+            keys.push(match[1]);
           }
-        } catch (fetchError) {
-          console.warn('[webui] Error fetching manifest:', manifestUrl, fetchError);
-          continue;
         }
       }
 
-      console.log('[webui] No playlist manifest found, returning empty');
-      return res.json({ playlists: [] });
+      console.log('[webui] Found playlist keys:', keys);
+      return res.json({ keys });
     } catch (error) {
-      console.error('[webui] Error in playlists:', error);
-      res.status(500).json({ error: 'Failed to fetch playlists' });
+      console.error('[webui] Error listing playlists:', error);
+      res.status(500).json({ error: 'Failed to list playlists' });
     }
+  });
+
+  // Get encrypted playlist data by key
+  app.get('/api/playlists/encrypted/:key(*)', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { key } = req.params;
+      console.log('[webui] Fetching encrypted playlist:', key);
+
+      const playlistUrl = `${S3_GATEWAY}/playlists/${key}`;
+      const response = await fetch(playlistUrl);
+
+      if (!response.ok) {
+        console.error('[webui] S3 error:', response.status);
+        return res.status(response.status).json({ error: 'Playlist not found' });
+      }
+
+      const encryptedData = Buffer.from(await response.arrayBuffer());
+      console.log('[webui] Fetched encrypted playlist, size:', encryptedData.length);
+
+      // Return encrypted data as base64 for client-side decryption
+      return res.json({
+        key,
+        encryptedData: encryptedData.toString('base64')
+      });
+    } catch (error) {
+      console.error('[webui] Error fetching playlist:', error);
+      res.status(500).json({ error: 'Failed to fetch playlist' });
+    }
+  });
+
+  // Legacy endpoint - returns empty (use /list and /encrypted/:key instead)
+  app.get('/api/playlists', requireAuth, async (_req: Request, res: Response) => {
+    return res.json({ playlists: [], note: 'Use /api/playlists/list and /api/playlists/encrypted/:key' });
   });
 
   // Get single playlist by ID

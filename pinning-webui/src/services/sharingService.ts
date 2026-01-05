@@ -18,21 +18,38 @@ const KEY_LENGTH_BITS = 256;
 /**
  * Share payload structure (in URL fragment)
  *
- * FxFiles format:
+ * FxFiles format for PUBLIC links:
  * - v: version number
  * - t: token object with share metadata
  * - sk: secret key (base64) - for decryption
  * - b: bucket name
  * - k: file key/path
  * - l: label/name
+ *
+ * FxFiles format for PASSWORD-PROTECTED links:
+ * - v: version number
+ * - p: true (password protected flag)
+ * - s: base64 salt (16 bytes)
+ * - e: base64 encrypted inner payload (contains the public link format above)
  */
 export interface SharePayload {
   v: number;           // Version
-  t: ShareTokenData;   // Token object (not JSON string)
-  sk?: string;         // Secret key (base64) - for decryption
-  b: string;           // Bucket name
-  k: string;           // File key/path
-  l?: string;          // Label/name
+  t?: ShareTokenData;  // Token object (not JSON string) - for public links
+  sk?: string;         // Secret key (base64) - for decryption - for public links
+  b?: string;          // Bucket name - for public links
+  k?: string;          // File key/path - for public links
+  l?: string;          // Label/name - for public links
+  // Password-protected fields
+  p?: boolean;         // Password protected flag
+  s?: string;          // Base64 salt (16 bytes)
+  e?: string;          // Base64 encrypted inner payload
+}
+
+/**
+ * Check if a payload is password-protected
+ */
+export function isPasswordProtectedPayload(payload: SharePayload): boolean {
+  return payload.p === true && !!payload.s && !!payload.e;
 }
 
 /**
@@ -219,6 +236,60 @@ export async function deriveKeyFromPassword(
     true,
     ['encrypt', 'decrypt']
   );
+}
+
+/**
+ * Decrypt a password-protected share payload
+ *
+ * Password-protected links have the format:
+ * {v: 1, p: true, s: "<base64_salt>", e: "<base64_encrypted_inner_payload>"}
+ *
+ * The inner payload (after decryption) is a normal SharePayload with:
+ * {v, t, sk, b, k, l}
+ *
+ * @param payload - The password-protected outer payload
+ * @param password - The user's password
+ * @returns The decrypted inner SharePayload
+ */
+export async function decryptPasswordProtectedPayload(
+  payload: SharePayload,
+  password: string
+): Promise<SharePayload> {
+  if (!payload.p) {
+    throw new Error('Not a password-protected payload');
+  }
+
+  if (!payload.s || !payload.e) {
+    throw new Error('Missing salt or encrypted data in password-protected payload');
+  }
+
+  console.log('[decryptPasswordProtectedPayload] Decrypting password-protected payload...');
+
+  // Decode salt and encrypted payload
+  const salt = base64ToUint8Array(payload.s);
+  const encryptedPayload = base64ToUint8Array(payload.e);
+
+  console.log('[decryptPasswordProtectedPayload] Salt length:', salt.length);
+  console.log('[decryptPasswordProtectedPayload] Encrypted payload length:', encryptedPayload.length);
+
+  // Derive key from password
+  const passwordKey = await deriveKeyFromPassword(password, salt);
+
+  // Decrypt inner payload using AES-GCM
+  // FxFiles format: [12-byte nonce][16-byte tag][ciphertext]
+  try {
+    const decryptedBytes = await decrypt(encryptedPayload, passwordKey);
+    const innerJson = new TextDecoder().decode(decryptedBytes);
+    console.log('[decryptPasswordProtectedPayload] Decrypted inner payload length:', innerJson.length);
+
+    const innerPayload = JSON.parse(innerJson) as SharePayload;
+    console.log('[decryptPasswordProtectedPayload] Inner payload keys:', Object.keys(innerPayload));
+
+    return innerPayload;
+  } catch (error) {
+    console.error('[decryptPasswordProtectedPayload] Decryption failed:', error);
+    throw new Error('Invalid password');
+  }
 }
 
 /**

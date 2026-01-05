@@ -8,6 +8,8 @@ import {
   getViewerType,
   createBlobUrl,
   revokeBlobUrl,
+  isPasswordProtectedPayload,
+  decryptPasswordProtectedPayload,
   type SharePayload,
   type ProcessedShareData,
   type ViewerType,
@@ -79,9 +81,20 @@ export default function View() {
 
         const { shareId, payload } = parsed;
 
+        // Check if this is a password-protected link
+        if (isPasswordProtectedPayload(payload)) {
+          console.log('[View] Password-protected link detected');
+          setState(s => ({
+            ...s,
+            loading: false,
+            needsPassword: true,
+            payload: payload,
+          }));
+          return;
+        }
+
         // Check if we have the secret key (sk) for public links
         if (!payload.sk) {
-          // TODO: Handle password-protected links (would need different flow)
           setState(s => ({
             ...s,
             loading: false,
@@ -163,14 +176,63 @@ export default function View() {
     }
   }, []);
 
-  // Handle password submission (for password-protected links - not yet implemented)
+  // Handle password submission for password-protected links
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Implement password-protected link handling
-    setState(s => ({
-      ...s,
-      error: 'Password-protected links are not yet supported.',
-    }));
+
+    if (!state.payload || !password.trim()) return;
+
+    setDecrypting(true);
+    setState(s => ({ ...s, error: null }));
+
+    try {
+      // Decrypt the inner payload using the password
+      console.log('[View] Decrypting password-protected payload...');
+      const innerPayload = await decryptPasswordProtectedPayload(state.payload, password);
+
+      // Get shareId from URL
+      const parsed = parseCurrentShareUrl();
+      if (!parsed) {
+        throw new Error('Failed to parse share URL');
+      }
+
+      // Now process the inner payload like a normal public link
+      const shareData = await processSharePayload(innerPayload, parsed.shareId);
+
+      // Check if expired
+      if (shareData.expiresAt) {
+        const expiry = new Date(shareData.expiresAt).getTime();
+        if (expiry < Date.now()) {
+          setState(s => ({
+            ...s,
+            loading: false,
+            needsPassword: false,
+            error: 'This share link has expired.',
+          }));
+          setDecrypting(false);
+          return;
+        }
+      }
+
+      // Update state with decrypted payload
+      setState(s => ({
+        ...s,
+        payload: innerPayload,
+        shareData,
+        expiresAt: shareData.expiresAt || null,
+      }));
+
+      // Fetch and decrypt the content
+      await loadContent(shareData);
+    } catch (error) {
+      console.error('[View] Password decryption error:', error);
+      setState(s => ({
+        ...s,
+        error: error instanceof Error ? error.message : 'Failed to decrypt. Please check your password.',
+      }));
+    } finally {
+      setDecrypting(false);
+    }
   };
 
   // Handle download

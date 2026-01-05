@@ -325,7 +325,9 @@ func (s *PinsAPIServiceSQLite) cidExistsInIPFS(ctx context.Context, cidStr strin
 	return true, nil
 }
 
-// getCIDSize returns the size of a CID from IPFS
+// getCIDSize returns the cumulative size of a CID from IPFS (including all child nodes)
+// This is the total DAG size, not just the root block size.
+// For folders and large files, this includes all chunks/blocks in the merkle DAG.
 func (s *PinsAPIServiceSQLite) getCIDSize(ctx context.Context, cidStr string) (int64, error) {
 	if s.ipfsAPI == nil {
 		return 0, nil
@@ -336,13 +338,14 @@ func (s *PinsAPIServiceSQLite) getCIDSize(ctx context.Context, cidStr string) (i
 		return 0, err
 	}
 
-	// Get block stat for size
-	blockStat, err := s.ipfsAPI.Block().Stat(ctx, path)
+	// Get object stat for cumulative size (includes all child nodes)
+	// This returns the total DAG size, similar to how Pinata and other services report storage
+	objStat, err := s.ipfsAPI.Object().Stat(ctx, path)
 	if err != nil {
 		return 0, err
 	}
 
-	return int64(blockStat.Size()), nil
+	return int64(objStat.CumulativeSize), nil
 }
 
 // getDelegates returns delegate addresses for pinning service
@@ -506,6 +509,94 @@ func (s *PinsAPIServiceSQLite) syncStatusAndSize(ctx context.Context, requestId,
 	}
 
 	return status, size, nil
+}
+
+// PinNodeInfo represents information about a single cluster node for a pin
+type PinNodeInfo struct {
+	PeerID      string `json:"peer_id"`
+	PeerName    string `json:"peer_name,omitempty"`
+	Status      string `json:"status"`
+	Timestamp   string `json:"timestamp,omitempty"`
+	Error       string `json:"error,omitempty"`
+	AttemptCount int    `json:"attempt_count,omitempty"`
+}
+
+// PinNodesResponse represents the response for GetPinNodes
+type PinNodesResponse struct {
+	Requestid string        `json:"requestid"`
+	Cid       string        `json:"cid"`
+	Nodes     []PinNodeInfo `json:"nodes"`
+}
+
+// GetPinNodes returns the cluster nodes where a pin is stored
+func (s *PinsAPIServiceSQLite) GetPinNodes(ctx context.Context, requestid string) (ImplResponse, error) {
+	if requestid == "" {
+		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "requestid is required"), errors.New("requestid is required")
+	}
+
+	pinStatus, username, err := s.db.GetPinByRequestID(ctx, requestid)
+	if err != nil {
+		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
+	}
+
+	userID, err := s.extractUserIDFromAuth(ctx)
+	if err != nil {
+		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
+	}
+
+	if username != userID {
+		return createErrorResponse(http.StatusForbidden, "FORBIDDEN", "You don't have permission to view this pin"), errors.New("unauthorized")
+	}
+
+	// Get cluster status with full peer information
+	nodes, err := s.getClusterNodes(ctx, pinStatus.Pin.Cid)
+	if err != nil {
+		log.Printf("Warning: failed to get cluster nodes for %s: %v", pinStatus.Pin.Cid, err)
+		// Return empty nodes array instead of error
+		nodes = []PinNodeInfo{}
+	}
+
+	return Response(http.StatusOK, PinNodesResponse{
+		Requestid: requestid,
+		Cid:       pinStatus.Pin.Cid,
+		Nodes:     nodes,
+	}), nil
+}
+
+// getClusterNodes returns information about all cluster nodes for a CID
+func (s *PinsAPIServiceSQLite) getClusterNodes(ctx context.Context, cidStr string) ([]PinNodeInfo, error) {
+	if s.ipfsClusterAPI == nil {
+		return nil, errors.New("IPFS Cluster API not available")
+	}
+
+	cid, err := api.DecodeCid(cidStr)
+	if err != nil {
+		return nil, err
+	}
+
+	pinInfo, err := s.ipfsClusterAPI.Status(ctx, cid, false)
+	if err != nil {
+		return nil, err
+	}
+
+	nodes := make([]PinNodeInfo, 0, len(pinInfo.PeerMap))
+	for peerID, peerInfo := range pinInfo.PeerMap {
+		node := PinNodeInfo{
+			PeerID:       peerID,
+			PeerName:     peerInfo.PeerName,
+			Status:       peerInfo.Status.String(),
+			AttemptCount: peerInfo.AttemptCount,
+		}
+		if !peerInfo.Timestamp.IsZero() {
+			node.Timestamp = peerInfo.Timestamp.Format(time.RFC3339)
+		}
+		if peerInfo.Error != "" {
+			node.Error = peerInfo.Error
+		}
+		nodes = append(nodes, node)
+	}
+
+	return nodes, nil
 }
 
 // Note: generateRequestID is defined in api_pins_service.go

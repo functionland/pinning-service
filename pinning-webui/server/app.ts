@@ -707,6 +707,35 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
+  app.get('/api/pins/:requestId/nodes', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { requestId } = req.params;
+
+      const keys = dbOps.getApiKeys(req.session.user!.email);
+      if (!keys || keys.length === 0) {
+        return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
+      }
+
+      const fullUrl = `http://127.0.0.1:6000/pins/${requestId}/nodes`;
+      console.log(`[webui] Getting pin nodes for ${requestId} via ${fullUrl}`);
+
+      const response = await httpGet(fullUrl, {
+        'Authorization': `Bearer ${keys[0].key_id}`
+      });
+
+      if (response.status !== 200) {
+        console.error('[webui] Error getting pin nodes:', response.status, response.data);
+        return res.status(response.status).json({ error: 'Failed to get pin nodes' });
+      }
+
+      const nodesData = JSON.parse(response.data);
+      res.json(nodesData);
+    } catch (error) {
+      console.error('[webui] Error getting pin nodes:', error);
+      res.status(500).json({ error: 'Failed to get pin nodes' });
+    }
+  });
+
   app.get('/api/stats', requireAuth, (req: Request, res: Response) => {
     try {
       const stats = dbOps.getUserStats(req.session.user!.email);

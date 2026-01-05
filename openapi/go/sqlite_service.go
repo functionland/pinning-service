@@ -1245,3 +1245,55 @@ func (s *SQLiteService) GetTotalStorageStats(ctx context.Context) (map[string]in
 
 	return stats, nil
 }
+
+// PinForRecalc represents a pin that may need size recalculation
+type PinForRecalc struct {
+	RequestID   string
+	CID         string
+	Username    string
+	CurrentSize int64
+	Status      string
+}
+
+// GetPinsNeedingSizeRecalc returns pins that may need size recalculation
+// If includeAll is false, only returns pins with size=0
+// If includeAll is true, returns all non-deleted pins (useful when switching from block to DAG size)
+func (s *SQLiteService) GetPinsNeedingSizeRecalc(ctx context.Context, limit int, includeAll bool) ([]PinForRecalc, error) {
+	var query string
+	if includeAll {
+		// Return all pinned CIDs (for recalculating all sizes after changing to cumulative size)
+		query = `
+			SELECT requestid, cid, username, size, status
+			FROM pins
+			WHERE status IN ('pinned', 'pinning')
+			ORDER BY size ASC, created_at DESC
+			LIMIT ?
+		`
+	} else {
+		// Return only pins with size=0 (need initial size calculation)
+		query = `
+			SELECT requestid, cid, username, size, status
+			FROM pins
+			WHERE status IN ('pinned', 'pinning') AND size = 0
+			ORDER BY created_at DESC
+			LIMIT ?
+		`
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pins: %w", err)
+	}
+	defer rows.Close()
+
+	var pins []PinForRecalc
+	for rows.Next() {
+		var p PinForRecalc
+		if err := rows.Scan(&p.RequestID, &p.CID, &p.Username, &p.CurrentSize, &p.Status); err != nil {
+			return nil, fmt.Errorf("failed to scan pin: %w", err)
+		}
+		pins = append(pins, p)
+	}
+
+	return pins, nil
+}

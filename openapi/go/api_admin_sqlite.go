@@ -61,6 +61,11 @@ func (c *AdminAPIController) Routes() Routes {
 			Pattern:     "/admin/storage",
 			HandlerFunc: c.authMiddleware(c.GetTotalStorage),
 		},
+		"GetPinsNeedingSizeRecalc": Route{
+			Method:      "GET",
+			Pattern:     "/admin/pins/needs-size-recalc",
+			HandlerFunc: c.authMiddleware(c.GetPinsNeedingSizeRecalc),
+		},
 	}
 }
 
@@ -533,6 +538,72 @@ func (c *AdminAPIController) GetTotalStorage(w http.ResponseWriter, r *http.Requ
 		TotalSizeHR:      formatBytes(stats["total_size"]),
 		PinsWithSize:     stats["pins_with_size"],
 		UsersWithStorage: stats["users_with_storage"],
+	})
+}
+
+// PinNeedingRecalc represents a pin that may need size recalculation
+type PinNeedingRecalc struct {
+	RequestID   string `json:"request_id"`
+	CID         string `json:"cid"`
+	Username    string `json:"username"`
+	CurrentSize int64  `json:"current_size"`
+	Status      string `json:"status"`
+}
+
+// PinsNeedingRecalcResponse represents pins that need size recalculation
+type PinsNeedingRecalcResponse struct {
+	Count int64              `json:"count"`
+	Pins  []PinNeedingRecalc `json:"pins"`
+	Note  string             `json:"note"`
+}
+
+// GetPinsNeedingSizeRecalc returns pins that may need size recalculation
+// GET /admin/pins/needs-size-recalc?limit=100&include_all=false
+// By default, returns pins with size=0. Use include_all=true to include all pins.
+// This is useful after switching from block size to cumulative DAG size.
+func (c *AdminAPIController) GetPinsNeedingSizeRecalc(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Parse query params
+	limit := 100
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	includeAll := r.URL.Query().Get("include_all") == "true"
+
+	// Get pins that need recalculation
+	dbPins, err := c.db.GetPinsNeedingSizeRecalc(ctx, limit, includeAll)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to get pins: "+err.Error())
+		return
+	}
+
+	// Convert to response type
+	pins := make([]PinNeedingRecalc, len(dbPins))
+	for i, p := range dbPins {
+		pins[i] = PinNeedingRecalc{
+			RequestID:   p.RequestID,
+			CID:         p.CID,
+			Username:    p.Username,
+			CurrentSize: p.CurrentSize,
+			Status:      p.Status,
+		}
+	}
+
+	note := "Pins with size=0 that need size calculation."
+	if includeAll {
+		note = "All pinned CIDs. Size values may need recalculation if they only reflect root block size instead of cumulative DAG size."
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(PinsNeedingRecalcResponse{
+		Count: int64(len(pins)),
+		Pins:  pins,
+		Note:  note,
 	})
 }
 

@@ -34,10 +34,11 @@ type PinsAPIRouter interface {
 // This interface intended to stay up to date with the openapi yaml used to generate it,
 // while the service implementation can be ignored with the .openapi-generator-ignore file
 // and updated with the logic required for the API.
-type PinsAPIServicer interface { 
+type PinsAPIServicer interface {
 	AddPin(context.Context, Pin) (ImplResponse, error)
 	DeletePinByRequestId(context.Context, string) (ImplResponse, error)
 	GetPinByRequestId(context.Context, string) (ImplResponse, error)
+	GetPinNodes(context.Context, string) (ImplResponse, error)
 	GetPins(context.Context, []string, string, TextMatchingStrategy, []Status, time.Time, time.Time, int32, map[string]string) (ImplResponse, error)
 	ReplacePinByRequestId(context.Context, string, Pin) (ImplResponse, error)
 }

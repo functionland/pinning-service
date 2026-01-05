@@ -157,6 +157,21 @@ export default function Pins() {
   const [settingUpKey, setSettingUpKey] = useState(false);
   const [pendingDecryptPin, setPendingDecryptPin] = useState<Pin | null>(null);
 
+  // Nodes modal state
+  const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
+  const [nodesModalData, setNodesModalData] = useState<{
+    requestId: string;
+    cid: string;
+    nodes: Array<{
+      peer_id: string;
+      peer_name?: string;
+      status: string;
+      timestamp?: string;
+      error?: string;
+      attempt_count?: number;
+    }>;
+  } | null>(null);
+
   // Load tab data on tab change (lazy loading)
   useEffect(() => {
     if (!loadedTabs.has(activeTab)) {
@@ -688,6 +703,29 @@ export default function Pins() {
     }
   };
 
+  const fetchPinNodes = async (requestId: string) => {
+    setLoadingNodes(prev => new Set(prev).add(requestId));
+    try {
+      const res = await fetch(`/api/pins/${requestId}/nodes`, {
+        credentials: 'include'
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || 'Failed to get pin nodes');
+      }
+      const data = await res.json();
+      setNodesModalData(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to get pin nodes');
+    } finally {
+      setLoadingNodes(prev => {
+        const next = new Set(prev);
+        next.delete(requestId);
+        return next;
+      });
+    }
+  };
+
   const addPin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCid.trim()) return;
@@ -995,6 +1033,95 @@ export default function Pins() {
         </div>
       )}
 
+      {/* Cluster nodes modal */}
+      {nodesModalData && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+            <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900">{t.pins.clusterNodes || 'Cluster Nodes'}</h2>
+                <p className="text-sm text-gray-500 mt-1 font-mono truncate max-w-md" title={nodesModalData.cid}>
+                  CID: {nodesModalData.cid.substring(0, 20)}...{nodesModalData.cid.substring(nodesModalData.cid.length - 8)}
+                </p>
+              </div>
+              <button
+                onClick={() => setNodesModalData(null)}
+                className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto flex-1">
+              {nodesModalData.nodes.length === 0 ? (
+                <div className="text-center py-8 text-gray-500">
+                  <svg className="w-12 h-12 mx-auto mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+                  </svg>
+                  <p>{t.pins.noNodes || 'No cluster nodes found for this pin.'}</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {nodesModalData.nodes.map((node, index) => (
+                    <div
+                      key={node.peer_id || index}
+                      className={`p-4 rounded-lg border ${
+                        node.status === 'pinned' ? 'border-green-200 bg-green-50' :
+                        node.status === 'pinning' ? 'border-yellow-200 bg-yellow-50' :
+                        node.status === 'queued' ? 'border-blue-200 bg-blue-50' :
+                        node.error ? 'border-red-200 bg-red-50' :
+                        'border-gray-200 bg-gray-50'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center space-x-2">
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                              node.status === 'pinned' ? 'bg-green-100 text-green-800' :
+                              node.status === 'pinning' ? 'bg-yellow-100 text-yellow-800' :
+                              node.status === 'queued' ? 'bg-blue-100 text-blue-800' :
+                              node.error ? 'bg-red-100 text-red-800' :
+                              'bg-gray-100 text-gray-800'
+                            }`}>
+                              {node.status}
+                            </span>
+                            {node.peer_name && (
+                              <span className="text-sm font-medium text-gray-900">{node.peer_name}</span>
+                            )}
+                          </div>
+                          <p className="text-xs text-gray-500 font-mono mt-1 truncate" title={node.peer_id}>
+                            {node.peer_id}
+                          </p>
+                          {node.timestamp && (
+                            <p className="text-xs text-gray-400 mt-1">
+                              {t.pins.lastUpdated || 'Updated'}: {new Date(node.timestamp).toLocaleString()}
+                            </p>
+                          )}
+                          {node.error && (
+                            <p className="text-xs text-red-600 mt-1">
+                              {t.pins.error || 'Error'}: {node.error}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="p-4 border-t border-gray-100 flex justify-end">
+              <button
+                onClick={() => setNodesModalData(null)}
+                className="btn-secondary"
+              >
+                {t.pins.close || 'Close'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Pins table */}
       {loading && !data ? (
         <div className="card">
@@ -1128,14 +1255,31 @@ export default function Pins() {
                             className="p-2 text-gray-500 hover:text-primary-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
                             title={t.pins.refresh || 'Refresh status'}
                           >
-                            <svg 
-                              className={`w-4 h-4 ${refreshingPins.has(pin.request_id) ? 'animate-spin' : ''}`} 
-                              fill="none" 
-                              stroke="currentColor" 
+                            <svg
+                              className={`w-4 h-4 ${refreshingPins.has(pin.request_id) ? 'animate-spin' : ''}`}
+                              fill="none"
+                              stroke="currentColor"
                               viewBox="0 0 24 24"
                             >
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                             </svg>
+                          </button>
+                          {/* View Nodes button */}
+                          <button
+                            onClick={() => fetchPinNodes(pin.request_id)}
+                            disabled={loadingNodes.has(pin.request_id)}
+                            className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
+                            title={t.pins.viewNodes || 'View cluster nodes'}
+                          >
+                            {loadingNodes.has(pin.request_id) ? (
+                              <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                              </svg>
+                            ) : (
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+                              </svg>
+                            )}
                           </button>
                         </div>
                       </td>

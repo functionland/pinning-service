@@ -67,6 +67,11 @@ func (c *PinsAPIController) Routes() Routes {
 			"/pins/{requestid}",
 			c.GetPinByRequestId,
 		},
+		"GetPinNodes": Route{
+			strings.ToUpper("Get"),
+			"/pins/{requestid}/nodes",
+			c.GetPinNodes,
+		},
 		"GetPins": Route{
 			strings.ToUpper("Get"),
 			"/pins",
@@ -140,6 +145,22 @@ func (c *PinsAPIController) GetPinByRequestId(w http.ResponseWriter, r *http.Req
 		return
 	}
 	// If no error, encode the body and the result code
+	_ = EncodeJSONResponse(result.Body, &result.Code, w)
+}
+
+// GetPinNodes - Get cluster nodes where a pin is stored
+func (c *PinsAPIController) GetPinNodes(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	requestidParam := params["requestid"]
+	if requestidParam == "" {
+		c.errorHandler(w, r, &RequiredError{"requestid"}, nil)
+		return
+	}
+	result, err := c.service.GetPinNodes(r.Context(), requestidParam)
+	if err != nil {
+		c.errorHandler(w, r, err, &result)
+		return
+	}
 	_ = EncodeJSONResponse(result.Body, &result.Code, w)
 }
 

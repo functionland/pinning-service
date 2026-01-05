@@ -966,52 +966,61 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'Invalid share ID format' });
       }
 
-      // Try to fetch from Fula API share content endpoint
-      const fulaShareUrl = `http://127.0.0.1:6000/shares/${shareId}/content?bucket=${encodeURIComponent(bucket as string)}&path=${encodeURIComponent(path as string)}`;
+      console.log('[webui] Fetching share content for:', shareId, 'bucket:', bucket, 'path:', path);
 
+      // Step 1: Get the share metadata to find the CID
+      // Try Fula API first to get share info
       try {
-        const response = await httpGet(fulaShareUrl);
+        const shareInfoUrl = `http://127.0.0.1:6000/shares/${shareId}`;
+        const shareInfoResponse = await httpGet(shareInfoUrl);
 
-        if (response.status === 200) {
-          // Stream the content back
-          const contentType = response.headers['content-type'] || 'application/octet-stream';
-          res.setHeader('Content-Type', contentType);
+        if (shareInfoResponse.status === 200 && shareInfoResponse.data?.cid) {
+          const cid = shareInfoResponse.data.cid;
+          console.log('[webui] Found CID from share metadata:', cid);
 
-          if (response.data instanceof Buffer) {
-            return res.send(response.data);
-          } else if (typeof response.data === 'string') {
-            return res.send(Buffer.from(response.data));
+          // Fetch content by CID from IPFS gateway
+          const gatewayUrl = `https://ipfs.cloud.fx.land/gateway/${cid}`;
+          console.log('[webui] Fetching from gateway:', gatewayUrl);
+
+          const contentResponse = await fetch(gatewayUrl);
+
+          if (contentResponse.ok) {
+            const buffer = Buffer.from(await contentResponse.arrayBuffer());
+            res.setHeader('Content-Type', 'application/octet-stream');
+            return res.send(buffer);
           } else {
-            return res.send(response.data);
+            console.error('[webui] Gateway fetch failed:', contentResponse.status);
+            return res.status(contentResponse.status).json({ error: 'Content not found on gateway' });
           }
-        } else if (response.status === 404) {
-          return res.status(404).json({ error: 'Shared content not found' });
-        } else if (response.status === 403) {
-          return res.status(403).json({ error: 'Share has been revoked or expired' });
-        } else {
-          return res.status(response.status).json({ error: 'Failed to fetch shared content' });
+        } else if (shareInfoResponse.status === 404) {
+          return res.status(404).json({ error: 'Share not found' });
+        } else if (shareInfoResponse.status === 403) {
+          return res.status(403).json({ error: 'Share has been revoked' });
         }
       } catch (apiError) {
-        // If Fula API is not available, try direct gateway access
-        console.warn('[webui] Fula share API not available, trying gateway:', apiError);
+        console.warn('[webui] Fula API not available:', apiError);
+      }
 
-        // Fallback: Try IPFS gateway directly with proper path
-        const sanitizedPath = (path as string).startsWith('/') ? (path as string).slice(1) : path;
-        const gatewayUrl = `http://127.0.0.1:6000/gateway/${bucket}/${sanitizedPath}`;
+      // Fallback: Try to fetch directly from IPFS gateway using bucket/path
+      // This works if the Fula gateway supports bucket/path format
+      const sanitizedPath = (path as string).startsWith('/') ? (path as string).slice(1) : path;
+      const fallbackUrl = `https://ipfs.cloud.fx.land/gateway/${bucket}/${sanitizedPath}`;
+      console.log('[webui] Trying fallback gateway URL:', fallbackUrl);
 
-        try {
-          const gatewayResponse = await httpGet(gatewayUrl, {}, { responseType: 'arraybuffer' });
+      try {
+        const fallbackResponse = await fetch(fallbackUrl);
 
-          if (gatewayResponse.status === 200) {
-            res.setHeader('Content-Type', 'application/octet-stream');
-            return res.send(Buffer.from(gatewayResponse.data));
-          } else {
-            return res.status(gatewayResponse.status).json({ error: 'Content not found' });
-          }
-        } catch (gatewayError) {
-          console.error('[webui] Gateway fetch failed:', gatewayError);
-          return res.status(500).json({ error: 'Failed to fetch content from gateway' });
+        if (fallbackResponse.ok) {
+          const buffer = Buffer.from(await fallbackResponse.arrayBuffer());
+          res.setHeader('Content-Type', 'application/octet-stream');
+          return res.send(buffer);
+        } else {
+          console.error('[webui] Fallback fetch failed:', fallbackResponse.status);
+          return res.status(fallbackResponse.status).json({ error: 'Content not found' });
         }
+      } catch (fetchError) {
+        console.error('[webui] Fallback fetch error:', fetchError);
+        return res.status(500).json({ error: 'Failed to fetch content' });
       }
     } catch (error) {
       console.error('[webui] Error fetching shared content:', error);

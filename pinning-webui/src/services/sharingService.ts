@@ -36,6 +36,16 @@ export interface SharePayload {
 }
 
 /**
+ * Snapshot binding - ties a share to a specific content version
+ */
+export interface SnapshotBinding {
+  contentHash: string;
+  size: number;
+  modifiedAt: number;
+  storageKey?: string;  // IPFS CID or object key
+}
+
+/**
  * Token data embedded in payload
  */
 export interface ShareTokenData {
@@ -45,11 +55,15 @@ export interface ShareTokenData {
   ephemeralPublicKey: string;   // Base64 - REQUIRED for ECDH key unwrapping
   wrappedDek: string;           // Base64 encrypted DEK
   pathScope?: string;
+  bucket?: string;
   permissions?: 'readOnly' | 'readWrite' | 'full';
-  issuedAt?: string;
+  createdAt?: string;
   expiresAt?: string;
   shareType?: 'recipient' | 'publicLink' | 'passwordLink';
   shareMode?: 'temporal' | 'snapshot';
+  snapshotBinding?: SnapshotBinding;  // Contains CID for snapshot mode
+  fileName?: string;
+  contentType?: string;
 }
 
 /**
@@ -57,11 +71,13 @@ export interface ShareTokenData {
  */
 export interface ProcessedShareData {
   shareId: string;     // Share ID for content fetching
+  cid?: string;        // IPFS CID (from snapshotBinding.storageKey)
   bucket: string;
   path: string;
   name: string;
   dek: CryptoKey;      // Decrypted data encryption key
   expiresAt?: string;
+  contentType?: string;
 }
 
 /**
@@ -219,6 +235,9 @@ export async function processSharePayload(
   payload: SharePayload,
   shareId: string
 ): Promise<ProcessedShareData> {
+  // Extract CID from snapshotBinding if available (for snapshot mode)
+  const cid = payload.t?.snapshotBinding?.storageKey;
+
   console.log('[processSharePayload] Payload:', {
     v: payload.v,
     hasSk: !!payload.sk,
@@ -227,8 +246,13 @@ export async function processSharePayload(
     path: payload.k,
     label: payload.l,
     tokenId: payload.t?.id,
+    shareMode: payload.t?.shareMode,
+    hasSnapshotBinding: !!payload.t?.snapshotBinding,
+    cid: cid,
     hasWrappedDek: !!payload.t?.wrappedDek,
     hasEphemeralPublicKey: !!payload.t?.ephemeralPublicKey,
+    fileName: payload.t?.fileName,
+    contentType: payload.t?.contentType,
   });
 
   if (!payload.sk) {
@@ -279,11 +303,13 @@ export async function processSharePayload(
 
   return {
     shareId,
+    cid,
     bucket: payload.b,
     path: payload.k,
-    name: payload.l || extractFilename(payload.k) || 'shared_file',
+    name: payload.t.fileName || payload.l || extractFilename(payload.k) || 'shared_file',
     dek,
     expiresAt: payload.t.expiresAt,
+    contentType: payload.t.contentType,
   };
 }
 
@@ -293,14 +319,21 @@ export async function processSharePayload(
 export async function fetchSharedContent(
   shareData: ProcessedShareData
 ): Promise<{ data: Uint8Array; mimeType: string; filename: string }> {
-  // Use our backend proxy endpoint to avoid CORS issues
-  const params = new URLSearchParams({
-    bucket: shareData.bucket,
-    path: shareData.path,
-  });
-  const url = `/api/share/${shareData.shareId}/content?${params}`;
+  let url: string;
 
-  console.log('[fetchSharedContent] Fetching:', url);
+  // If we have a CID, fetch directly from IPFS gateway (like Pins.tsx does)
+  if (shareData.cid) {
+    url = `https://ipfs.cloud.fx.land/gateway/${shareData.cid}`;
+    console.log('[fetchSharedContent] Fetching by CID:', url);
+  } else {
+    // Fallback: Use our backend proxy endpoint
+    const params = new URLSearchParams({
+      bucket: shareData.bucket,
+      path: shareData.path,
+    });
+    url = `/api/share/${shareData.shareId}/content?${params}`;
+    console.log('[fetchSharedContent] Fetching via backend proxy:', url);
+  }
 
   const response = await fetch(url);
 
@@ -316,9 +349,9 @@ export async function fetchSharedContent(
   const decryptedContent = await decrypt(encryptedData, shareData.dek);
   console.log('[fetchSharedContent] Decrypted content length:', decryptedContent.length);
 
-  // Detect MIME type
-  const mimeType = detectMimeType(decryptedContent);
-  console.log('[fetchSharedContent] Detected MIME type:', mimeType);
+  // Use contentType from share data if available, otherwise detect
+  const mimeType = shareData.contentType || detectMimeType(decryptedContent);
+  console.log('[fetchSharedContent] MIME type:', mimeType);
 
   // Get filename
   const filename = shareData.name || `shared_file${getExtensionFromMimeType(mimeType)}`;

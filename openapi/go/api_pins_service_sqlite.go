@@ -93,17 +93,13 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 		pinCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		err := s.pinToCluster(pinCtx, cid, name)
-		log.Printf("DEBUG: pinToCluster returned for CID %s, err=%v", cid, err)
-		if err != nil {
+		if err := s.pinToCluster(pinCtx, cid, name); err != nil {
 			log.Printf("Warning: failed to pin to cluster: %v", err)
 			// Update status to failed in DB
 			s.db.UpdatePinStatusAndSize(pinCtx, requestId, "failed", 0)
 		} else {
-			log.Printf("DEBUG: entering else block for CID %s", cid)
 			// Update status to pinning
 			s.db.UpdatePinStatusAndSize(pinCtx, requestId, "pinning", 0)
-			log.Printf("DEBUG: after UpdatePinStatusAndSize for CID %s", cid)
 
 			// Calculate cumulative DAG size after cluster pinning succeeds
 			sizeCtx, sizeCancel := context.WithTimeout(context.Background(), 60*time.Second)

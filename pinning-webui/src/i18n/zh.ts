@@ -7,6 +7,7 @@ export const zh: Translations = {
     signIn: '登录以继续',
     terms: '登录即表示您同意我们的服务条款和隐私政策。您的电子邮件将用作账户标识符。',
     totalStored: 'FULA 上存储的总数据',
+    totalPins: '总固定数',
     apiKeys: 'API 密钥',
     apiKeysDesc: '安全访问',
     pinCids: '固定 CID',

@@ -7,6 +7,7 @@ export const hi: Translations = {
     signIn: 'जारी रखने के लिए साइन इन करें',
     terms: 'साइन इन करके, आप हमारी सेवा की शर्तों और गोपनीयता नीति से सहमत हैं।',
     totalStored: 'FULA पर संग्रहीत कुल डेटा',
+    totalPins: 'कुल पिन',
     apiKeys: 'API कुंजियाँ',
     apiKeysDesc: 'सुरक्षित पहुँच',
     pinCids: 'CID पिन करें',

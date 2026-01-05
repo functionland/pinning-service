@@ -7,6 +7,7 @@ export const ar: Translations = {
     signIn: 'تسجيل الدخول للمتابعة',
     terms: 'بتسجيل الدخول، فإنك توافق على شروط الخدمة وسياسة الخصوصية.',
     totalStored: 'إجمالي البيانات المخزنة على FULA',
+    totalPins: 'إجمالي التثبيتات',
     apiKeys: 'مفاتيح API',
     apiKeysDesc: 'وصول آمن',
     pinCids: 'تثبيت CIDs',

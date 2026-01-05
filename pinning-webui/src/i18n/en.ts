@@ -7,6 +7,7 @@ export const en: Translations = {
     signIn: 'Sign in to continue',
     terms: 'By signing in, you agree to our Terms of Service and Privacy Policy. Your email will be used as your account identifier.',
     totalStored: 'Total data stored on FULA',
+    totalPins: 'Total Pins',
     apiKeys: 'API Keys',
     apiKeysDesc: 'Secure access',
     pinCids: 'Pin CIDs',

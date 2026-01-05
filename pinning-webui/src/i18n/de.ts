@@ -7,6 +7,7 @@ export const de: Translations = {
     signIn: 'Anmelden um fortzufahren',
     terms: 'Mit der Anmeldung stimmen Sie unseren Nutzungsbedingungen und Datenschutzrichtlinien zu.',
     totalStored: 'Gesamte auf FULA gespeicherte Daten',
+    totalPins: 'Gesamte Pins',
     apiKeys: 'API-Schlüssel',
     apiKeysDesc: 'Sicherer Zugang',
     pinCids: 'CIDs pinnen',

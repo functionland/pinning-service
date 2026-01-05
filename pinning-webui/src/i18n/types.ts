@@ -25,6 +25,7 @@ export interface Translations {
     signIn: string;
     terms: string;
     totalStored: string;
+    totalPins: string;
     apiKeys: string;
     apiKeysDesc: string;
     pinCids: string;

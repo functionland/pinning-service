@@ -7,6 +7,7 @@ export const fa: Translations = {
     signIn: 'برای ادامه وارد شوید',
     terms: 'با ورود، شما با شرایط خدمات و سیاست حریم خصوصی ما موافقت می‌کنید.',
     totalStored: 'کل داده ذخیره شده در FULA',
+    totalPins: 'کل پین‌ها',
     apiKeys: 'کلیدهای API',
     apiKeysDesc: 'دسترسی امن',
     pinCids: 'پین CIDها',

@@ -7,6 +7,7 @@ export const es: Translations = {
     signIn: 'Iniciar sesión para continuar',
     terms: 'Al iniciar sesión, acepta nuestros Términos de Servicio y Política de Privacidad.',
     totalStored: 'Datos totales almacenados en FULA',
+    totalPins: 'Pins Totales',
     apiKeys: 'Claves API',
     apiKeysDesc: 'Acceso seguro',
     pinCids: 'Fijar CIDs',

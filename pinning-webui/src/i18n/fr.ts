@@ -7,6 +7,7 @@ export const fr: Translations = {
     signIn: 'Connectez-vous pour continuer',
     terms: 'En vous connectant, vous acceptez nos Conditions d\'Utilisation et Politique de Confidentialité.',
     totalStored: 'Données totales stockées sur FULA',
+    totalPins: 'Épingles Totales',
     apiKeys: 'Clés API',
     apiKeysDesc: 'Accès sécurisé',
     pinCids: 'Épingler CIDs',

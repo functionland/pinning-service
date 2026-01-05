@@ -741,101 +741,148 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // ============ Shares and Playlists Endpoints ============
+  // FxFiles stores data in S3-compatible buckets (encrypted):
+  // - Playlists: playlists/user-playlists/{playlistId}.json
+  // - Outgoing Shares: fula-metadata/.fula/shares/{hashedUserId}.json.enc
+  // - Accepted Shares: NOT in cloud (device-only for privacy)
+
+  const S3_GATEWAY = process.env.S3_GATEWAY_URL || 'https://ipfs.cloud.fx.land';
+
+  // Helper: Derive encryption key (matches FxFiles PBKDF2)
+  async function deriveEncryptionKey(googleUserId: string, email: string): Promise<Buffer> {
+    const crypto = await import('crypto');
+    const combinedId = `google:${googleUserId}`;
+    const salt = `fula-files-v1:${email}`;
+    return crypto.pbkdf2Sync(combinedId, salt, 100000, 32, 'sha256');
+  }
+
+  // Helper: AES-256-GCM decryption (FxFiles format: nonce[12] + tag[16] + ciphertext)
+  async function decryptData(encryptedData: Buffer, key: Buffer): Promise<Buffer> {
+    const crypto = await import('crypto');
+    if (encryptedData.length < 28) {
+      throw new Error('Invalid encrypted data: too short');
+    }
+    const nonce = encryptedData.subarray(0, 12);
+    const tag = encryptedData.subarray(12, 28);
+    const ciphertext = encryptedData.subarray(28);
+
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, nonce);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  }
+
+  // Helper: Compute hashed user ID for shares (base64url(SHA256(publicKey)).substring(0, 16))
+  // Note: For now, we use Google user ID hash since we don't have the public key
+  async function computeHashedUserId(googleUserId: string): Promise<string> {
+    const crypto = await import('crypto');
+    const hash = crypto.createHash('sha256').update(`google:${googleUserId}`).digest();
+    // Convert to base64url and take first 16 chars
+    const base64url = hash.toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+    return base64url.substring(0, 16);
+  }
 
   // Get shares with me (items others have shared with the current user)
-  app.get('/api/shares/with-me', requireAuth, async (req: Request, res: Response) => {
-    try {
-      const page = parseInt(req.query.page as string) || 1;
-      const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
-
-      const keys = dbOps.getApiKeys(req.session.user!.email);
-      if (!keys || keys.length === 0) {
-        return res.status(400).json({ error: 'No API key found' });
-      }
-
-      // Call Fula API to get shares with the user
-      // The Fula API endpoint for shares received by user
-      const fulaApiUrl = `http://127.0.0.1:6000/shares/received?page=${page}&limit=${limit}`;
-
-      try {
-        const response = await httpGet(fulaApiUrl, {
-          'Authorization': `Bearer ${keys[0].key_id}`
-        });
-
-        if (response.status === 200) {
-          const data = JSON.parse(response.data);
-          return res.json({
-            shares: data.shares || [],
-            total: data.total || 0,
-            page: data.page || page,
-            limit: data.limit || limit,
-            totalPages: data.totalPages || Math.ceil((data.total || 0) / limit)
-          });
-        } else if (response.status === 404) {
-          // Endpoint not implemented yet or no shares
-          return res.json({
-            shares: [],
-            total: 0,
-            page,
-            limit,
-            totalPages: 0
-          });
-        } else {
-          console.error('[webui] Error fetching shares with me:', response.status, response.data);
-          return res.status(response.status).json({ error: 'Failed to fetch shared items' });
-        }
-      } catch (apiError) {
-        // Fula API not available, return empty
-        console.warn('[webui] Fula API not available for shares/received:', apiError);
-        return res.json({
-          shares: [],
-          total: 0,
-          page,
-          limit,
-          totalPages: 0
-        });
-      }
-    } catch (error) {
-      console.error('[webui] Error in shares/with-me:', error);
-      res.status(500).json({ error: 'Failed to fetch shared items' });
-    }
+  // Note: Accepted shares are NOT synced to cloud by design (privacy)
+  // Users must re-accept share links on web or export from app
+  app.get('/api/shares/with-me', requireAuth, async (_req: Request, res: Response) => {
+    // Accepted shares are stored only on device, not in cloud
+    // Return empty with explanation
+    return res.json({
+      shares: [],
+      total: 0,
+      page: 1,
+      limit: 20,
+      totalPages: 0,
+      note: 'Accepted shares are stored on device only. Paste a share link to access shared content.'
+    });
   });
 
   // Get shares by me (items the current user has shared with others)
+  // FxFiles stores outgoing shares at: fula-metadata/.fula/shares/{hashedUserId}.json.enc
   app.get('/api/shares/by-me', requireAuth, async (req: Request, res: Response) => {
     try {
-      const keys = dbOps.getApiKeys(req.session.user!.email);
-      if (!keys || keys.length === 0) {
-        return res.status(400).json({ error: 'No API key found' });
-      }
+      const user = req.session.user!;
+      const googleUserId = user.id;
+      const email = user.email;
 
-      // Try to fetch from Fula API first
-      // The shares file is at: fula-metadata/.fula/shares/{userId}.json.enc
-      const userId = req.session.user!.id;
-      const fulaApiUrl = `http://127.0.0.1:6000/shares/sent`;
+      // Compute hashed user ID for the shares file path
+      const hashedUserId = await computeHashedUserId(googleUserId);
 
-      try {
-        const response = await httpGet(fulaApiUrl, {
-          'Authorization': `Bearer ${keys[0].key_id}`
-        });
+      console.log('[webui] Fetching outgoing shares for user:', email);
+      console.log('[webui] Hashed user ID:', hashedUserId);
 
-        if (response.status === 200) {
-          const data = JSON.parse(response.data);
-          return res.json({
-            shares: data.shares || []
-          });
-        } else if (response.status === 404) {
-          // No shares yet
-          return res.json({ shares: [] });
-        } else {
-          console.error('[webui] Error fetching shares by me:', response.status, response.data);
-          return res.status(response.status).json({ error: 'Failed to fetch outgoing shares' });
+      // Derive encryption key
+      const encryptionKey = await deriveEncryptionKey(googleUserId, email);
+
+      // Try multiple possible URL formats for the shares file
+      const sharesUrls = [
+        `${S3_GATEWAY}/fula-metadata/.fula/shares/${hashedUserId}.json.enc`,
+        `${S3_GATEWAY}/fula-metadata/.fula/shares/${hashedUserId}.json`,
+        `${S3_GATEWAY}/.fula/shares/${hashedUserId}.json.enc`,
+        `${S3_GATEWAY}/shares/${hashedUserId}.json.enc`,
+      ];
+
+      for (const sharesUrl of sharesUrls) {
+        try {
+          console.log('[webui] Trying shares URL:', sharesUrl);
+          const response = await fetch(sharesUrl);
+
+          if (response.status === 404) {
+            console.log('[webui] Not found:', sharesUrl);
+            continue;
+          }
+
+          if (!response.ok) {
+            console.warn('[webui] Error fetching shares:', response.status, sharesUrl);
+            continue;
+          }
+
+          const encryptedData = Buffer.from(await response.arrayBuffer());
+          console.log('[webui] Fetched shares data, size:', encryptedData.length);
+
+          try {
+            // Try decrypting
+            const decryptedData = await decryptData(encryptedData, encryptionKey);
+            const sharesJson = JSON.parse(decryptedData.toString('utf8'));
+
+            console.log('[webui] Decrypted shares, count:', sharesJson.shares?.length || 0);
+
+            // Handle different response formats
+            if (Array.isArray(sharesJson.shares)) {
+              return res.json({ shares: sharesJson.shares });
+            } else if (Array.isArray(sharesJson)) {
+              return res.json({ shares: sharesJson });
+            } else {
+              return res.json({ shares: [] });
+            }
+          } catch (decryptError) {
+            // Maybe it's not encrypted, try parsing directly
+            console.warn('[webui] Decrypt failed, trying raw parse:', decryptError);
+            try {
+              const rawData = encryptedData.toString('utf8');
+              const sharesJson = JSON.parse(rawData);
+
+              if (Array.isArray(sharesJson.shares)) {
+                return res.json({ shares: sharesJson.shares });
+              } else if (Array.isArray(sharesJson)) {
+                return res.json({ shares: sharesJson });
+              }
+            } catch (parseError) {
+              console.warn('[webui] Raw parse also failed:', parseError);
+              continue;
+            }
+          }
+        } catch (fetchError) {
+          console.warn('[webui] Fetch error:', sharesUrl, fetchError);
+          continue;
         }
-      } catch (apiError) {
-        // Fula API not available, return empty
-        console.warn('[webui] Fula API not available for shares/sent:', apiError);
-        return res.json({ shares: [] });
       }
+
+      console.log('[webui] No shares file found for user');
+      return res.json({ shares: [] });
     } catch (error) {
       console.error('[webui] Error in shares/by-me:', error);
       res.status(500).json({ error: 'Failed to fetch outgoing shares' });
@@ -843,39 +890,78 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Get user playlists
+  // FxFiles stores playlists in: playlists/user-playlists/{playlistId}.json (encrypted)
+  // There should be a manifest file at: playlists/user-playlists/_index.json.enc
   app.get('/api/playlists', requireAuth, async (req: Request, res: Response) => {
     try {
-      const keys = dbOps.getApiKeys(req.session.user!.email);
-      if (!keys || keys.length === 0) {
-        return res.status(400).json({ error: 'No API key found' });
-      }
+      const user = req.session.user!;
+      const googleUserId = user.id;
+      const email = user.email;
 
-      // Playlists are stored at: playlists/user-playlists/*.json
-      // Try to fetch from Fula API
-      const fulaApiUrl = `http://127.0.0.1:6000/playlists`;
+      console.log('[webui] Fetching playlists for user:', email);
 
-      try {
-        const response = await httpGet(fulaApiUrl, {
-          'Authorization': `Bearer ${keys[0].key_id}`
-        });
+      // Derive encryption key
+      const encryptionKey = await deriveEncryptionKey(googleUserId, email);
+      const hashedUserId = await computeHashedUserId(googleUserId);
 
-        if (response.status === 200) {
-          const data = JSON.parse(response.data);
-          return res.json({
-            playlists: data.playlists || []
-          });
-        } else if (response.status === 404) {
-          // No playlists yet
-          return res.json({ playlists: [] });
-        } else {
-          console.error('[webui] Error fetching playlists:', response.status, response.data);
-          return res.status(response.status).json({ error: 'Failed to fetch playlists' });
+      // Try multiple possible manifest file locations
+      const manifestUrls = [
+        `${S3_GATEWAY}/playlists/user-playlists/_index.json.enc`,
+        `${S3_GATEWAY}/playlists/user-playlists/${hashedUserId}/_index.json.enc`,
+        `${S3_GATEWAY}/playlists/_manifest.json.enc`,
+        `${S3_GATEWAY}/playlists/playlists.json.enc`,
+      ];
+
+      for (const manifestUrl of manifestUrls) {
+        try {
+          console.log('[webui] Trying playlist manifest:', manifestUrl);
+          const manifestResponse = await fetch(manifestUrl);
+
+          if (manifestResponse.ok) {
+            const encryptedData = Buffer.from(await manifestResponse.arrayBuffer());
+            console.log('[webui] Fetched manifest, size:', encryptedData.length);
+
+            try {
+              const decryptedData = await decryptData(encryptedData, encryptionKey);
+              const manifest = JSON.parse(decryptedData.toString('utf8'));
+              console.log('[webui] Decrypted manifest, playlists:', manifest.playlists?.length || 0);
+
+              // Manifest could contain playlists directly or list of playlist IDs
+              if (Array.isArray(manifest.playlists)) {
+                return res.json({ playlists: manifest.playlists });
+              } else if (Array.isArray(manifest)) {
+                return res.json({ playlists: manifest });
+              } else if (manifest.playlistIds) {
+                // Need to fetch each playlist by ID
+                const playlists = [];
+                for (const playlistId of manifest.playlistIds) {
+                  try {
+                    const playlistUrl = `${S3_GATEWAY}/playlists/user-playlists/${playlistId}.json.enc`;
+                    const playlistResponse = await fetch(playlistUrl);
+                    if (!playlistResponse.ok) continue;
+
+                    const encData = Buffer.from(await playlistResponse.arrayBuffer());
+                    const decData = await decryptData(encData, encryptionKey);
+                    playlists.push(JSON.parse(decData.toString('utf8')));
+                  } catch (e) {
+                    console.warn('[webui] Error fetching playlist:', playlistId, e);
+                  }
+                }
+                return res.json({ playlists });
+              }
+            } catch (decryptError) {
+              console.warn('[webui] Error decrypting manifest:', decryptError);
+              continue;
+            }
+          }
+        } catch (fetchError) {
+          console.warn('[webui] Error fetching manifest:', manifestUrl, fetchError);
+          continue;
         }
-      } catch (apiError) {
-        // Fula API not available, return empty
-        console.warn('[webui] Fula API not available for playlists:', apiError);
-        return res.json({ playlists: [] });
       }
+
+      console.log('[webui] No playlist manifest found, returning empty');
+      return res.json({ playlists: [] });
     } catch (error) {
       console.error('[webui] Error in playlists:', error);
       res.status(500).json({ error: 'Failed to fetch playlists' });

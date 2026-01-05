@@ -4,12 +4,12 @@ import { useLanguage } from '../context/LanguageContext';
 import {
   parseCurrentShareUrl,
   fetchSharedContent,
-  decryptSharePayload,
+  processSharePayload,
   getViewerType,
   createBlobUrl,
   revokeBlobUrl,
   type SharePayload,
-  type DecryptedShareData,
+  type ProcessedShareData,
   type ViewerType,
 } from '../services/sharingService';
 import { downloadBlob } from '../services/encryptionService';
@@ -33,7 +33,7 @@ interface ViewState {
   error: string | null;
   needsPassword: boolean;
   payload: SharePayload | null;
-  decryptedData: DecryptedShareData | null;
+  shareData: ProcessedShareData | null;
   expiresAt: string | null;
   content: {
     data: Uint8Array;
@@ -53,7 +53,7 @@ export default function View() {
     error: null,
     needsPassword: false,
     payload: null,
-    decryptedData: null,
+    shareData: null,
     expiresAt: null,
     content: null,
   });
@@ -79,40 +79,31 @@ export default function View() {
 
         const { payload } = parsed;
 
-        // Check if password-protected (payload.p is boolean in FxFiles format)
-        if (payload.p) {
+        // Check if we have the secret key (sk) for public links
+        if (!payload.sk) {
+          // TODO: Handle password-protected links (would need different flow)
           setState(s => ({
             ...s,
             loading: false,
-            needsPassword: true,
-            payload: payload,
-          }));
-          return;
-        }
-
-        // Public link - decrypt automatically using the key in payload
-        if (!payload.k) {
-          setState(s => ({
-            ...s,
-            loading: false,
-            error: 'Invalid share link. Missing decryption key.',
+            error: 'Invalid share link. Missing secret key.',
           }));
           return;
         }
 
         try {
-          const decryptedData = await decryptSharePayload(payload);
+          // Process the payload and unwrap the DEK
+          const shareData = await processSharePayload(payload);
 
           setState(s => ({
             ...s,
             payload: payload,
-            decryptedData,
-            expiresAt: decryptedData.expiresAt || null,
+            shareData,
+            expiresAt: shareData.expiresAt || null,
           }));
 
           // Check if expired
-          if (decryptedData.expiresAt) {
-            const expiry = new Date(decryptedData.expiresAt).getTime();
+          if (shareData.expiresAt) {
+            const expiry = new Date(shareData.expiresAt).getTime();
             if (expiry < Date.now()) {
               setState(s => ({
                 ...s,
@@ -123,13 +114,14 @@ export default function View() {
             }
           }
 
-          loadContent(payload, decryptedData);
+          // Fetch and decrypt the content
+          await loadContent(shareData);
         } catch (error) {
           console.error('[View] Decryption error:', error);
           setState(s => ({
             ...s,
             loading: false,
-            error: 'Failed to decrypt share link.',
+            error: error instanceof Error ? error.message : 'Failed to decrypt share link.',
           }));
         }
       } catch (error) {
@@ -146,19 +138,19 @@ export default function View() {
   }, [shareId]);
 
   // Load and decrypt content
-  const loadContent = useCallback(async (payload: SharePayload, decryptedData: DecryptedShareData, pwd?: string) => {
+  const loadContent = useCallback(async (shareData: ProcessedShareData) => {
     setState(s => ({ ...s, loading: true, error: null }));
 
     try {
-      const { data, mimeType, filename } = await fetchSharedContent(payload, decryptedData, pwd);
+      const { data, mimeType, filename } = await fetchSharedContent(shareData);
       const blobUrl = createBlobUrl(data, mimeType);
 
       setState(s => ({
         ...s,
         loading: false,
         needsPassword: false,
-        decryptedData,
-        expiresAt: decryptedData.expiresAt || null,
+        shareData,
+        expiresAt: shareData.expiresAt || null,
         content: { data, mimeType, filename, blobUrl },
       }));
     } catch (error) {
@@ -171,42 +163,14 @@ export default function View() {
     }
   }, []);
 
-  // Handle password submission
+  // Handle password submission (for password-protected links - not yet implemented)
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    if (!password.trim() || !state.payload) return;
-
-    setDecrypting(true);
-
-    try {
-      // Decrypt the payload with password
-      const decryptedData = await decryptSharePayload(state.payload, password);
-
-      // Check if expired
-      if (decryptedData.expiresAt) {
-        const expiry = new Date(decryptedData.expiresAt).getTime();
-        if (expiry < Date.now()) {
-          setState(s => ({
-            ...s,
-            loading: false,
-            error: 'This share link has expired.',
-          }));
-          setDecrypting(false);
-          return;
-        }
-      }
-
-      await loadContent(state.payload, decryptedData, password);
-    } catch (error) {
-      console.error('[View] Password decryption error:', error);
-      setState(s => ({
-        ...s,
-        error: 'Incorrect password or decryption failed.',
-      }));
-    } finally {
-      setDecrypting(false);
-    }
+    // TODO: Implement password-protected link handling
+    setState(s => ({
+      ...s,
+      error: 'Password-protected links are not yet supported.',
+    }));
   };
 
   // Handle download

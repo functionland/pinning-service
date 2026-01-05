@@ -18,34 +18,48 @@ const KEY_LENGTH_BITS = 256;
 /**
  * Share payload structure (in URL fragment)
  *
- * FxFiles uses a compact format:
+ * FxFiles format:
  * - v: version number
- * - p: boolean - is password protected
- * - s: salt (base64) - for password-protected links
- * - k: key (base64) - for public links (decryption key)
- * - e: encrypted data (base64) - contains token info
- *
- * When decrypted, 'e' contains the actual share details
+ * - t: token object with share metadata
+ * - sk: secret key (base64) - for decryption
+ * - b: bucket name
+ * - k: file key/path
+ * - l: label/name
  */
 export interface SharePayload {
   v: number;           // Version
-  p: boolean;          // Is password-protected
-  s?: string;          // Salt (base64) - for password links
-  k?: string;          // Link secret key (base64) - for public links
-  e: string;           // Encrypted payload (base64)
+  t: ShareTokenData;   // Token object (not JSON string)
+  sk?: string;         // Secret key (base64) - for decryption
+  b: string;           // Bucket name
+  k: string;           // File key/path
+  l?: string;          // Label/name
 }
 
 /**
- * Decrypted share data (inside encrypted 'e' field)
+ * Token data embedded in payload
  */
-export interface DecryptedShareData {
-  t?: string;          // Token (JSON string)
-  b?: string;          // Bucket name
-  path?: string;       // File path
-  cid?: string;        // Content CID
-  name?: string;       // File name
-  expiresAt?: string;  // Expiry timestamp
-  dek?: string;        // Data encryption key (base64)
+export interface ShareTokenData {
+  id: string;
+  ownerPublicKey?: string;
+  recipientPublicKey?: string;
+  wrappedDek: string;           // Base64 encrypted DEK
+  pathScope?: string;
+  permissions?: 'readOnly' | 'readWrite' | 'full';
+  issuedAt?: string;
+  expiresAt?: string;
+  shareType?: 'recipient' | 'publicLink' | 'passwordLink';
+  shareMode?: 'temporal' | 'snapshot';
+}
+
+/**
+ * Processed share data for content fetching
+ */
+export interface ProcessedShareData {
+  bucket: string;
+  path: string;
+  name: string;
+  dek: CryptoKey;      // Decrypted data encryption key
+  expiresAt?: string;
 }
 
 /**
@@ -190,90 +204,74 @@ export async function deriveKeyFromPassword(
 }
 
 /**
- * Decrypt share payload (the 'e' field)
- * For public links: uses the 'k' field as key
- * For password links: derives key from password + 's' (salt)
+ * Process share payload and unwrap the DEK
+ *
+ * FxFiles flow:
+ * 1. sk (secret key) is used to decrypt wrappedDek
+ * 2. wrappedDek contains the actual file encryption key
  */
-export async function decryptSharePayload(
-  payload: SharePayload,
-  password?: string
-): Promise<DecryptedShareData> {
-  console.log('[decryptSharePayload] Payload:', {
+export async function processSharePayload(
+  payload: SharePayload
+): Promise<ProcessedShareData> {
+  console.log('[processSharePayload] Payload:', {
     v: payload.v,
-    p: payload.p,
-    hasK: !!payload.k,
-    hasS: !!payload.s,
-    hasE: !!payload.e,
-    kLength: payload.k?.length,
-    sLength: payload.s?.length,
-    eLength: payload.e?.length,
+    hasSk: !!payload.sk,
+    skLength: payload.sk?.length,
+    bucket: payload.b,
+    path: payload.k,
+    label: payload.l,
+    tokenId: payload.t?.id,
+    hasWrappedDek: !!payload.t?.wrappedDek,
   });
 
-  let key: CryptoKey;
-
-  if (payload.p && password) {
-    // Password-protected: derive key from password + salt
-    if (!payload.s) {
-      throw new Error('Password-protected share missing salt');
-    }
-    console.log('[decryptSharePayload] Decoding salt...');
-    const saltBytes = base64ToUint8Array(payload.s);
-    console.log('[decryptSharePayload] Deriving key from password...');
-    key = await deriveKeyFromPassword(password, saltBytes);
-  } else if (payload.k) {
-    // Public link: use the key directly
-    console.log('[decryptSharePayload] Decoding key (k)...');
-    const keyBytes = base64ToUint8Array(payload.k);
-    console.log('[decryptSharePayload] Importing key, length:', keyBytes.length);
-    key = await importKey(keyBytes);
-  } else {
-    throw new Error('Share payload missing decryption key');
+  if (!payload.sk) {
+    throw new Error('Share payload missing secret key (sk)');
   }
 
-  // Decrypt the 'e' field
-  console.log('[decryptSharePayload] Decoding encrypted data (e)...');
-  const encryptedBytes = base64ToUint8Array(payload.e);
-  console.log('[decryptSharePayload] Decrypting, length:', encryptedBytes.length);
-  const decryptedBytes = await decrypt(encryptedBytes, key);
-
-  // Parse the decrypted JSON
-  const decoder = new TextDecoder();
-  const decryptedJson = decoder.decode(decryptedBytes);
-  console.log('[decryptSharePayload] Decrypted JSON:', decryptedJson.substring(0, 200));
-
-  try {
-    return JSON.parse(decryptedJson) as DecryptedShareData;
-  } catch {
-    throw new Error('Failed to parse decrypted share data');
+  if (!payload.t?.wrappedDek) {
+    throw new Error('Share payload missing wrapped DEK');
   }
+
+  // Decode the secret key
+  console.log('[processSharePayload] Decoding secret key (sk)...');
+  const skBytes = base64ToUint8Array(payload.sk);
+  console.log('[processSharePayload] Secret key length:', skBytes.length, 'bytes');
+
+  // Import the secret key
+  const secretKey = await importKey(skBytes);
+
+  // Decrypt the wrapped DEK
+  console.log('[processSharePayload] Decrypting wrapped DEK...');
+  const wrappedDekBytes = base64ToUint8Array(payload.t.wrappedDek);
+  console.log('[processSharePayload] Wrapped DEK length:', wrappedDekBytes.length, 'bytes');
+
+  const dekBytes = await decrypt(wrappedDekBytes, secretKey);
+  console.log('[processSharePayload] Decrypted DEK length:', dekBytes.length, 'bytes');
+
+  // Import the DEK
+  const dek = await importKey(dekBytes);
+
+  return {
+    bucket: payload.b,
+    path: payload.k,
+    name: payload.l || extractFilename(payload.k) || 'shared_file',
+    dek,
+    expiresAt: payload.t.expiresAt,
+  };
 }
 
 /**
  * Fetch and decrypt shared content
  */
 export async function fetchSharedContent(
-  _payload: SharePayload,
-  decryptedData: DecryptedShareData,
-  _password?: string,
+  shareData: ProcessedShareData,
   gatewayUrl: string = 'https://ipfs.cloud.fx.land/gateway'
 ): Promise<{ data: Uint8Array; mimeType: string; filename: string }> {
-  // Get the DEK from decrypted data
-  if (!decryptedData.dek) {
-    throw new Error('Share data missing file encryption key');
-  }
-  const dekBytes = base64ToUint8Array(decryptedData.dek);
-  const dek = await importKey(dekBytes);
+  // Construct the URL - bucket/path format
+  const path = shareData.path.startsWith('/') ? shareData.path.slice(1) : shareData.path;
+  const url = `${gatewayUrl}/${shareData.bucket}/${path}`;
 
-  // Construct the URL - use CID if available, otherwise bucket/path
-  let url: string;
-  if (decryptedData.cid) {
-    url = `${gatewayUrl}/ipfs/${decryptedData.cid}`;
-  } else if (decryptedData.b && decryptedData.path) {
-    const path = decryptedData.path.startsWith('/') ? decryptedData.path.slice(1) : decryptedData.path;
-    url = `${gatewayUrl}/${decryptedData.b}/${path}`;
-  } else {
-    throw new Error('Share data missing content location (CID or path)');
-  }
+  console.log('[fetchSharedContent] Fetching:', url);
 
   const response = await fetch(url);
 
@@ -282,15 +280,17 @@ export async function fetchSharedContent(
   }
 
   const encryptedData = new Uint8Array(await response.arrayBuffer());
-  const decryptedContent = await decrypt(encryptedData, dek);
+  console.log('[fetchSharedContent] Encrypted data length:', encryptedData.length);
+
+  const decryptedContent = await decrypt(encryptedData, shareData.dek);
+  console.log('[fetchSharedContent] Decrypted content length:', decryptedContent.length);
 
   // Detect MIME type
   const mimeType = detectMimeType(decryptedContent);
+  console.log('[fetchSharedContent] Detected MIME type:', mimeType);
 
-  // Get filename from decrypted data or extract from path
-  const filename = decryptedData.name ||
-                   (decryptedData.path ? extractFilename(decryptedData.path) : null) ||
-                   `shared_file${getExtensionFromMimeType(mimeType)}`;
+  // Get filename
+  const filename = shareData.name || `shared_file${getExtensionFromMimeType(mimeType)}`;
 
   return { data: decryptedContent, mimeType, filename };
 }

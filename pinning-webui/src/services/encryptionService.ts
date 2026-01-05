@@ -135,6 +135,38 @@ export async function deriveWrapKey(sharedSecret: Uint8Array): Promise<Uint8Arra
   return new Uint8Array(derivedBits);
 }
 
+/**
+ * Derive X25519 public key from encryption key (used as private key seed)
+ */
+export function derivePublicKey(encryptionKey: Uint8Array): Uint8Array {
+  // X25519 base point (9)
+  const basePoint = new Uint8Array(32);
+  basePoint[0] = 9;
+  return x25519(encryptionKey, basePoint);
+}
+
+/**
+ * Compute hashed user ID for shares path
+ * hashedUserId = base64url(SHA256(publicKey)).substring(0, 16)
+ */
+export async function computeHashedUserId(encryptionKey: Uint8Array): Promise<string> {
+  const publicKey = derivePublicKey(encryptionKey);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', publicKey);
+  const hashArray = new Uint8Array(hashBuffer);
+
+  // Convert to base64url
+  let binary = '';
+  for (let i = 0; i < hashArray.length; i++) {
+    binary += String.fromCharCode(hashArray[i]);
+  }
+  const base64url = btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+
+  return base64url.substring(0, 16);
+}
+
 // ============ X25519 Pure JS Implementation ============
 // Based on TweetNaCl's Curve25519 implementation
 

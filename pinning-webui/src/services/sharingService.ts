@@ -9,7 +9,7 @@
  * URL format: https://gateway/view/{shareId}#{base64url-payload}
  */
 
-import { decrypt, importKey, getExtensionFromMimeType } from './encryptionService';
+import { decrypt, importKey, getExtensionFromMimeType, deriveSharedSecret } from './encryptionService';
 
 // Constants
 const PBKDF2_ITERATIONS = 100000;
@@ -206,9 +206,11 @@ export async function deriveKeyFromPassword(
 /**
  * Process share payload and unwrap the DEK
  *
- * FxFiles flow:
- * 1. sk (secret key) is used to decrypt wrappedDek
- * 2. wrappedDek contains the actual file encryption key
+ * FxFiles uses X25519 ECDH for key exchange:
+ * 1. sk (secret key) is the recipient's private key
+ * 2. ownerPublicKey is the owner's public key
+ * 3. ECDH(sk, ownerPublicKey) → shared secret
+ * 4. shared secret decrypts wrappedDek → DEK
  */
 export async function processSharePayload(
   payload: SharePayload
@@ -222,6 +224,7 @@ export async function processSharePayload(
     label: payload.l,
     tokenId: payload.t?.id,
     hasWrappedDek: !!payload.t?.wrappedDek,
+    hasOwnerPublicKey: !!payload.t?.ownerPublicKey,
   });
 
   if (!payload.sk) {
@@ -232,20 +235,34 @@ export async function processSharePayload(
     throw new Error('Share payload missing wrapped DEK');
   }
 
-  // Decode the secret key
+  if (!payload.t?.ownerPublicKey) {
+    throw new Error('Share payload missing owner public key');
+  }
+
+  // Decode the secret key (recipient private key)
   console.log('[processSharePayload] Decoding secret key (sk)...');
   const skBytes = base64ToUint8Array(payload.sk);
   console.log('[processSharePayload] Secret key length:', skBytes.length, 'bytes');
 
-  // Import the secret key
-  const secretKey = await importKey(skBytes);
+  // Decode the owner's public key
+  console.log('[processSharePayload] Decoding owner public key...');
+  const ownerPublicKeyBytes = base64ToUint8Array(payload.t.ownerPublicKey);
+  console.log('[processSharePayload] Owner public key length:', ownerPublicKeyBytes.length, 'bytes');
+
+  // Derive shared secret using X25519 ECDH
+  console.log('[processSharePayload] Deriving shared secret via X25519...');
+  const sharedSecret = await deriveSharedSecret(skBytes, ownerPublicKeyBytes);
+  console.log('[processSharePayload] Shared secret length:', sharedSecret.length, 'bytes');
+
+  // Import the shared secret as AES key
+  const sharedKey = await importKey(sharedSecret);
 
   // Decrypt the wrapped DEK
   console.log('[processSharePayload] Decrypting wrapped DEK...');
   const wrappedDekBytes = base64ToUint8Array(payload.t.wrappedDek);
   console.log('[processSharePayload] Wrapped DEK length:', wrappedDekBytes.length, 'bytes');
 
-  const dekBytes = await decrypt(wrappedDekBytes, secretKey);
+  const dekBytes = await decrypt(wrappedDekBytes, sharedKey);
   console.log('[processSharePayload] Decrypted DEK length:', dekBytes.length, 'bytes');
 
   // Import the DEK

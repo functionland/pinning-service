@@ -85,7 +85,7 @@ export async function importKey(keyBytes: Uint8Array): Promise<CryptoKey> {
 
 /**
  * Derive a shared secret using X25519 ECDH
- * This is used for share links where sk + ownerPublicKey → shared secret
+ * This is used for share links where sk + ephemeralPublicKey → shared secret
  *
  * Note: Web Crypto doesn't natively support X25519, so we use a pure JS implementation
  */
@@ -96,6 +96,43 @@ export async function deriveSharedSecret(
   // X25519 scalar multiplication using pure JavaScript
   // This implements the Curve25519 ECDH key agreement
   return x25519(privateKey, publicKey);
+}
+
+/**
+ * Derive wrap key from shared secret using HKDF
+ * Matches FxFiles _deriveWrapKey function:
+ * - Uses HKDF with HMAC-SHA256
+ * - Salt: 'fula-hpke-v1'
+ * - Info: 'wrap-key'
+ * - Output: 32 bytes
+ */
+export async function deriveWrapKey(sharedSecret: Uint8Array): Promise<Uint8Array> {
+  const encoder = new TextEncoder();
+  const salt = encoder.encode('fula-hpke-v1');
+  const info = encoder.encode('wrap-key');
+
+  // Import the shared secret as HKDF key material
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    sharedSecret,
+    'HKDF',
+    false,
+    ['deriveBits']
+  );
+
+  // Derive 32 bytes using HKDF
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: salt,
+      info: info,
+    },
+    keyMaterial,
+    256 // 32 bytes = 256 bits
+  );
+
+  return new Uint8Array(derivedBits);
 }
 
 // ============ X25519 Pure JS Implementation ============

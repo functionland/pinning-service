@@ -9,7 +9,7 @@
  * URL format: https://gateway/view/{shareId}#{base64url-payload}
  */
 
-import { decrypt, importKey, getExtensionFromMimeType, deriveSharedSecret } from './encryptionService';
+import { decrypt, importKey, getExtensionFromMimeType, deriveSharedSecret, deriveWrapKey } from './encryptionService';
 
 // Constants
 const PBKDF2_ITERATIONS = 100000;
@@ -42,6 +42,7 @@ export interface ShareTokenData {
   id: string;
   ownerPublicKey?: string;
   recipientPublicKey?: string;
+  ephemeralPublicKey: string;   // Base64 - REQUIRED for ECDH key unwrapping
   wrappedDek: string;           // Base64 encrypted DEK
   pathScope?: string;
   permissions?: 'readOnly' | 'readWrite' | 'full';
@@ -206,11 +207,12 @@ export async function deriveKeyFromPassword(
 /**
  * Process share payload and unwrap the DEK
  *
- * FxFiles uses X25519 ECDH for key exchange:
- * 1. sk (secret key) is the recipient's private key
- * 2. ownerPublicKey is the owner's public key
- * 3. ECDH(sk, ownerPublicKey) → shared secret
- * 4. shared secret decrypts wrappedDek → DEK
+ * FxFiles uses HPKE (X25519 ECDH + HKDF) for key exchange:
+ * 1. sk (secret key) is the link's private key
+ * 2. ephemeralPublicKey is the sender's ephemeral public key
+ * 3. X25519(sk, ephemeralPublicKey) → shared secret
+ * 4. HKDF(sharedSecret, salt='fula-hpke-v1', info='wrap-key') → wrapKey
+ * 5. AES-GCM decrypt(wrappedDek, wrapKey) → DEK
  */
 export async function processSharePayload(
   payload: SharePayload
@@ -224,7 +226,7 @@ export async function processSharePayload(
     label: payload.l,
     tokenId: payload.t?.id,
     hasWrappedDek: !!payload.t?.wrappedDek,
-    hasOwnerPublicKey: !!payload.t?.ownerPublicKey,
+    hasEphemeralPublicKey: !!payload.t?.ephemeralPublicKey,
   });
 
   if (!payload.sk) {
@@ -235,34 +237,39 @@ export async function processSharePayload(
     throw new Error('Share payload missing wrapped DEK');
   }
 
-  if (!payload.t?.ownerPublicKey) {
-    throw new Error('Share payload missing owner public key');
+  if (!payload.t?.ephemeralPublicKey) {
+    throw new Error('Share payload missing ephemeral public key');
   }
 
-  // Decode the secret key (recipient private key)
+  // Decode the secret key (link private key)
   console.log('[processSharePayload] Decoding secret key (sk)...');
   const skBytes = base64ToUint8Array(payload.sk);
   console.log('[processSharePayload] Secret key length:', skBytes.length, 'bytes');
 
-  // Decode the owner's public key
-  console.log('[processSharePayload] Decoding owner public key...');
-  const ownerPublicKeyBytes = base64ToUint8Array(payload.t.ownerPublicKey);
-  console.log('[processSharePayload] Owner public key length:', ownerPublicKeyBytes.length, 'bytes');
+  // Decode the ephemeral public key
+  console.log('[processSharePayload] Decoding ephemeral public key...');
+  const ephemeralPublicKeyBytes = base64ToUint8Array(payload.t.ephemeralPublicKey);
+  console.log('[processSharePayload] Ephemeral public key length:', ephemeralPublicKeyBytes.length, 'bytes');
 
   // Derive shared secret using X25519 ECDH
   console.log('[processSharePayload] Deriving shared secret via X25519...');
-  const sharedSecret = await deriveSharedSecret(skBytes, ownerPublicKeyBytes);
+  const sharedSecret = await deriveSharedSecret(skBytes, ephemeralPublicKeyBytes);
   console.log('[processSharePayload] Shared secret length:', sharedSecret.length, 'bytes');
 
-  // Import the shared secret as AES key
-  const sharedKey = await importKey(sharedSecret);
+  // Derive wrap key from shared secret using HKDF
+  console.log('[processSharePayload] Deriving wrap key via HKDF...');
+  const wrapKeyBytes = await deriveWrapKey(sharedSecret);
+  console.log('[processSharePayload] Wrap key length:', wrapKeyBytes.length, 'bytes');
+
+  // Import the wrap key as AES key
+  const wrapKey = await importKey(wrapKeyBytes);
 
   // Decrypt the wrapped DEK
   console.log('[processSharePayload] Decrypting wrapped DEK...');
   const wrappedDekBytes = base64ToUint8Array(payload.t.wrappedDek);
   console.log('[processSharePayload] Wrapped DEK length:', wrappedDekBytes.length, 'bytes');
 
-  const dekBytes = await decrypt(wrappedDekBytes, sharedKey);
+  const dekBytes = await decrypt(wrappedDekBytes, wrapKey);
   console.log('[processSharePayload] Decrypted DEK length:', dekBytes.length, 'bytes');
 
   // Import the DEK

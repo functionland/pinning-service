@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
-import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, ListObjectsCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import {
   deriveEncryptionKey,
   exportKey,
@@ -529,7 +529,7 @@ export default function Pins() {
       console.log('[Playlists] Listing from S3 - Bucket: playlists, Prefix: user-playlists/');
 
       try {
-        const listCommand = new ListObjectsV2Command({
+        const listCommand = new ListObjectsCommand({
           Bucket: 'playlists',
           Prefix: 'user-playlists/',
         });

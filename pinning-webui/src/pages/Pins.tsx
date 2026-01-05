@@ -455,8 +455,8 @@ export default function Pins() {
       const { key: jwtToken } = await tokenRes.json();
       console.log('[SharedByMe] Got JWT token');
 
-      // Step 3: Compute hashedUserId from public key
-      const hashedUserId = await computeHashedUserId(keyBytes);
+      // Step 3: Compute hashedUserId from Google credentials
+      const hashedUserId = await computeHashedUserId(user.id, user.email);
       console.log('[SharedByMe] Computed hashedUserId:', hashedUserId);
 
       // Step 4: Fetch from S3 directly

@@ -136,35 +136,94 @@ export async function deriveWrapKey(sharedSecret: Uint8Array): Promise<Uint8Arra
 }
 
 /**
- * Derive X25519 public key from encryption key (used as private key seed)
+ * Derive X25519 public key from a 32-byte seed
  */
-export function derivePublicKey(encryptionKey: Uint8Array): Uint8Array {
+export function derivePublicKeyFromSeed(seed: Uint8Array): Uint8Array {
   // X25519 base point (9)
   const basePoint = new Uint8Array(32);
   basePoint[0] = 9;
-  return x25519(encryptionKey, basePoint);
+  return x25519(seed, basePoint);
+}
+
+/**
+ * Derive the keypair seed for user ID computation
+ * Uses different salt than encryption key: "fula-files-keypair-v1:{email}"
+ */
+export async function deriveKeypairSeed(
+  googleUserId: string,
+  userEmail: string
+): Promise<Uint8Array> {
+  const encoder = new TextEncoder();
+
+  // Combined ID format: "google:{userId}"
+  const combinedId = `google:${googleUserId}`;
+
+  // Salt for keypair: "fula-files-keypair-v1:{email}" (different from encryption key!)
+  const salt = encoder.encode(`fula-files-keypair-v1:${userEmail}`);
+
+  // Import as PBKDF2 key material
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(combinedId),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+
+  // Derive 32 bytes
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: salt,
+      iterations: PBKDF2_ITERATIONS,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    256 // 32 bytes
+  );
+
+  return new Uint8Array(derivedBits);
 }
 
 /**
  * Compute hashed user ID for shares path
- * hashedUserId = base64url(SHA256(publicKey)).substring(0, 16)
+ * Algorithm from FxFiles:
+ * 1. Derive keypair seed with salt "fula-files-keypair-v1:{email}"
+ * 2. Get X25519 public key from seed
+ * 3. Base64 encode the public key
+ * 4. SHA256 hash the base64 string (as UTF-8 bytes)
+ * 5. Base64 encode hash, take first 16 chars, make URL-safe
  */
-export async function computeHashedUserId(encryptionKey: Uint8Array): Promise<string> {
-  const publicKey = derivePublicKey(encryptionKey);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', publicKey);
+export async function computeHashedUserId(
+  googleUserId: string,
+  userEmail: string
+): Promise<string> {
+  // Step 1-2: Derive keypair seed and get public key
+  const seed = await deriveKeypairSeed(googleUserId, userEmail);
+  const publicKey = derivePublicKeyFromSeed(seed);
+
+  // Step 3: Base64 encode the public key
+  let binary = '';
+  for (let i = 0; i < publicKey.length; i++) {
+    binary += String.fromCharCode(publicKey[i]);
+  }
+  const publicKeyBase64 = btoa(binary);
+
+  // Step 4: SHA256 hash the base64 string (as UTF-8 bytes)
+  const encoder = new TextEncoder();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(publicKeyBase64));
   const hashArray = new Uint8Array(hashBuffer);
 
-  // Convert to base64url
-  let binary = '';
+  // Step 5: Base64 encode hash, take first 16 chars, make URL-safe
+  let hashBinary = '';
   for (let i = 0; i < hashArray.length; i++) {
-    binary += String.fromCharCode(hashArray[i]);
+    hashBinary += String.fromCharCode(hashArray[i]);
   }
-  const base64url = btoa(binary)
-    .replace(/\+/g, '-')
+  const hashBase64 = btoa(hashBinary)
     .replace(/\//g, '_')
-    .replace(/=/g, '');
+    .replace(/\+/g, '-');
 
-  return base64url.substring(0, 16);
+  return hashBase64.substring(0, 16);
 }
 
 // ============ X25519 Pure JS Implementation ============

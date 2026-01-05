@@ -85,34 +85,11 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to add pin"), err
 	}
 
-	// If CID exists in IPFS, get and update the size asynchronously
-	if ipfsExists {
-		go func(reqID, cid string) {
-			timeoutCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-
-			log.Printf("Calculating DAG size for CID %s (request %s)", cid, reqID)
-			size, sizeErr := s.getCIDSize(timeoutCtx, cid)
-			if sizeErr != nil {
-				log.Printf("Warning: failed to get CID size for %s: %v", cid, sizeErr)
-			} else if size > 0 {
-				log.Printf("DAG size for CID %s: %d bytes", cid, size)
-				if updateErr := s.db.UpdatePinSize(timeoutCtx, reqID, size); updateErr != nil {
-					log.Printf("Warning: failed to update pin size for %s: %v", reqID, updateErr)
-				}
-			} else {
-				log.Printf("Warning: getCIDSize returned 0 for CID %s", cid)
-			}
-		}(requestId, pin.Cid)
-	} else {
-		log.Printf("CID %s does not exist in IPFS yet, size will be calculated later", pin.Cid)
-	}
-
 	// Get delegates from IPFS cluster or use default
 	delegates := s.getDelegates(ctx)
 
-	// Pin to IPFS Cluster asynchronously
-	go func(cid, name string) {
+	// Pin to IPFS Cluster asynchronously and calculate size after success
+	go func(reqID, cid, name string) {
 		pinCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
@@ -123,8 +100,25 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 		} else {
 			// Update status to pinning
 			s.db.UpdatePinStatusAndSize(pinCtx, requestId, "pinning", 0)
+
+			// Calculate cumulative DAG size after cluster pinning succeeds
+			sizeCtx, sizeCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer sizeCancel()
+
+			log.Printf("Calculating DAG size for CID %s (request %s)", cid, reqID)
+			size, sizeErr := s.getCIDSize(sizeCtx, cid)
+			if sizeErr != nil {
+				log.Printf("Warning: failed to get CID size for %s: %v", cid, sizeErr)
+			} else if size > 0 {
+				log.Printf("DAG size for CID %s: %d bytes", cid, size)
+				if updateErr := s.db.UpdatePinSize(sizeCtx, reqID, size); updateErr != nil {
+					log.Printf("Warning: failed to update pin size for %s: %v", reqID, updateErr)
+				}
+			} else {
+				log.Printf("Warning: getCIDSize returned 0 for CID %s", cid)
+			}
 		}
-	}(pin.Cid, pin.Name)
+	}(requestId, pin.Cid, pin.Name)
 
 	status := PinStatus{
 		Requestid: requestId,

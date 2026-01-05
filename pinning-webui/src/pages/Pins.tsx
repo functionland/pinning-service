@@ -388,29 +388,29 @@ export default function Pins() {
     }
   };
 
-  // Fetch shared by me data - encrypted file from S3, decrypted client-side
+  // Fetch shared by me data from encrypted file in IPFS
+  // Uses same pattern as file downloads: fetch encrypted, decrypt client-side
   const fetchSharedByMe = async () => {
     if (!user?.id || !user?.email) return;
     setSharedByMeLoading(true);
     setSharedByMeError(null);
     try {
-      // Get encryption key from storage
+      // Step 1: Get encryption key from secure storage (same as file downloads)
       const keyBytes = await retrieveEncryptionKey(user.email, user.email);
       if (!keyBytes) {
-        console.log('[Pins] No encryption key available for shares');
+        console.log('[SharedByMe] No encryption key found');
         setSharedByMeData([]);
         return;
       }
 
-      // Compute hashed user ID from public key
+      // Step 2: Compute hashedUserId from public key
       const hashedUserId = await computeHashedUserId(keyBytes);
-      console.log('[Pins] Hashed user ID:', hashedUserId);
+      console.log('[SharedByMe] Computed hashedUserId:', hashedUserId);
 
-      // Fetch encrypted shares data from server
+      // Step 3: Fetch encrypted data from server (server proxies S3 request)
       const res = await fetch(`/api/shares/by-me?hashedUserId=${encodeURIComponent(hashedUserId)}`, {
         credentials: 'include'
       });
-
       if (!res.ok) {
         if (res.status === 404) {
           setSharedByMeData([]);
@@ -421,103 +421,91 @@ export default function Pins() {
 
       const result = await res.json();
 
+      // If no encrypted data, user has no shares
       if (!result.encryptedData) {
-        console.log('[Pins] No encrypted shares data');
+        console.log('[SharedByMe] No shares file found');
         setSharedByMeData([]);
         return;
       }
 
-      // Decode base64 encrypted data
+      // Step 4: Decode base64 and decrypt (same as file downloads)
       const encryptedBytes = Uint8Array.from(atob(result.encryptedData), c => c.charCodeAt(0));
-      console.log('[Pins] Encrypted shares size:', encryptedBytes.length);
+      console.log('[SharedByMe] Decrypting', encryptedBytes.length, 'bytes');
 
-      // Decrypt using encryption key
       const key = await importKey(keyBytes);
       const decryptedBytes = await decrypt(encryptedBytes, key);
 
-      // Parse JSON
-      const sharesJson = JSON.parse(new TextDecoder().decode(decryptedBytes));
-      console.log('[Pins] Decrypted shares, count:', sharesJson.shares?.length || 0);
+      // Step 5: Parse JSON
+      const jsonText = new TextDecoder().decode(decryptedBytes);
+      console.log('[SharedByMe] Decrypted JSON:', jsonText.substring(0, 200));
 
-      // Parse using the sharing service
-      const shares = parseOutgoingShares(sharesJson.shares || []);
+      const sharesJson = JSON.parse(jsonText);
+      const shares = parseOutgoingShares(sharesJson.shares || sharesJson || []);
       setSharedByMeData(shares);
     } catch (err) {
-      console.error('[Pins] Error fetching shares:', err);
+      console.error('[SharedByMe] Error:', err);
       setSharedByMeError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setSharedByMeLoading(false);
     }
   };
 
-  // Fetch playlists - list from S3, download each encrypted, decrypt client-side
+  // Fetch playlists from encrypted file in IPFS
+  // Uses same pattern as file downloads: fetch encrypted, decrypt client-side
   const fetchPlaylists = async () => {
     if (!user?.email) return;
     setPlaylistsLoading(true);
     setPlaylistsError(null);
     try {
-      // Get encryption key from storage
+      // Step 1: Get encryption key from secure storage (same as file downloads)
       const keyBytes = await retrieveEncryptionKey(user.email, user.email);
       if (!keyBytes) {
-        console.log('[Pins] No encryption key available for playlists');
+        console.log('[Playlists] No encryption key found');
         setPlaylistsData([]);
         return;
       }
 
-      // Step 1: List playlist keys from server
-      const listRes = await fetch('/api/playlists/list', { credentials: 'include' });
-      if (!listRes.ok) {
-        if (listRes.status === 404) {
+      // Step 2: Compute hashedUserId - used as playlist ID
+      const hashedUserId = await computeHashedUserId(keyBytes);
+      console.log('[Playlists] Computed playlistId (hashedUserId):', hashedUserId);
+
+      // Step 3: Fetch encrypted data from server (server proxies S3 request)
+      const res = await fetch(`/api/playlists?playlistId=${encodeURIComponent(hashedUserId)}`, {
+        credentials: 'include'
+      });
+      if (!res.ok) {
+        if (res.status === 404) {
           setPlaylistsData([]);
           return;
         }
         throw new Error('Failed to list playlists');
       }
 
-      const listResult = await listRes.json();
-      const keys: string[] = listResult.keys || [];
-      console.log('[Pins] Found playlist keys:', keys);
+      const result = await res.json();
 
-      if (keys.length === 0) {
+      // If no encrypted data, user has no playlists
+      if (!result.encryptedData) {
+        console.log('[Playlists] No playlists file found');
         setPlaylistsData([]);
         return;
       }
 
-      // Step 2: Fetch and decrypt each playlist
+      // Step 4: Decode base64 and decrypt (same as file downloads)
+      const encryptedBytes = Uint8Array.from(atob(result.encryptedData), c => c.charCodeAt(0));
+      console.log('[Playlists] Decrypting', encryptedBytes.length, 'bytes');
+
       const key = await importKey(keyBytes);
-      const playlists: Playlist[] = [];
+      const decryptedBytes = await decrypt(encryptedBytes, key);
 
-      for (const playlistKey of keys) {
-        try {
-          const encRes = await fetch(`/api/playlists/encrypted?key=${encodeURIComponent(playlistKey)}`, {
-            credentials: 'include'
-          });
+      // Step 5: Parse JSON
+      const jsonText = new TextDecoder().decode(decryptedBytes);
+      console.log('[Playlists] Decrypted JSON:', jsonText.substring(0, 200));
 
-          if (!encRes.ok) {
-            console.warn('[Pins] Failed to fetch playlist:', playlistKey);
-            continue;
-          }
-
-          const encResult = await encRes.json();
-          if (!encResult.encryptedData) continue;
-
-          // Decode base64 and decrypt
-          const encryptedBytes = Uint8Array.from(atob(encResult.encryptedData), c => c.charCodeAt(0));
-          const decryptedBytes = await decrypt(encryptedBytes, key);
-
-          // Parse JSON
-          const playlist = JSON.parse(new TextDecoder().decode(decryptedBytes));
-          playlists.push(playlist);
-        } catch (e) {
-          console.warn('[Pins] Error decrypting playlist:', playlistKey, e);
-        }
-      }
-
-      console.log('[Pins] Decrypted playlists count:', playlists.length);
-      const parsed = parsePlaylists(playlists);
-      setPlaylistsData(parsed);
+      const playlistsJson = JSON.parse(jsonText);
+      const playlists = parsePlaylists(playlistsJson.playlists || playlistsJson || []);
+      setPlaylistsData(playlists);
     } catch (err) {
-      console.error('[Pins] Error fetching playlists:', err);
+      console.error('[Playlists] Error:', err);
       setPlaylistsError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setPlaylistsLoading(false);

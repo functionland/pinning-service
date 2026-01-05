@@ -741,18 +741,13 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // ============ Shares and Playlists Endpoints ============
-  // FxFiles stores data in S3-compatible buckets (encrypted):
-  // - Playlists: playlists/user-playlists/{playlistId}.json
-  // - Outgoing Shares: fula-metadata/.fula/shares/{hashedUserId}.json.enc
-  // - Accepted Shares: NOT in cloud (device-only for privacy)
-  //
-  // Server proxies S3 requests and returns encrypted data.
-  // Client handles decryption using existing encryptionService.
+  // Server proxies S3 bucket requests, returns encrypted data for client-side decryption
+  // Same pattern as file downloads: fetch encrypted → client decrypts
 
-  const S3_GATEWAY = process.env.S3_GATEWAY_URL || 'https://ipfs.cloud.fx.land';
+  const S3_GATEWAY = 'https://ipfs.cloud.fx.land';
 
   // Get shares with me (items others have shared with the current user)
-  // Note: Accepted shares are NOT synced to cloud by design (privacy)
+  // Note: Accepted shares are stored on device only, not in cloud
   app.get('/api/shares/with-me', requireAuth, async (_req: Request, res: Response) => {
     return res.json({
       shares: [],
@@ -760,8 +755,9 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     });
   });
 
-  // Get shares by me - returns encrypted data for client-side decryption
-  // Client must provide hashedUserId (computed from public key)
+  // Get shares by me - fetch encrypted file from S3, return for client-side decryption
+  // Path: fula-metadata/.fula/shares/{hashedUserId}.json.enc
+  // Client provides hashedUserId (derived from public key)
   app.get('/api/shares/by-me', requireAuth, async (req: Request, res: Response) => {
     try {
       const { hashedUserId } = req.query;
@@ -770,110 +766,66 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'hashedUserId query parameter required' });
       }
 
-      console.log('[webui] Fetching outgoing shares for hashedUserId:', hashedUserId);
-
-      // Fetch encrypted shares file from S3
       const sharesUrl = `${S3_GATEWAY}/fula-metadata/.fula/shares/${hashedUserId}.json.enc`;
-      console.log('[webui] Fetching from:', sharesUrl);
+      console.log('[webui] Fetching shares from:', sharesUrl);
 
       const response = await fetch(sharesUrl);
+      console.log('[webui] Shares response status:', response.status);
 
       if (response.status === 404) {
-        console.log('[webui] No shares file found');
-        return res.json({ shares: [], encryptedData: null });
+        return res.json({ encryptedData: null });
       }
 
       if (!response.ok) {
         console.error('[webui] S3 error:', response.status);
-        return res.json({ shares: [], encryptedData: null });
+        return res.json({ encryptedData: null });
       }
 
       const encryptedData = Buffer.from(await response.arrayBuffer());
       console.log('[webui] Fetched encrypted shares, size:', encryptedData.length);
 
-      // Return encrypted data as base64 for client-side decryption
-      return res.json({
-        encryptedData: encryptedData.toString('base64')
-      });
+      // Return as base64 for client-side decryption
+      return res.json({ encryptedData: encryptedData.toString('base64') });
     } catch (error) {
       console.error('[webui] Error in shares/by-me:', error);
       res.status(500).json({ error: 'Failed to fetch shares' });
     }
   });
 
-  // List playlist keys from S3 bucket
-  app.get('/api/playlists/list', requireAuth, async (_req: Request, res: Response) => {
+  // Get user playlists - fetch encrypted file from S3
+  // Path: playlists/user-playlists/{playlistId}.json
+  // Client provides playlistId
+  app.get('/api/playlists', requireAuth, async (req: Request, res: Response) => {
     try {
-      console.log('[webui] Listing playlists from S3');
+      const { playlistId } = req.query;
 
-      // S3 ListObjectsV2: GET /playlists?list-type=2&prefix=user-playlists/
-      const listUrl = `${S3_GATEWAY}/playlists?list-type=2&prefix=user-playlists/`;
-      console.log('[webui] List URL:', listUrl);
-
-      const response = await fetch(listUrl);
-
-      if (!response.ok) {
-        console.error('[webui] S3 list error:', response.status);
-        return res.json({ keys: [] });
-      }
-
-      const listData = await response.text();
-      console.log('[webui] S3 response (first 300):', listData.substring(0, 300));
-
-      // Parse S3 XML response to extract keys
-      let keys: string[] = [];
-
-      // Try JSON first (some gateways return JSON)
-      try {
-        const jsonData = JSON.parse(listData);
-        if (jsonData.Contents && Array.isArray(jsonData.Contents)) {
-          keys = jsonData.Contents.map((obj: { Key: string }) => obj.Key);
-        }
-      } catch {
-        // Parse S3 XML format
-        const keyMatches = listData.matchAll(/<Key>([^<]+)<\/Key>/g);
-        for (const match of keyMatches) {
-          if (match[1].endsWith('.json')) {
-            keys.push(match[1]);
-          }
-        }
-      }
-
-      console.log('[webui] Found playlist keys:', keys);
-      return res.json({ keys });
-    } catch (error) {
-      console.error('[webui] Error listing playlists:', error);
-      res.status(500).json({ error: 'Failed to list playlists' });
-    }
-  });
-
-  // Get encrypted playlist data by key (passed as query param)
-  app.get('/api/playlists/encrypted', requireAuth, async (req: Request, res: Response) => {
-    try {
-      const key = req.query.key as string;
-      if (!key) {
-        return res.status(400).json({ error: 'key query parameter required' });
+      if (!playlistId || typeof playlistId !== 'string') {
+        return res.status(400).json({ error: 'playlistId query parameter required' });
       }
       console.log('[webui] Fetching encrypted playlist:', key);
 
-      const playlistUrl = `${S3_GATEWAY}/playlists/${key}`;
+      const playlistUrl = `${S3_GATEWAY}/playlists/user-playlists/${playlistId}.json`;
+      console.log('[webui] Fetching playlist from:', playlistUrl);
+
       const response = await fetch(playlistUrl);
+      console.log('[webui] Playlist response status:', response.status);
+
+      if (response.status === 404) {
+        return res.json({ encryptedData: null });
+      }
 
       if (!response.ok) {
         console.error('[webui] S3 error:', response.status);
-        return res.status(response.status).json({ error: 'Playlist not found' });
+        return res.json({ encryptedData: null });
       }
 
       const encryptedData = Buffer.from(await response.arrayBuffer());
       console.log('[webui] Fetched encrypted playlist, size:', encryptedData.length);
 
-      // Return encrypted data as base64 for client-side decryption
-      return res.json({
-        key,
-        encryptedData: encryptedData.toString('base64')
-      });
+      // Return as base64 for client-side decryption
+      return res.json({ encryptedData: encryptedData.toString('base64') });
     } catch (error) {
-      console.error('[webui] Error fetching playlist:', error);
+      console.error('[webui] Error in playlists:', error);
       res.status(500).json({ error: 'Failed to fetch playlist' });
     }
   });

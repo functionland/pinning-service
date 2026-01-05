@@ -136,15 +136,12 @@ export async function deriveWrapKey(sharedSecret: Uint8Array): Promise<Uint8Arra
 }
 
 /**
- * Derive X25519 public key from private key (encryption key)
- * The encryption key serves as the X25519 private key seed
+ * Derive X25519 public key from encryption key (used as private key seed)
  */
-export function derivePublicKeyFromEncryptionKey(encryptionKey: Uint8Array): Uint8Array {
+export function derivePublicKey(encryptionKey: Uint8Array): Uint8Array {
   // X25519 base point (9)
   const basePoint = new Uint8Array(32);
   basePoint[0] = 9;
-
-  // Public key = X25519(privateKey, basePoint)
   return x25519(encryptionKey, basePoint);
 }
 
@@ -153,25 +150,20 @@ export function derivePublicKeyFromEncryptionKey(encryptionKey: Uint8Array): Uin
  * hashedUserId = base64url(SHA256(publicKey)).substring(0, 16)
  */
 export async function computeHashedUserId(encryptionKey: Uint8Array): Promise<string> {
-  // Derive public key from encryption key
-  const publicKey = derivePublicKeyFromEncryptionKey(encryptionKey);
-
-  // Hash the public key with SHA-256
+  const publicKey = derivePublicKey(encryptionKey);
   const hashBuffer = await crypto.subtle.digest('SHA-256', publicKey);
   const hashArray = new Uint8Array(hashBuffer);
 
   // Convert to base64url
-  let base64 = '';
-  const bytes = hashArray;
-  for (let i = 0; i < bytes.length; i++) {
-    base64 += String.fromCharCode(bytes[i]);
+  let binary = '';
+  for (let i = 0; i < hashArray.length; i++) {
+    binary += String.fromCharCode(hashArray[i]);
   }
-  const base64url = btoa(base64)
+  const base64url = btoa(binary)
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=/g, '');
 
-  // Take first 16 characters
   return base64url.substring(0, 16);
 }
 

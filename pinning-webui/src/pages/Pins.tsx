@@ -488,7 +488,7 @@ export default function Pins() {
 
       for (const playlistKey of keys) {
         try {
-          const encRes = await fetch(`/api/playlists/encrypted/${encodeURIComponent(playlistKey)}`, {
+          const encRes = await fetch(`/api/playlists/encrypted?key=${encodeURIComponent(playlistKey)}`, {
             credentials: 'include'
           });
 

@@ -847,10 +847,13 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
-  // Get encrypted playlist data by key
-  app.get('/api/playlists/encrypted/:key(*)', requireAuth, async (req: Request, res: Response) => {
+  // Get encrypted playlist data by key (passed as query param)
+  app.get('/api/playlists/encrypted', requireAuth, async (req: Request, res: Response) => {
     try {
-      const { key } = req.params;
+      const key = req.query.key as string;
+      if (!key) {
+        return res.status(400).json({ error: 'key query parameter required' });
+      }
       console.log('[webui] Fetching encrypted playlist:', key);
 
       const playlistUrl = `${S3_GATEWAY}/playlists/${key}`;

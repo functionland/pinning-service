@@ -129,8 +129,11 @@ func main() {
 		log.Printf("Direct IPFS pinning DISABLED - pins will only be sent to IPFS Cluster")
 	}
 
+	// Get IPFS HTTP URL for dag/stat API (defaults to http://127.0.0.1:5001)
+	ipfsHTTPURL := os.Getenv("IPFS_HTTP_URL")
+
 	// Initialize PinsAPIService with SQLite backend
-	pinsAPIService := openapi.NewPinsAPIServiceSQLite(sqliteService, userService, ipfsAPI, ipfsClusterApi, enableIPFSPinning)
+	pinsAPIService := openapi.NewPinsAPIServiceSQLite(sqliteService, userService, ipfsAPI, ipfsClusterApi, enableIPFSPinning, ipfsHTTPURL)
 
 	// Create PinsAPIController
 	pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)

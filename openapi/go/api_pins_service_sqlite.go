@@ -2,7 +2,10 @@ package openapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -19,17 +22,22 @@ type PinsAPIServiceSQLite struct {
 	userService       *UserServiceSQLite
 	ipfsAPI           *ipfsrpc.HttpApi
 	ipfsClusterAPI    clusterapi.Client
-	enableIPFSPinning bool // If true, pin to both IPFS and IPFS Cluster; if false, only IPFS Cluster
+	enableIPFSPinning bool   // If true, pin to both IPFS and IPFS Cluster; if false, only IPFS Cluster
+	ipfsHTTPURL       string // HTTP URL for IPFS API (e.g., "http://127.0.0.1:5001")
 }
 
 // NewPinsAPIServiceSQLite creates a new pins API service with SQLite backend
-func NewPinsAPIServiceSQLite(db *SQLiteService, userService *UserServiceSQLite, ipfsAPI *ipfsrpc.HttpApi, ipfsClusterAPI clusterapi.Client, enableIPFSPinning bool) *PinsAPIServiceSQLite {
+func NewPinsAPIServiceSQLite(db *SQLiteService, userService *UserServiceSQLite, ipfsAPI *ipfsrpc.HttpApi, ipfsClusterAPI clusterapi.Client, enableIPFSPinning bool, ipfsHTTPURL string) *PinsAPIServiceSQLite {
+	if ipfsHTTPURL == "" {
+		ipfsHTTPURL = "http://127.0.0.1:5001"
+	}
 	return &PinsAPIServiceSQLite{
 		db:                db,
 		userService:       userService,
 		ipfsAPI:           ipfsAPI,
 		ipfsClusterAPI:    ipfsClusterAPI,
 		enableIPFSPinning: enableIPFSPinning,
+		ipfsHTTPURL:       ipfsHTTPURL,
 	}
 }
 
@@ -325,23 +333,48 @@ func (s *PinsAPIServiceSQLite) cidExistsInIPFS(ctx context.Context, cidStr strin
 	return true, nil
 }
 
-// getCIDSize returns the size of a CID's root block from IPFS
+// dagStatResponse represents the response from IPFS dag/stat API
+type dagStatResponse struct {
+	TotalSize int64 `json:"TotalSize"`
+}
+
+// getCIDSize returns the cumulative DAG size of a CID from IPFS using HTTP API
 func (s *PinsAPIServiceSQLite) getCIDSize(ctx context.Context, cidStr string) (int64, error) {
-	if s.ipfsAPI == nil {
+	if s.ipfsHTTPURL == "" {
 		return 0, nil
 	}
 
-	path, err := ipfspath.NewPath("/ipfs/" + cidStr)
+	// Build the dag/stat URL with progress=false to get immediate response
+	url := fmt.Sprintf("%s/api/v0/dag/stat?arg=%s&progress=false", s.ipfsHTTPURL, cidStr)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
 		return 0, err
 	}
 
-	blockStat, err := s.ipfsAPI.Block().Stat(ctx, path)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("dag/stat failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return 0, err
 	}
 
-	return int64(blockStat.Size()), nil
+	var result dagStatResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, err
+	}
+
+	return result.TotalSize, nil
 }
 
 // getDelegates returns delegate addresses for pinning service

@@ -145,6 +145,10 @@ export interface Translations {
     revokeShare: string;
     noSharedByMe: string;
     noSharedByMeDesc: string;
+    // Setup decryption
+    setupDecryptionRequired: string;
+    setupDecryptionDesc: string;
+    setupDecryptionHint: string;
     // Playlists
     tracks: string;
     noPlaylists: string;

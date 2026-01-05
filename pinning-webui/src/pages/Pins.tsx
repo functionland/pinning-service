@@ -141,6 +141,7 @@ export default function Pins() {
   const [sharedByMeLoading, setSharedByMeLoading] = useState(false);
   const [sharedByMeError, setSharedByMeError] = useState<string | null>(null);
   const [sharedByMePage, setSharedByMePage] = useState(1);
+  const [sharedByMeNeedsKey, setSharedByMeNeedsKey] = useState(false);
   const ITEMS_PER_PAGE = 20;
 
   // Playlists state
@@ -457,10 +458,12 @@ export default function Pins() {
       // Step 1: Get encryption key from secure storage
       const keyBytes = await retrieveEncryptionKey(user.email, user.email);
       if (!keyBytes) {
-        console.log('[SharedByMe] No encryption key found');
+        console.log('[SharedByMe] No encryption key found - user needs to set up decryption first');
+        setSharedByMeNeedsKey(true);
         setSharedByMeData([]);
         return;
       }
+      setSharedByMeNeedsKey(false);
 
       // Step 2: Get JWT token for S3 authentication
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
@@ -1518,6 +1521,23 @@ export default function Pins() {
       return (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
           {sharedByMeError}
+        </div>
+      );
+    }
+
+    if (sharedByMeNeedsKey) {
+      return (
+        <div className="card text-center py-12">
+          <div className="text-5xl mb-4">🔐</div>
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">
+            {t.pins.setupDecryptionRequired || 'Decryption Setup Required'}
+          </h3>
+          <p className="text-gray-600 mb-4">
+            {t.pins.setupDecryptionDesc || 'To view your shared items, you need to set up decryption first.'}
+          </p>
+          <p className="text-gray-500 text-sm">
+            {t.pins.setupDecryptionHint || 'Go to the "My Pins" tab and click "Download Decrypted" on any file to set up your encryption key.'}
+          </p>
         </div>
       );
     }

@@ -132,6 +132,10 @@ export const en: Translations = {
     revokeShare: 'Revoke',
     noSharedByMe: 'No Shares Created',
     noSharedByMeDesc: 'Create share links from your files to share with others',
+    // Setup decryption
+    setupDecryptionRequired: 'Decryption Setup Required',
+    setupDecryptionDesc: 'To view your shared items, you need to set up decryption first.',
+    setupDecryptionHint: 'Go to the "My Pins" tab and click "Download Decrypted" on any file to set up your encryption key.',
     // Playlists
     tracks: 'tracks',
     noPlaylists: 'No Playlists',

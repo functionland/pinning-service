@@ -29,7 +29,7 @@ const S3_ENDPOINT = 'https://s3.cloud.fx.land';
 
 // Helper to create S3 client with JWT token
 function createS3Client(jwtToken: string): S3Client {
-  return new S3Client({
+  const client = new S3Client({
     endpoint: S3_ENDPOINT,
     region: 'us-east-1', // Required but server ignores it
     credentials: {
@@ -38,6 +38,26 @@ function createS3Client(jwtToken: string): S3Client {
     },
     forcePathStyle: true,
   });
+
+  // Add middleware to remove trailing slash from bucket URLs
+  // MinIO/S3-compatible servers don't handle /bucket/ the same as /bucket
+  client.middlewareStack.add(
+    (next) => async (args) => {
+      const request = args.request as { path?: string };
+      if (request.path) {
+        // Remove trailing slash before query string: /bucket/?prefix= -> /bucket?prefix=
+        request.path = request.path.replace(/\/\?/, '?');
+      }
+      return next(args);
+    },
+    {
+      step: 'build',
+      name: 'removeTrailingSlash',
+      priority: 'low',
+    }
+  );
+
+  return client;
 }
 
 // Helper to convert S3 body stream to Uint8Array

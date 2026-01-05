@@ -77,7 +77,7 @@ export default function View() {
           return;
         }
 
-        const { payload } = parsed;
+        const { shareId, payload } = parsed;
 
         // Check if we have the secret key (sk) for public links
         if (!payload.sk) {
@@ -92,7 +92,7 @@ export default function View() {
 
         try {
           // Process the payload and unwrap the DEK
-          const shareData = await processSharePayload(payload);
+          const shareData = await processSharePayload(payload, shareId);
 
           setState(s => ({
             ...s,
@@ -218,7 +218,9 @@ export default function View() {
             <p className="text-gray-600 mb-6">{state.error}</p>
             {state.expiresAt && (
               <p className="text-sm text-gray-500 mb-4">
-                {t.view?.expiredAt || 'Expired'}: {new Date(state.expiresAt).toLocaleString()}
+                {new Date(state.expiresAt).getTime() < Date.now()
+                  ? (t.view?.expiredAt || 'Expired')
+                  : (t.view?.expiresOn || 'Expires')}: {new Date(state.expiresAt).toLocaleString()}
               </p>
             )}
             <button

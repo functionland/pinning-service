@@ -56,6 +56,7 @@ export interface ShareTokenData {
  * Processed share data for content fetching
  */
 export interface ProcessedShareData {
+  shareId: string;     // Share ID for content fetching
   bucket: string;
   path: string;
   name: string;
@@ -215,7 +216,8 @@ export async function deriveKeyFromPassword(
  * 5. AES-GCM decrypt(wrappedDek, wrapKey) → DEK
  */
 export async function processSharePayload(
-  payload: SharePayload
+  payload: SharePayload,
+  shareId: string
 ): Promise<ProcessedShareData> {
   console.log('[processSharePayload] Payload:', {
     v: payload.v,
@@ -276,6 +278,7 @@ export async function processSharePayload(
   const dek = await importKey(dekBytes);
 
   return {
+    shareId,
     bucket: payload.b,
     path: payload.k,
     name: payload.l || extractFilename(payload.k) || 'shared_file',
@@ -288,18 +291,22 @@ export async function processSharePayload(
  * Fetch and decrypt shared content
  */
 export async function fetchSharedContent(
-  shareData: ProcessedShareData,
-  gatewayUrl: string = 'https://ipfs.cloud.fx.land/gateway'
+  shareData: ProcessedShareData
 ): Promise<{ data: Uint8Array; mimeType: string; filename: string }> {
-  // Construct the URL - bucket/path format
-  const path = shareData.path.startsWith('/') ? shareData.path.slice(1) : shareData.path;
-  const url = `${gatewayUrl}/${shareData.bucket}/${path}`;
+  // Use our backend proxy endpoint to avoid CORS issues
+  const params = new URLSearchParams({
+    bucket: shareData.bucket,
+    path: shareData.path,
+  });
+  const url = `/api/share/${shareData.shareId}/content?${params}`;
 
   console.log('[fetchSharedContent] Fetching:', url);
 
   const response = await fetch(url);
 
   if (!response.ok) {
+    const errorText = await response.text();
+    console.error('[fetchSharedContent] Fetch failed:', response.status, errorText);
     throw new Error(`Failed to fetch shared content: ${response.status}`);
   }
 

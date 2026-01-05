@@ -949,6 +949,76 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
+  // Fetch shared content (public - no auth required)
+  // This proxies content requests for public share links
+  app.get('/api/share/:shareId/content', async (req: Request, res: Response) => {
+    try {
+      const { shareId } = req.params;
+      const { bucket, path } = req.query;
+
+      if (!bucket || !path) {
+        return res.status(400).json({ error: 'Missing bucket or path parameter' });
+      }
+
+      // Validate shareId format (UUID)
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(shareId)) {
+        return res.status(400).json({ error: 'Invalid share ID format' });
+      }
+
+      // Try to fetch from Fula API share content endpoint
+      const fulaShareUrl = `http://127.0.0.1:6000/shares/${shareId}/content?bucket=${encodeURIComponent(bucket as string)}&path=${encodeURIComponent(path as string)}`;
+
+      try {
+        const response = await httpGet(fulaShareUrl);
+
+        if (response.status === 200) {
+          // Stream the content back
+          const contentType = response.headers['content-type'] || 'application/octet-stream';
+          res.setHeader('Content-Type', contentType);
+
+          if (response.data instanceof Buffer) {
+            return res.send(response.data);
+          } else if (typeof response.data === 'string') {
+            return res.send(Buffer.from(response.data));
+          } else {
+            return res.send(response.data);
+          }
+        } else if (response.status === 404) {
+          return res.status(404).json({ error: 'Shared content not found' });
+        } else if (response.status === 403) {
+          return res.status(403).json({ error: 'Share has been revoked or expired' });
+        } else {
+          return res.status(response.status).json({ error: 'Failed to fetch shared content' });
+        }
+      } catch (apiError) {
+        // If Fula API is not available, try direct gateway access
+        console.warn('[webui] Fula share API not available, trying gateway:', apiError);
+
+        // Fallback: Try IPFS gateway directly with proper path
+        const sanitizedPath = (path as string).startsWith('/') ? (path as string).slice(1) : path;
+        const gatewayUrl = `http://127.0.0.1:6000/gateway/${bucket}/${sanitizedPath}`;
+
+        try {
+          const gatewayResponse = await httpGet(gatewayUrl, {}, { responseType: 'arraybuffer' });
+
+          if (gatewayResponse.status === 200) {
+            res.setHeader('Content-Type', 'application/octet-stream');
+            return res.send(Buffer.from(gatewayResponse.data));
+          } else {
+            return res.status(gatewayResponse.status).json({ error: 'Content not found' });
+          }
+        } catch (gatewayError) {
+          console.error('[webui] Gateway fetch failed:', gatewayError);
+          return res.status(500).json({ error: 'Failed to fetch content from gateway' });
+        }
+      }
+    } catch (error) {
+      console.error('[webui] Error fetching shared content:', error);
+      res.status(500).json({ error: 'Failed to fetch shared content' });
+    }
+  });
+
   // Health check
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });

@@ -478,7 +478,7 @@ export default function Pins() {
           setPlaylistsData([]);
           return;
         }
-        throw new Error('Failed to fetch playlists');
+        throw new Error('Failed to list playlists');
       }
 
       const result = await res.json();

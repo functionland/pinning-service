@@ -88,16 +88,24 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 	// If CID exists in IPFS, get and update the size asynchronously
 	if ipfsExists {
 		go func(reqID, cid string) {
-			timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			timeoutCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 
+			log.Printf("Calculating DAG size for CID %s (request %s)", cid, reqID)
 			size, sizeErr := s.getCIDSize(timeoutCtx, cid)
-			if sizeErr == nil && size > 0 {
+			if sizeErr != nil {
+				log.Printf("Warning: failed to get CID size for %s: %v", cid, sizeErr)
+			} else if size > 0 {
+				log.Printf("DAG size for CID %s: %d bytes", cid, size)
 				if updateErr := s.db.UpdatePinSize(timeoutCtx, reqID, size); updateErr != nil {
 					log.Printf("Warning: failed to update pin size for %s: %v", reqID, updateErr)
 				}
+			} else {
+				log.Printf("Warning: getCIDSize returned 0 for CID %s", cid)
 			}
 		}(requestId, pin.Cid)
+	} else {
+		log.Printf("CID %s does not exist in IPFS yet, size will be calculated later", pin.Cid)
 	}
 
 	// Get delegates from IPFS cluster or use default

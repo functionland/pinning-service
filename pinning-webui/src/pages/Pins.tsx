@@ -166,9 +166,7 @@ export default function Pins() {
       peer_id: string;
       peer_name?: string;
       status: string;
-      timestamp?: string;
       error?: string;
-      attempt_count?: number;
     }>;
   } | null>(null);
 
@@ -1093,11 +1091,6 @@ export default function Pins() {
                           <p className="text-xs text-gray-500 font-mono mt-1 truncate" title={node.peer_id}>
                             {node.peer_id}
                           </p>
-                          {node.timestamp && (
-                            <p className="text-xs text-gray-400 mt-1">
-                              {t.pins.lastUpdated || 'Updated'}: {new Date(node.timestamp).toLocaleString()}
-                            </p>
-                          )}
                           {node.error && (
                             <p className="text-xs text-red-600 mt-1">
                               {t.pins.error || 'Error'}: {node.error}

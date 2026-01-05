@@ -325,9 +325,7 @@ func (s *PinsAPIServiceSQLite) cidExistsInIPFS(ctx context.Context, cidStr strin
 	return true, nil
 }
 
-// getCIDSize returns the cumulative size of a CID from IPFS (including all child nodes)
-// This is the total DAG size, not just the root block size.
-// For folders and large files, this includes all chunks/blocks in the merkle DAG.
+// getCIDSize returns the size of a CID's root block from IPFS
 func (s *PinsAPIServiceSQLite) getCIDSize(ctx context.Context, cidStr string) (int64, error) {
 	if s.ipfsAPI == nil {
 		return 0, nil
@@ -338,14 +336,12 @@ func (s *PinsAPIServiceSQLite) getCIDSize(ctx context.Context, cidStr string) (i
 		return 0, err
 	}
 
-	// Get object stat for cumulative size (includes all child nodes)
-	// This returns the total DAG size, similar to how Pinata and other services report storage
-	objStat, err := s.ipfsAPI.Object().Stat(ctx, path)
+	blockStat, err := s.ipfsAPI.Block().Stat(ctx, path)
 	if err != nil {
 		return 0, err
 	}
 
-	return int64(objStat.CumulativeSize), nil
+	return int64(blockStat.Size()), nil
 }
 
 // getDelegates returns delegate addresses for pinning service
@@ -513,12 +509,10 @@ func (s *PinsAPIServiceSQLite) syncStatusAndSize(ctx context.Context, requestId,
 
 // PinNodeInfo represents information about a single cluster node for a pin
 type PinNodeInfo struct {
-	PeerID      string `json:"peer_id"`
-	PeerName    string `json:"peer_name,omitempty"`
-	Status      string `json:"status"`
-	Timestamp   string `json:"timestamp,omitempty"`
-	Error       string `json:"error,omitempty"`
-	AttemptCount int    `json:"attempt_count,omitempty"`
+	PeerID   string `json:"peer_id"`
+	PeerName string `json:"peer_name,omitempty"`
+	Status   string `json:"status"`
+	Error    string `json:"error,omitempty"`
 }
 
 // PinNodesResponse represents the response for GetPinNodes
@@ -582,13 +576,9 @@ func (s *PinsAPIServiceSQLite) getClusterNodes(ctx context.Context, cidStr strin
 	nodes := make([]PinNodeInfo, 0, len(pinInfo.PeerMap))
 	for peerID, peerInfo := range pinInfo.PeerMap {
 		node := PinNodeInfo{
-			PeerID:       peerID,
-			PeerName:     peerInfo.PeerName,
-			Status:       peerInfo.Status.String(),
-			AttemptCount: peerInfo.AttemptCount,
-		}
-		if !peerInfo.Timestamp.IsZero() {
-			node.Timestamp = peerInfo.Timestamp.Format(time.RFC3339)
+			PeerID:   peerID,
+			PeerName: peerInfo.PeerName,
+			Status:   peerInfo.Status.String(),
 		}
 		if peerInfo.Error != "" {
 			node.Error = peerInfo.Error

@@ -274,3 +274,12 @@ Note: Firebase backend requires `GOOGLE_APPLICATION_CREDENTIALS` environment var
 /home/root/pinning-service/pinning-webui# npm rebuild
 # systemctl restart fula-pinning-webui
 ```
+
+## update pinning-service port 6000
+cd /root/pinning-service
+git pull
+cd /root/pinning-service
+go mod download
+go build -o /home/root/pinning-service/ipfs-pinning -tags "sqlite" main_sqlite.go
+systemctl restart fula-pinning-service
+systemctl status fula-pinning-service

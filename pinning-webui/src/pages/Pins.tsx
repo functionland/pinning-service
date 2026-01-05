@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { S3Client, ListObjectsCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import {
   deriveEncryptionKey,
+  derivePlaylistEncryptionKey,
   exportKey,
   importKey,
   fetchAndDecrypt,
@@ -504,17 +505,15 @@ export default function Pins() {
   // Bucket: playlists, Prefix: user-playlists/
   // Lists all playlist files and decrypts each one
   const fetchPlaylists = async () => {
-    if (!user?.email) return;
+    if (!user?.id || !user?.email) return;
     setPlaylistsLoading(true);
     setPlaylistsError(null);
     try {
-      // Step 1: Get encryption key from secure storage
-      const keyBytes = await retrieveEncryptionKey(user.email, user.email);
-      if (!keyBytes) {
-        console.log('[Playlists] No encryption key found');
-        setPlaylistsData([]);
-        return;
-      }
+      // Step 1: Derive playlist encryption key
+      // NOTE: Playlists use a DIFFERENT key than files due to a bug in FxFiles Flutter app
+      // Files use "google:{id}" but playlists use just "{id}" (no prefix)
+      console.log('[Playlists] Deriving playlist encryption key for user:', user.id);
+      const playlistKey = await derivePlaylistEncryptionKey(user.id, user.email);
 
       // Step 2: Get JWT token for S3 authentication
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
@@ -543,7 +542,6 @@ export default function Pins() {
         }
 
         // Step 4: Fetch and decrypt each playlist
-        const cryptoKey = await importKey(keyBytes);
         const decryptedPlaylists: Playlist[] = [];
 
         for (const obj of objects) {
@@ -562,10 +560,9 @@ export default function Pins() {
             // Debug: log received data
             console.log('[Playlists] Received', encryptedBytes.length, 'bytes');
             console.log('[Playlists] First 32 bytes (hex):', Array.from(encryptedBytes.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
-            console.log('[Playlists] Key bytes length:', keyBytes.length);
 
-            // Decrypt
-            const decryptedBytes = await decrypt(encryptedBytes, cryptoKey);
+            // Decrypt using playlist-specific key (without "google:" prefix)
+            const decryptedBytes = await decrypt(encryptedBytes, playlistKey);
             const jsonText = new TextDecoder().decode(decryptedBytes);
             console.log('[Playlists] Decrypted:', obj.Key);
 

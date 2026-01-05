@@ -63,6 +63,59 @@ export async function deriveEncryptionKey(
 }
 
 /**
+ * Derives a playlist encryption key from user credentials using PBKDF2
+ *
+ * NOTE: This is different from deriveEncryptionKey()!
+ * Due to a bug in FxFiles Flutter app, PlaylistService uses just the raw
+ * Google ID without the "google:" prefix, while AuthService uses "google:{id}".
+ *
+ * - Files: Key from "google:{googleId}" + salt "fula-files-v1:{email}"
+ * - Playlists: Key from just "{googleId}" + salt "fula-files-v1:{email}"
+ *
+ * @param googleUserId - The Google user ID (raw, without prefix)
+ * @param userEmail - The user's email address (used as salt)
+ * @returns Promise<CryptoKey> - The derived AES-GCM key for playlists
+ */
+export async function derivePlaylistEncryptionKey(
+  googleUserId: string,
+  userEmail: string
+): Promise<CryptoKey> {
+  const encoder = new TextEncoder();
+
+  // NOTE: Playlists use just the raw Google ID, NOT "google:{id}"
+  // This is a bug in FxFiles PlaylistService._getEncryptionKey()
+  const password = googleUserId;
+
+  // Salt format: "fula-files-v1:{email}" - same as file encryption
+  const salt = encoder.encode(`${SALT_PREFIX}${userEmail}`);
+
+  // Import the password as the base key material
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits', 'deriveKey']
+  );
+
+  // Derive the AES-GCM key using PBKDF2
+  const derivedKey = await crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: salt,
+      iterations: PBKDF2_ITERATIONS,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    { name: 'AES-GCM', length: KEY_LENGTH_BITS },
+    true, // extractable
+    ['encrypt', 'decrypt']
+  );
+
+  return derivedKey;
+}
+
+/**
  * Export a CryptoKey to raw bytes for storage
  */
 export async function exportKey(key: CryptoKey): Promise<Uint8Array> {

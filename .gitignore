@@ -25,3 +25,4 @@ firebase.json
 ipfs-server/node_modules
 ipfs-server/package-lock.json
 .claude/*
+pinning-service

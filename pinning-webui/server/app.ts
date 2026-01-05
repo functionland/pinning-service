@@ -802,7 +802,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       if (!playlistId || typeof playlistId !== 'string') {
         return res.status(400).json({ error: 'playlistId query parameter required' });
       }
-      console.log('[webui] Fetching encrypted playlist:', key);
+      console.log('[webui] Fetching encrypted playlist:', playlistId);
 
       const playlistUrl = `${S3_GATEWAY}/playlists/user-playlists/${playlistId}.json`;
       console.log('[webui] Fetching playlist from:', playlistUrl);
@@ -828,11 +828,6 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       console.error('[webui] Error in playlists:', error);
       res.status(500).json({ error: 'Failed to fetch playlist' });
     }
-  });
-
-  // Legacy endpoint - returns empty (use /list and /encrypted/:key instead)
-  app.get('/api/playlists', requireAuth, async (_req: Request, res: Response) => {
-    return res.json({ playlists: [], note: 'Use /api/playlists/list and /api/playlists/encrypted/:key' });
   });
 
   // Get single playlist by ID

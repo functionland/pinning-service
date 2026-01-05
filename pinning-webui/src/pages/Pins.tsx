@@ -1061,14 +1061,19 @@ export default function Pins() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {nodesModalData.nodes.map((node, index) => (
+                  {/* Sort: pinned first, then pinning/queued, then remote, errors last */}
+                  {[...nodesModalData.nodes].sort((a, b) => {
+                    const order: Record<string, number> = { pinned: 0, pinning: 1, queued: 2, remote: 3, cluster_error: 4, pin_error: 5 };
+                    return (order[a.status] ?? 3) - (order[b.status] ?? 3);
+                  }).map((node, index) => (
                     <div
                       key={node.peer_id || index}
                       className={`p-4 rounded-lg border ${
                         node.status === 'pinned' ? 'border-green-200 bg-green-50' :
                         node.status === 'pinning' ? 'border-yellow-200 bg-yellow-50' :
                         node.status === 'queued' ? 'border-blue-200 bg-blue-50' :
-                        node.error ? 'border-red-200 bg-red-50' :
+                        node.status === 'remote' ? 'border-gray-200 bg-gray-50' :
+                        (node.error || node.status === 'cluster_error' || node.status === 'pin_error') ? 'border-red-200 bg-red-50' :
                         'border-gray-200 bg-gray-50'
                       }`}
                     >
@@ -1079,7 +1084,8 @@ export default function Pins() {
                               node.status === 'pinned' ? 'bg-green-100 text-green-800' :
                               node.status === 'pinning' ? 'bg-yellow-100 text-yellow-800' :
                               node.status === 'queued' ? 'bg-blue-100 text-blue-800' :
-                              node.error ? 'bg-red-100 text-red-800' :
+                              node.status === 'remote' ? 'bg-gray-100 text-gray-600' :
+                              (node.error || node.status === 'cluster_error' || node.status === 'pin_error') ? 'bg-red-100 text-red-800' :
                               'bg-gray-100 text-gray-800'
                             }`}>
                               {node.status}

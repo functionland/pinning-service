@@ -305,7 +305,7 @@ export function createDbOps(db: Database.Database, jwtSecret: string): DbOps {
 }
 
 // HTTP helpers
-export function httpGet(url: string, headers: Record<string, string>): Promise<{ status: number; data: string }> {
+export function httpGet(url: string, headers: Record<string, string>, timeoutMs: number = 10000): Promise<{ status: number; data: string }> {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
     const options = {
@@ -325,7 +325,7 @@ export function httpGet(url: string, headers: Record<string, string>): Promise<{
     });
 
     req.on('error', (error) => { reject(error); });
-    req.setTimeout(10000, () => { req.destroy(); reject(new Error('Request timeout')); });
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('Request timeout')); });
     req.end();
   });
 }
@@ -719,9 +719,10 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       const fullUrl = `http://127.0.0.1:6000/pins/${requestId}/nodes`;
       console.log(`[webui] Getting pin nodes for ${requestId} via ${fullUrl}`);
 
+      // Use longer timeout (30s) as cluster may need time to query all peers
       const response = await httpGet(fullUrl, {
         'Authorization': `Bearer ${keys[0].key_id}`
-      });
+      }, 30000);
 
       if (response.status !== 200) {
         console.error('[webui] Error getting pin nodes:', response.status, response.data);

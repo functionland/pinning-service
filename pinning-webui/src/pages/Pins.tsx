@@ -169,6 +169,7 @@ export default function Pins() {
       error?: string;
     }>;
   } | null>(null);
+  const [showAllNodes, setShowAllNodes] = useState(false);
 
   // Load tab data on tab change (lazy loading)
   useEffect(() => {
@@ -1052,66 +1053,111 @@ export default function Pins() {
               </button>
             </div>
             <div className="p-6 overflow-y-auto flex-1">
-              {nodesModalData.nodes.length === 0 ? (
-                <div className="text-center py-8 text-gray-500">
-                  <svg className="w-12 h-12 mx-auto mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
-                  </svg>
-                  <p>{t.pins.noNodes || 'No cluster nodes found for this pin.'}</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {/* Sort: pinned first, then pinning/queued, then remote, errors last */}
-                  {[...nodesModalData.nodes].sort((a, b) => {
-                    const order: Record<string, number> = { pinned: 0, pinning: 1, queued: 2, remote: 3, cluster_error: 4, pin_error: 5 };
-                    return (order[a.status] ?? 3) - (order[b.status] ?? 3);
-                  }).map((node, index) => (
-                    <div
-                      key={node.peer_id || index}
-                      className={`p-4 rounded-lg border ${
-                        node.status === 'pinned' ? 'border-green-200 bg-green-50' :
-                        node.status === 'pinning' ? 'border-yellow-200 bg-yellow-50' :
-                        node.status === 'queued' ? 'border-blue-200 bg-blue-50' :
-                        node.status === 'remote' ? 'border-gray-200 bg-gray-50' :
-                        (node.error || node.status === 'cluster_error' || node.status === 'pin_error') ? 'border-red-200 bg-red-50' :
-                        'border-gray-200 bg-gray-50'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center space-x-2">
-                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                              node.status === 'pinned' ? 'bg-green-100 text-green-800' :
-                              node.status === 'pinning' ? 'bg-yellow-100 text-yellow-800' :
-                              node.status === 'queued' ? 'bg-blue-100 text-blue-800' :
-                              node.status === 'remote' ? 'bg-gray-100 text-gray-600' :
-                              (node.error || node.status === 'cluster_error' || node.status === 'pin_error') ? 'bg-red-100 text-red-800' :
-                              'bg-gray-100 text-gray-800'
-                            }`}>
-                              {node.status}
-                            </span>
-                            {node.peer_name && (
-                              <span className="text-sm font-medium text-gray-900">{node.peer_name}</span>
-                            )}
-                          </div>
-                          <p className="text-xs text-gray-500 font-mono mt-1 truncate" title={node.peer_id}>
-                            {node.peer_id}
-                          </p>
-                          {node.error && (
-                            <p className="text-xs text-red-600 mt-1">
-                              {t.pins.error || 'Error'}: {node.error}
-                            </p>
-                          )}
-                        </div>
-                      </div>
+              {(() => {
+                const pinnedNodes = nodesModalData.nodes.filter(n => n.status === 'pinned' || n.status === 'pinning' || n.status === 'queued');
+                const otherNodes = nodesModalData.nodes.filter(n => n.status !== 'pinned' && n.status !== 'pinning' && n.status !== 'queued');
+                const errorCount = otherNodes.filter(n => n.status === 'cluster_error' || n.status === 'pin_error' || n.error).length;
+
+                return (
+                  <div className="space-y-4">
+                    {/* Summary */}
+                    <div className="flex flex-wrap gap-2 pb-4 border-b border-gray-200">
+                      <span className="px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm font-medium">
+                        {pinnedNodes.filter(n => n.status === 'pinned').length} nodes storing this content
+                      </span>
+                      <span className="px-3 py-1 bg-gray-100 text-gray-600 rounded-full text-sm">
+                        {nodesModalData.nodes.length} total cluster nodes
+                      </span>
                     </div>
-                  ))}
-                </div>
-              )}
+
+                    {/* Pinned nodes */}
+                    {pinnedNodes.length === 0 ? (
+                      <div className="text-center py-6 text-gray-500">
+                        <p>{t.pins.noPinnedNodes || 'No nodes are currently storing this content.'}</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {pinnedNodes.map((node, index) => (
+                          <div
+                            key={node.peer_id || index}
+                            className={`p-3 rounded-lg border ${
+                              node.status === 'pinned' ? 'border-green-200 bg-green-50' :
+                              node.status === 'pinning' ? 'border-yellow-200 bg-yellow-50' :
+                              'border-blue-200 bg-blue-50'
+                            }`}
+                          >
+                            <div className="flex items-center space-x-2">
+                              <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                                node.status === 'pinned' ? 'bg-green-100 text-green-800' :
+                                node.status === 'pinning' ? 'bg-yellow-100 text-yellow-800' :
+                                'bg-blue-100 text-blue-800'
+                              }`}>
+                                {node.status}
+                              </span>
+                              {node.peer_name && (
+                                <span className="text-sm font-medium text-gray-900">{node.peer_name}</span>
+                              )}
+                            </div>
+                            <p className="text-xs text-gray-500 font-mono mt-1 truncate" title={node.peer_id}>
+                              {node.peer_id}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Expandable other nodes */}
+                    {otherNodes.length > 0 && (
+                      <div className="pt-2">
+                        <button
+                          onClick={() => setShowAllNodes(!showAllNodes)}
+                          className="flex items-center text-sm text-gray-500 hover:text-gray-700"
+                        >
+                          <svg
+                            className={`w-4 h-4 mr-1 transition-transform ${showAllNodes ? 'rotate-90' : ''}`}
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                          </svg>
+                          {showAllNodes ? 'Hide' : 'Show'} {otherNodes.length} other nodes
+                          {errorCount > 0 && ` (${errorCount} with errors)`}
+                        </button>
+
+                        {showAllNodes && (
+                          <div className="mt-2 space-y-1 max-h-48 overflow-y-auto">
+                            {otherNodes.map((node, index) => (
+                              <div
+                                key={node.peer_id || index}
+                                className={`p-2 rounded text-sm ${
+                                  node.error || node.status === 'cluster_error' || node.status === 'pin_error'
+                                    ? 'bg-red-50 text-red-700'
+                                    : 'bg-gray-50 text-gray-600'
+                                }`}
+                              >
+                                <div className="flex items-center space-x-2">
+                                  <span className="text-xs font-medium">{node.status}</span>
+                                  <span className="font-mono text-xs truncate" title={node.peer_id}>
+                                    {node.peer_id.substring(0, 20)}...
+                                  </span>
+                                </div>
+                                {node.error && (
+                                  <p className="text-xs mt-1">{node.error}</p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
             <div className="p-4 border-t border-gray-100 flex justify-end">
               <button
-                onClick={() => setNodesModalData(null)}
+                onClick={() => { setNodesModalData(null); setShowAllNodes(false); }}
                 className="btn-secondary"
               >
                 {t.pins.close || 'Close'}

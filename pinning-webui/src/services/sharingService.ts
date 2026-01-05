@@ -122,6 +122,7 @@ export function parseShareUrl(url: string): { shareId: string; payload: SharePay
 
     // Expected format: /view/{shareId}
     if (pathParts.length < 2 || pathParts[0] !== 'view') {
+      console.error('[parseShareUrl] Invalid path format:', urlObj.pathname);
       return null;
     }
 
@@ -129,16 +130,23 @@ export function parseShareUrl(url: string): { shareId: string; payload: SharePay
     const fragment = urlObj.hash.startsWith('#') ? urlObj.hash.slice(1) : urlObj.hash;
 
     if (!fragment) {
+      console.error('[parseShareUrl] No fragment in URL');
       return null;
     }
 
+    console.log('[parseShareUrl] Fragment length:', fragment.length);
+    console.log('[parseShareUrl] Fragment preview:', fragment.substring(0, 100) + '...');
+
     // Decode base64url payload
     const payloadJson = base64UrlDecode(fragment);
+    console.log('[parseShareUrl] Decoded JSON:', payloadJson.substring(0, 200));
+
     const payload = JSON.parse(payloadJson) as SharePayload;
+    console.log('[parseShareUrl] Parsed payload keys:', Object.keys(payload));
 
     return { shareId, payload };
   } catch (error) {
-    console.error('[SharingService] Failed to parse share URL:', error);
+    console.error('[parseShareUrl] Failed to parse share URL:', error);
     return null;
   }
 }
@@ -190,6 +198,17 @@ export async function decryptSharePayload(
   payload: SharePayload,
   password?: string
 ): Promise<DecryptedShareData> {
+  console.log('[decryptSharePayload] Payload:', {
+    v: payload.v,
+    p: payload.p,
+    hasK: !!payload.k,
+    hasS: !!payload.s,
+    hasE: !!payload.e,
+    kLength: payload.k?.length,
+    sLength: payload.s?.length,
+    eLength: payload.e?.length,
+  });
+
   let key: CryptoKey;
 
   if (payload.p && password) {
@@ -197,23 +216,30 @@ export async function decryptSharePayload(
     if (!payload.s) {
       throw new Error('Password-protected share missing salt');
     }
+    console.log('[decryptSharePayload] Decoding salt...');
     const saltBytes = base64ToUint8Array(payload.s);
+    console.log('[decryptSharePayload] Deriving key from password...');
     key = await deriveKeyFromPassword(password, saltBytes);
   } else if (payload.k) {
     // Public link: use the key directly
+    console.log('[decryptSharePayload] Decoding key (k)...');
     const keyBytes = base64ToUint8Array(payload.k);
+    console.log('[decryptSharePayload] Importing key, length:', keyBytes.length);
     key = await importKey(keyBytes);
   } else {
     throw new Error('Share payload missing decryption key');
   }
 
   // Decrypt the 'e' field
+  console.log('[decryptSharePayload] Decoding encrypted data (e)...');
   const encryptedBytes = base64ToUint8Array(payload.e);
+  console.log('[decryptSharePayload] Decrypting, length:', encryptedBytes.length);
   const decryptedBytes = await decrypt(encryptedBytes, key);
 
   // Parse the decrypted JSON
   const decoder = new TextDecoder();
   const decryptedJson = decoder.decode(decryptedBytes);
+  console.log('[decryptSharePayload] Decrypted JSON:', decryptedJson.substring(0, 200));
 
   try {
     return JSON.parse(decryptedJson) as DecryptedShareData;
@@ -318,6 +344,10 @@ export function formatExpiry(token: ShareToken): string {
  * Base64URL decode
  */
 export function base64UrlDecode(str: string): string {
+  if (!str) {
+    throw new Error('Empty string to decode');
+  }
+
   // Convert base64url to base64
   let base64 = str.replace(/-/g, '+').replace(/_/g, '/');
 
@@ -326,7 +356,15 @@ export function base64UrlDecode(str: string): string {
     base64 += '=';
   }
 
-  return atob(base64);
+  // Remove any whitespace
+  base64 = base64.replace(/\s/g, '');
+
+  try {
+    return atob(base64);
+  } catch (error) {
+    console.error('[base64UrlDecode] Failed to decode, first 100 chars:', str.substring(0, 100));
+    throw new Error(`Failed to decode base64url: ${error instanceof Error ? error.message : 'unknown'}`);
+  }
 }
 
 /**
@@ -343,18 +381,30 @@ export function base64UrlEncode(str: string): string {
  * Convert base64 string to Uint8Array
  */
 export function base64ToUint8Array(base64: string): Uint8Array {
+  if (!base64) {
+    throw new Error('Empty base64 string');
+  }
+
   // Handle base64url format
   let normalized = base64.replace(/-/g, '+').replace(/_/g, '/');
   while (normalized.length % 4) {
     normalized += '=';
   }
 
-  const binary = atob(normalized);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
+  // Remove any whitespace or newlines
+  normalized = normalized.replace(/\s/g, '');
+
+  try {
+    const binary = atob(normalized);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch (error) {
+    console.error('[base64ToUint8Array] Failed to decode:', base64.substring(0, 50) + '...');
+    throw new Error(`Invalid base64 string: ${error instanceof Error ? error.message : 'unknown error'}`);
   }
-  return bytes;
 }
 
 /**

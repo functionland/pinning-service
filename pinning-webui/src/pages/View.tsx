@@ -483,11 +483,25 @@ function ContentViewer({ type, blobUrl, mimeType, data, filename, onDownload }: 
 
     case 'pdf':
       return (
-        <iframe
-          src={blobUrl}
-          className="w-full h-[calc(100vh-120px)] rounded-lg"
-          title={filename}
-        />
+        <object
+          data={blobUrl}
+          type="application/pdf"
+          className="w-full h-[calc(100vh-120px)] rounded-lg bg-white"
+        >
+          {/* Fallback when PDF cannot be displayed */}
+          <div className="bg-white rounded-2xl p-8 max-w-md w-full text-center">
+            <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <span className="text-3xl text-red-600">PDF</span>
+            </div>
+            <h2 className="text-xl font-bold text-gray-900 mb-2">{filename}</h2>
+            <p className="text-gray-600 mb-6">
+              {t.view?.pdfNotSupported || 'PDF preview is not supported on this device. Please download the file to view it.'}
+            </p>
+            <button onClick={onDownload} className="btn-primary">
+              {t.view?.download || 'Download'}
+            </button>
+          </div>
+        </object>
       );
 
     case 'document':

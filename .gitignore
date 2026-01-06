@@ -27,3 +27,4 @@ ipfs-server/package-lock.json
 .claude/*
 pinning-service
 ipfs-pinning
+/.claude

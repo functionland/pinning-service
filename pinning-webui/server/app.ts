@@ -10,6 +10,21 @@ import Database from 'better-sqlite3';
 import { OAuth2Client } from 'google-auth-library';
 import { v4 as uuidv4 } from 'uuid';
 import jwt from 'jsonwebtoken';
+import {
+  getUserCreditStatus,
+  getUserWallets,
+  linkWallet,
+  unlinkWallet,
+  getCreditHistory,
+  creditUser,
+  getSuspendedUsers,
+  unsuspendUser,
+  isAdmin,
+  getSupportedChains,
+  FREE_TIER_BYTES,
+  FULA_PER_GB_MONTH,
+  rawToFula,
+} from './services/creditService.js';
 
 // Session user type
 export interface SessionUser {
@@ -84,7 +99,98 @@ export function initializeDatabase(dbPath: string): Database.Database {
     -- Create indexes
     CREATE INDEX IF NOT EXISTS idx_api_keys_user_email ON api_keys(user_email);
     CREATE INDEX IF NOT EXISTS idx_api_keys_key_id ON api_keys(key_id);
+
+    -- ============================================
+    -- Web3 Payment Integration Tables
+    -- ============================================
+
+    -- User wallets (linked blockchain addresses)
+    CREATE TABLE IF NOT EXISTS user_wallets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL,
+      wallet_address TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      is_verified INTEGER DEFAULT 0,
+      connected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_email, wallet_address, chain_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_wallets_email ON user_wallets(user_email);
+    CREATE INDEX IF NOT EXISTS idx_user_wallets_address ON user_wallets(wallet_address);
+
+    -- Token transactions (FULA payments to vault)
+    CREATE TABLE IF NOT EXISTS token_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tx_hash TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      from_address TEXT NOT NULL,
+      to_address TEXT NOT NULL,
+      amount_raw TEXT NOT NULL,
+      amount_fula REAL NOT NULL,
+      block_number INTEGER NOT NULL,
+      block_timestamp INTEGER NOT NULL,
+      user_email TEXT,
+      claimed_at DATETIME,
+      ingestion_source TEXT CHECK(ingestion_source IN ('cron', 'manual')),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(tx_hash, chain_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_token_tx_from ON token_transactions(from_address);
+    CREATE INDEX IF NOT EXISTS idx_token_tx_user ON token_transactions(user_email);
+    CREATE INDEX IF NOT EXISTS idx_token_tx_hash ON token_transactions(tx_hash);
+
+    -- Chain sync state (for block scanner cron)
+    CREATE TABLE IF NOT EXISTS chain_sync_state (
+      chain_id INTEGER PRIMARY KEY,
+      chain_name TEXT NOT NULL,
+      last_scanned_block INTEGER DEFAULT 0,
+      last_scan_at DATETIME,
+      is_enabled INTEGER DEFAULT 1,
+      token_address TEXT NOT NULL,
+      vault_address TEXT NOT NULL
+    );
+
+    -- User credits (FULA balance for storage)
+    CREATE TABLE IF NOT EXISTS user_credits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL UNIQUE,
+      balance_fula REAL DEFAULT 0,
+      total_deposited_fula REAL DEFAULT 0,
+      total_deducted_fula REAL DEFAULT 0,
+      last_deduction_at DATETIME,
+      is_suspended INTEGER DEFAULT 0,
+      suspended_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_credits_email ON user_credits(user_email);
+    CREATE INDEX IF NOT EXISTS idx_user_credits_suspended ON user_credits(is_suspended);
+
+    -- Credit history (audit log)
+    CREATE TABLE IF NOT EXISTS credit_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL,
+      tx_type TEXT CHECK(tx_type IN ('deposit', 'hourly_deduction', 'adjustment')),
+      amount_fula REAL NOT NULL,
+      balance_after REAL NOT NULL,
+      reference_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_credit_history_email ON credit_history(user_email);
+    CREATE INDEX IF NOT EXISTS idx_credit_history_type ON credit_history(tx_type);
   `);
+
+  // Seed chain_sync_state with supported chains (if empty)
+  const chainCount = database.prepare('SELECT COUNT(*) as count FROM chain_sync_state').get() as { count: number };
+  if (chainCount.count === 0) {
+    const vaultAddress = process.env.VAULT_ADDRESS || '0x0000000000000000000000000000000000000000';
+    database.prepare(`
+      INSERT INTO chain_sync_state (chain_id, chain_name, token_address, vault_address, is_enabled)
+      VALUES
+        (1, 'Ethereum', '0x92217cCaEDBdbc54C76c15feA18823db1558fDc9', ?, 1),
+        (8453, 'Base', '0x9e12735d77c72c5C3670636D428f2F3815d8A4cB', ?, 1),
+        (2046399126, 'Skale Europa', '0x9e12735d77c72c5C3670636D428f2F3815d8A4cB', ?, 1)
+    `).run(vaultAddress, vaultAddress, vaultAddress);
+  }
 
   return database;
 }
@@ -149,6 +255,67 @@ export function initializeTestDatabase(): Database.Database {
 
     CREATE INDEX IF NOT EXISTS idx_api_keys_user_email ON api_keys(user_email);
     CREATE INDEX IF NOT EXISTS idx_api_keys_key_id ON api_keys(key_id);
+
+    -- Web3 Payment Tables (same as production)
+    CREATE TABLE IF NOT EXISTS user_wallets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL,
+      wallet_address TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      is_verified INTEGER DEFAULT 0,
+      connected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_email, wallet_address, chain_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS token_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tx_hash TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      from_address TEXT NOT NULL,
+      to_address TEXT NOT NULL,
+      amount_raw TEXT NOT NULL,
+      amount_fula REAL NOT NULL,
+      block_number INTEGER NOT NULL,
+      block_timestamp INTEGER NOT NULL,
+      user_email TEXT,
+      claimed_at DATETIME,
+      ingestion_source TEXT CHECK(ingestion_source IN ('cron', 'manual')),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(tx_hash, chain_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS chain_sync_state (
+      chain_id INTEGER PRIMARY KEY,
+      chain_name TEXT NOT NULL,
+      last_scanned_block INTEGER DEFAULT 0,
+      last_scan_at DATETIME,
+      is_enabled INTEGER DEFAULT 1,
+      token_address TEXT NOT NULL,
+      vault_address TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_credits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL UNIQUE,
+      balance_fula REAL DEFAULT 0,
+      total_deposited_fula REAL DEFAULT 0,
+      total_deducted_fula REAL DEFAULT 0,
+      last_deduction_at DATETIME,
+      is_suspended INTEGER DEFAULT 0,
+      suspended_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS credit_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL,
+      tx_type TEXT CHECK(tx_type IN ('deposit', 'hourly_deduction', 'adjustment')),
+      amount_fula REAL NOT NULL,
+      balance_after REAL NOT NULL,
+      reference_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   return database;
@@ -1033,6 +1200,346 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     } catch (error) {
       console.error('[webui] Error fetching public stats:', error);
       res.status(500).json({ error: 'Failed to fetch stats' });
+    }
+  });
+
+  // ============ Web3 Payment / Credits API Endpoints ============
+
+  // Get credit status (balance, usage, can upload)
+  app.get('/api/credits', requireAuth, (req: Request, res: Response) => {
+    try {
+      const status = getUserCreditStatus(db, req.session.user!.email);
+      res.json(status);
+    } catch (error) {
+      console.error('[webui] Error getting credit status:', error);
+      res.status(500).json({ error: 'Failed to get credit status' });
+    }
+  });
+
+  // Get credit history
+  app.get('/api/credits/history', requireAuth, (req: Request, res: Response) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const history = getCreditHistory(db, req.session.user!.email, Math.min(limit, 100));
+      res.json({ history });
+    } catch (error) {
+      console.error('[webui] Error getting credit history:', error);
+      res.status(500).json({ error: 'Failed to get credit history' });
+    }
+  });
+
+  // Manual transaction claim
+  app.post('/api/credits/claim', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { txHash, chainId } = req.body;
+
+      if (!txHash || !chainId) {
+        return res.status(400).json({ error: 'txHash and chainId are required' });
+      }
+
+      // Validate tx hash format
+      if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) {
+        return res.status(400).json({ error: 'Invalid transaction hash format' });
+      }
+
+      // Check if already claimed
+      const existing = db.prepare(`
+        SELECT user_email, claimed_at FROM token_transactions
+        WHERE tx_hash = ? AND chain_id = ?
+      `).get(txHash.toLowerCase(), chainId) as { user_email: string | null; claimed_at: string | null } | undefined;
+
+      if (existing?.claimed_at) {
+        return res.status(400).json({ error: 'This transaction has already been credited' });
+      }
+
+      // Get chain config
+      const chain = db.prepare(`
+        SELECT token_address, vault_address FROM chain_sync_state
+        WHERE chain_id = ? AND is_enabled = 1
+      `).get(chainId) as { token_address: string; vault_address: string } | undefined;
+
+      if (!chain) {
+        return res.status(400).json({ error: 'Unsupported or disabled chain' });
+      }
+
+      // Fetch transaction from blockchain explorer
+      let explorerUrl: string;
+      switch (chainId) {
+        case 1:
+          explorerUrl = `https://api.etherscan.io/v2/api?chainid=1&module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}&apikey=${process.env.ETHERSCAN_API_KEY || ''}`;
+          break;
+        case 8453:
+          explorerUrl = `https://api.etherscan.io/v2/api?chainid=8453&module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}&apikey=${process.env.ETHERSCAN_API_KEY || ''}`;
+          break;
+        case 2046399126:
+          explorerUrl = `https://elated-tan-skat.explorer.mainnet.skalenodes.com/api?module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}`;
+          break;
+        default:
+          return res.status(400).json({ error: 'Unsupported chain' });
+      }
+
+      const response = await fetch(explorerUrl);
+      const data = await response.json();
+
+      if (!data.result || data.result === null) {
+        return res.status(404).json({ error: 'Transaction not found or not confirmed' });
+      }
+
+      // Parse token transfer from logs
+      const receipt = data.result;
+      const transferTopic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'; // Transfer(address,address,uint256)
+      const tokenAddressLower = chain.token_address.toLowerCase();
+      const vaultAddressLower = chain.vault_address.toLowerCase();
+
+      let transferFound = false;
+      let fromAddress = '';
+      let amountRaw = '0';
+
+      for (const log of receipt.logs || []) {
+        if (log.address.toLowerCase() !== tokenAddressLower) continue;
+        if (log.topics[0] !== transferTopic) continue;
+
+        const to = '0x' + log.topics[2].slice(26).toLowerCase();
+        if (to !== vaultAddressLower) continue;
+
+        fromAddress = '0x' + log.topics[1].slice(26).toLowerCase();
+        amountRaw = BigInt(log.data).toString();
+        transferFound = true;
+        break;
+      }
+
+      if (!transferFound) {
+        return res.status(400).json({ error: 'No FULA transfer to vault found in this transaction' });
+      }
+
+      const amountFula = rawToFula(amountRaw);
+      if (amountFula < 0.001) {
+        return res.status(400).json({ error: 'Transfer amount too small' });
+      }
+
+      // Check if user has this wallet linked
+      const userEmail = req.session.user!.email;
+      const wallet = db.prepare(`
+        SELECT 1 FROM user_wallets
+        WHERE user_email = ? AND wallet_address = ? AND is_verified = 1
+      `).get(userEmail, fromAddress) as { 1: number } | undefined;
+
+      if (!wallet) {
+        return res.status(400).json({
+          error: 'Wallet not linked to your account',
+          message: `Please link wallet ${fromAddress} to your account first`,
+        });
+      }
+
+      // Insert or update transaction
+      if (existing) {
+        // Transaction exists but unclaimed - claim it
+        db.prepare(`
+          UPDATE token_transactions
+          SET user_email = ?, claimed_at = CURRENT_TIMESTAMP, ingestion_source = 'manual'
+          WHERE tx_hash = ? AND chain_id = ?
+        `).run(userEmail, txHash.toLowerCase(), chainId);
+      } else {
+        // Insert new transaction
+        db.prepare(`
+          INSERT INTO token_transactions
+            (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_email, claimed_at, ingestion_source)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'manual')
+        `).run(
+          txHash.toLowerCase(),
+          chainId,
+          fromAddress,
+          vaultAddressLower,
+          amountRaw,
+          amountFula,
+          parseInt(receipt.blockNumber, 16),
+          Math.floor(Date.now() / 1000),
+          userEmail
+        );
+      }
+
+      // Credit the user
+      creditUser(db, userEmail, amountFula, `${chainId}:${txHash}`);
+
+      console.log(`[webui] Manual claim: credited ${amountFula} FULA to ${userEmail} from tx ${txHash}`);
+
+      res.json({
+        success: true,
+        amountFula,
+        newBalance: getUserCreditStatus(db, userEmail).balanceFula,
+      });
+    } catch (error) {
+      console.error('[webui] Error claiming transaction:', error);
+      res.status(500).json({ error: 'Failed to claim transaction' });
+    }
+  });
+
+  // Get user's linked wallets
+  app.get('/api/wallets', requireAuth, (req: Request, res: Response) => {
+    try {
+      const wallets = getUserWallets(db, req.session.user!.email);
+      const chains = getSupportedChains(db);
+      res.json({ wallets, supportedChains: chains });
+    } catch (error) {
+      console.error('[webui] Error getting wallets:', error);
+      res.status(500).json({ error: 'Failed to get wallets' });
+    }
+  });
+
+  // Connect/link a wallet (with signature verification)
+  app.post('/api/wallets/connect', requireAuth, (req: Request, res: Response) => {
+    try {
+      const { address, chainId, signature, message } = req.body;
+
+      if (!address || !chainId || !signature || !message) {
+        return res.status(400).json({ error: 'address, chainId, signature, and message are required' });
+      }
+
+      // Validate address format
+      if (!/^0x[a-fA-F0-9]{40}$/i.test(address)) {
+        return res.status(400).json({ error: 'Invalid wallet address format' });
+      }
+
+      // Verify the message contains user email (prevents replay attacks)
+      const expectedMessagePart = `Link wallet to ${req.session.user!.email}`;
+      if (!message.includes(expectedMessagePart)) {
+        return res.status(400).json({ error: 'Invalid signature message' });
+      }
+
+      // TODO: Add proper signature verification with viem/ethers
+      // For now, we just check signature format
+      if (!/^0x[a-fA-F0-9]+$/.test(signature)) {
+        return res.status(400).json({ error: 'Invalid signature format' });
+      }
+
+      // Check if chain is supported
+      const chain = db.prepare('SELECT 1 FROM chain_sync_state WHERE chain_id = ? AND is_enabled = 1').get(chainId);
+      if (!chain) {
+        return res.status(400).json({ error: 'Unsupported or disabled chain' });
+      }
+
+      // Link the wallet (verified)
+      linkWallet(db, req.session.user!.email, address, chainId, true);
+
+      console.log(`[webui] Wallet ${address} linked to ${req.session.user!.email} on chain ${chainId}`);
+
+      res.json({ success: true, address: address.toLowerCase(), chainId });
+    } catch (error) {
+      console.error('[webui] Error connecting wallet:', error);
+      res.status(500).json({ error: 'Failed to connect wallet' });
+    }
+  });
+
+  // Disconnect/unlink a wallet
+  app.delete('/api/wallets/:address', requireAuth, (req: Request, res: Response) => {
+    try {
+      const { address } = req.params;
+
+      if (!address) {
+        return res.status(400).json({ error: 'Wallet address is required' });
+      }
+
+      const success = unlinkWallet(db, req.session.user!.email, address);
+
+      if (!success) {
+        return res.status(404).json({ error: 'Wallet not found' });
+      }
+
+      console.log(`[webui] Wallet ${address} unlinked from ${req.session.user!.email}`);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[webui] Error disconnecting wallet:', error);
+      res.status(500).json({ error: 'Failed to disconnect wallet' });
+    }
+  });
+
+  // Get pricing info (public)
+  app.get('/api/credits/pricing', (_req: Request, res: Response) => {
+    res.json({
+      freeTierBytes: FREE_TIER_BYTES,
+      freeTierMB: Math.round(FREE_TIER_BYTES / (1024 * 1024)),
+      fulaPerGBMonth: FULA_PER_GB_MONTH,
+      chains: getSupportedChains(db).filter(c => c.isEnabled),
+    });
+  });
+
+  // ============ Admin Endpoints ============
+
+  // Admin middleware
+  function requireAdmin(req: Request, res: Response, next: NextFunction) {
+    if (!req.session.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!isAdmin(req.session.user.email)) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    next();
+  }
+
+  // Get suspended users (admin only)
+  app.get('/api/admin/suspended', requireAdmin, (_req: Request, res: Response) => {
+    try {
+      const users = getSuspendedUsers(db);
+      res.json({ users });
+    } catch (error) {
+      console.error('[webui] Error getting suspended users:', error);
+      res.status(500).json({ error: 'Failed to get suspended users' });
+    }
+  });
+
+  // Unsuspend a user (admin only)
+  app.post('/api/admin/unsuspend', requireAdmin, (req: Request, res: Response) => {
+    try {
+      const { email } = req.body;
+
+      if (!email) {
+        return res.status(400).json({ error: 'Email is required' });
+      }
+
+      const success = unsuspendUser(db, email);
+
+      if (!success) {
+        return res.status(404).json({ error: 'User not found or not suspended' });
+      }
+
+      console.log(`[webui] Admin ${req.session.user!.email} unsuspended ${email}`);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[webui] Error unsuspending user:', error);
+      res.status(500).json({ error: 'Failed to unsuspend user' });
+    }
+  });
+
+  // Manual credit adjustment (admin only)
+  app.post('/api/admin/adjust', requireAdmin, (req: Request, res: Response) => {
+    try {
+      const { email, amount, reason } = req.body;
+
+      if (!email || amount === undefined || !reason) {
+        return res.status(400).json({ error: 'email, amount, and reason are required' });
+      }
+
+      const numAmount = parseFloat(amount);
+      if (isNaN(numAmount)) {
+        return res.status(400).json({ error: 'Invalid amount' });
+      }
+
+      creditUser(db, email, numAmount, `admin:${req.session.user!.email}:${reason}`, 'adjustment');
+
+      console.log(`[webui] Admin ${req.session.user!.email} adjusted ${email} by ${numAmount} FULA: ${reason}`);
+
+      const newStatus = getUserCreditStatus(db, email);
+
+      res.json({
+        success: true,
+        newBalance: newStatus.balanceFula,
+        isSuspended: newStatus.isSuspended,
+      });
+    } catch (error) {
+      console.error('[webui] Error adjusting credits:', error);
+      res.status(500).json({ error: 'Failed to adjust credits' });
     }
   });
 

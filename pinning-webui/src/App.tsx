@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import ApiKeys from './pages/ApiKeys';
 import Pins from './pages/Pins';
 import Profile from './pages/Profile';
+import Billing from './pages/Billing';
 import GetKey from './pages/GetKey';
 import View from './pages/View';
 import Layout from './components/Layout';
@@ -44,6 +45,7 @@ function App() {
             <Route index element={<Dashboard />} />
             <Route path="keys" element={<ApiKeys />} />
             <Route path="pins" element={<Pins />} />
+            <Route path="billing" element={<Billing />} />
             <Route path="profile" element={<Profile />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

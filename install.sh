@@ -509,12 +509,12 @@ EOF
 # Generate WebUI .env file
 generate_webui_env_file() {
     local target_dir=$1
-    
+
     print_info "Generating WebUI .env file..."
-    
+
     # Generate a random session secret
     SESSION_SECRET=$(openssl rand -hex 32 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 64 | head -n 1)
-    
+
     cat > "$target_dir/pinning-webui/.env" << EOF
 # FULA Pinning WebUI Configuration
 # Generated on $(date)
@@ -543,10 +543,31 @@ PINNING_SERVICE_URL=http://localhost:${PORT}
 
 # Domain Configuration (for nginx/SSL)
 WEBUI_DOMAIN=${WEBUI_DOMAIN}
+
+# ============================================
+# Web3 Payment Configuration (FULA Token)
+# ============================================
+
+# Vault address to receive FULA payments
+# IMPORTANT: Set this to your actual wallet address to enable payments
+VAULT_ADDRESS=${VAULT_ADDRESS:-0x0000000000000000000000000000000000000000}
+
+# Free tier storage limit in bytes (default: 500MB)
+FREE_TIER_BYTES=${FREE_TIER_BYTES:-524288000}
+
+# FULA price per GB per month (default: 3)
+FULA_PER_GB_MONTH=${FULA_PER_GB_MONTH:-3}
+
+# Etherscan API key for block scanning (Base/Ethereum)
+# Get from: https://etherscan.io/apis
+ETHERSCAN_API_KEY=${ETHERSCAN_API_KEY:-}
+
+# Admin emails (comma-separated) - can manage suspended users
+ADMIN_EMAILS=${ADMIN_EMAILS:-}
 EOF
 
     chmod 600 "$target_dir/pinning-webui/.env"
-    
+
     verify_step "WebUI .env file creation" "[ -f '$target_dir/pinning-webui/.env' ]"
 }
 
@@ -1654,7 +1675,24 @@ main() {
         INSTALL_WEBUI=true
         prompt_value "WebUI domain (e.g., cloud.fx.land, leave empty for localhost)" "${WEBUI_DOMAIN:-}" "WEBUI_DOMAIN"
     fi
-    
+
+    # ===========================================
+    # Payment Configuration (FULA Token)
+    # ===========================================
+    echo ""
+    echo "=========================================="
+    print_info "4. PAYMENT Configuration (Optional)"
+    echo "=========================================="
+    echo "  Configure FULA token payments for storage beyond the free tier."
+    echo "  Leave vault address empty or as 0x000...000 to disable payments."
+    echo ""
+    prompt_value "Vault address (wallet to receive FULA payments)" "${VAULT_ADDRESS:-0x0000000000000000000000000000000000000000}" "VAULT_ADDRESS"
+    prompt_value "Free tier storage in MB (default: 500)" "${FREE_TIER_MB:-500}" "FREE_TIER_MB"
+    FREE_TIER_BYTES=$((FREE_TIER_MB * 1024 * 1024))
+    prompt_value "FULA per GB per month (default: 3)" "${FULA_PER_GB_MONTH:-3}" "FULA_PER_GB_MONTH"
+    prompt_value "Etherscan API key (for Base/Ethereum scanning)" "${ETHERSCAN_API_KEY:-}" "ETHERSCAN_API_KEY"
+    prompt_value "Admin emails (comma-separated, for managing suspended users)" "${ADMIN_EMAILS:-}" "ADMIN_EMAILS"
+
     # ===========================================
     # SSL Configuration
     # ===========================================

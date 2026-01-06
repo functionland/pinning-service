@@ -195,8 +195,21 @@ export interface Translations {
     dashboard: string;
     apiKeys: string;
     myPins: string;
+    billing?: string;
     profile: string;
     logout: string;
+  };
+  billing?: {
+    title: string;
+    subtitle: string;
+    storageUsage: string;
+    balance: string;
+    status: string;
+    depositTitle: string;
+    claimTitle: string;
+    walletsTitle: string;
+    historyTitle: string;
+    chainsTitle: string;
   };
   common: {
     loading: string;

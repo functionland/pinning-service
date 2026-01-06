@@ -276,6 +276,21 @@ export default function Login() {
             <div className="text-xs text-gray-500">{t.login.analyticsDesc}</div>
           </div>
         </div>
+
+        {/* Pricing info */}
+        <div className="mt-6 bg-white/60 backdrop-blur rounded-xl p-4 text-center">
+          <div className="flex items-center justify-center gap-4 text-sm">
+            <div className="flex items-center gap-2">
+              <span className="text-green-500">✓</span>
+              <span className="text-gray-700">500 MB Free</span>
+            </div>
+            <div className="h-4 w-px bg-gray-300"></div>
+            <div className="flex items-center gap-2">
+              <span className="text-primary-600 font-medium">3 FULA</span>
+              <span className="text-gray-500">/ GB / month</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

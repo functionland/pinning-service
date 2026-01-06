@@ -12,6 +12,7 @@ export default function Layout() {
     { name: t.nav.dashboard, href: '/' },
     { name: t.nav.apiKeys, href: '/keys' },
     { name: t.nav.myPins, href: '/pins' },
+    { name: t.nav.billing || 'Billing', href: '/billing' },
     { name: t.nav.profile, href: '/profile' },
   ];
 

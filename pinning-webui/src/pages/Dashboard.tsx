@@ -10,6 +10,15 @@ interface Stats {
   memberSince: string | null;
 }
 
+interface CreditStatus {
+  balanceFula: number;
+  currentStorageBytes: number;
+  freeTierBytes: number;
+  canUpload: boolean;
+  isSuspended: boolean;
+  message: string;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 Bytes';
   const k = 1024;
@@ -28,20 +37,29 @@ export default function Dashboard() {
   const { t } = useLanguage();
   const [searchParams] = useSearchParams();
   const [stats, setStats] = useState<Stats | null>(null);
+  const [creditStatus, setCreditStatus] = useState<CreditStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const isWelcome = searchParams.get('welcome') === 'true';
 
   useEffect(() => {
-    fetchStats();
+    fetchData();
   }, []);
 
-  const fetchStats = async () => {
+  const fetchData = async () => {
     try {
-      const res = await fetch('/api/stats', { credentials: 'include' });
-      if (!res.ok) throw new Error('Failed to fetch stats');
-      const data = await res.json();
-      setStats(data);
+      const [statsRes, creditsRes] = await Promise.all([
+        fetch('/api/stats', { credentials: 'include' }),
+        fetch('/api/credits', { credentials: 'include' }),
+      ]);
+      if (!statsRes.ok) throw new Error('Failed to fetch stats');
+      const statsData = await statsRes.json();
+      setStats(statsData);
+
+      if (creditsRes.ok) {
+        const creditsData = await creditsRes.json();
+        setCreditStatus(creditsData);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -136,10 +154,30 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Credit status card */}
+      {creditStatus && (
+        <div className={`card ${creditStatus.isSuspended ? 'bg-red-50 border-red-200' : creditStatus.canUpload ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-4">
+              <div className="text-3xl">{creditStatus.isSuspended ? '⚠️' : creditStatus.canUpload ? '✅' : '💳'}</div>
+              <div>
+                <h3 className="font-semibold text-gray-900">
+                  {creditStatus.isSuspended ? 'Account Suspended' : `Balance: ${creditStatus.balanceFula.toFixed(2)} FULA`}
+                </h3>
+                <p className="text-sm text-gray-600">{creditStatus.message}</p>
+              </div>
+            </div>
+            <Link to="/billing" className="btn-primary text-sm">
+              {creditStatus.isSuspended ? 'Add Credits' : 'Manage Billing'}
+            </Link>
+          </div>
+        </div>
+      )}
+
       {/* Quick actions */}
       <div>
         <h2 className="text-lg font-semibold text-gray-900 mb-4">{t.dashboard.quickActions}</h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <Link to="/pins" className="card hover:shadow-md transition-shadow group">
             <div className="flex items-center space-x-4">
               <div className="text-3xl group-hover:scale-110 transition-transform">📋</div>
@@ -156,6 +194,16 @@ export default function Dashboard() {
               <div>
                 <h3 className="font-semibold text-gray-900">{t.dashboard.apiKeys}</h3>
                 <p className="text-sm text-gray-500">{t.dashboard.apiKeysDesc}</p>
+              </div>
+            </div>
+          </Link>
+
+          <Link to="/billing" className="card hover:shadow-md transition-shadow group">
+            <div className="flex items-center space-x-4">
+              <div className="text-3xl group-hover:scale-110 transition-transform">💳</div>
+              <div>
+                <h3 className="font-semibold text-gray-900">{t.nav.billing || 'Billing'}</h3>
+                <p className="text-sm text-gray-500">Manage credits & wallets</p>
               </div>
             </div>
           </Link>

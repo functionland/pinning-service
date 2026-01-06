@@ -1255,6 +1255,16 @@ type PinForRecalc struct {
 	Status      string
 }
 
+// CreditStatus represents the credit/quota status for a user
+type CreditStatus struct {
+	CanUpload     bool    `json:"can_upload"`
+	CurrentBytes  int64   `json:"current_bytes"`
+	FreeTierBytes int64   `json:"free_tier_bytes"`
+	BalanceFula   float64 `json:"balance_fula"`
+	IsSuspended   bool    `json:"is_suspended"`
+	Message       string  `json:"message"`
+}
+
 // GetPinsNeedingSizeRecalc returns pins that may need size recalculation
 // If includeAll is false, only returns pins with size=0
 // If includeAll is true, returns all non-deleted pins (useful when switching from block to DAG size)
@@ -1296,4 +1306,138 @@ func (s *SQLiteService) GetPinsNeedingSizeRecalc(ctx context.Context, limit int,
 	}
 
 	return pins, nil
+}
+
+// ============================================================================
+// Credit/Quota Operations (Web3 Payment Integration)
+// ============================================================================
+
+// Default free tier: 500MB (configurable via FREE_TIER_BYTES env var)
+const DefaultFreeTierBytes int64 = 524288000
+
+// GetCreditStatus checks if a user can upload based on their storage usage and credit balance
+// CRITICAL: Users under the free tier are ALWAYS allowed to upload
+func (s *SQLiteService) GetCreditStatus(ctx context.Context, username string) (CreditStatus, error) {
+	if username == "" {
+		return CreditStatus{}, errors.New("username cannot be empty")
+	}
+
+	// Get current storage usage
+	usage, err := s.GetStorageByUser(ctx, username)
+	if err != nil {
+		// If we can't check storage, fail open (allow upload)
+		return CreditStatus{
+			CanUpload:     true,
+			FreeTierBytes: DefaultFreeTierBytes,
+			Message:       "Storage check unavailable, allowing upload",
+		}, nil
+	}
+
+	// Get user credit info from user_credits table
+	var balanceFula float64
+	var isSuspended int
+	freeTierBytes := DefaultFreeTierBytes
+
+	err = s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(balance_fula, 0), COALESCE(is_suspended, 0)
+		FROM user_credits
+		WHERE user_email = ?
+	`, username).Scan(&balanceFula, &isSuspended)
+
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// Database error - fail open
+		return CreditStatus{
+			CanUpload:     true,
+			CurrentBytes:  usage.TotalSize,
+			FreeTierBytes: freeTierBytes,
+			Message:       "Credit check unavailable, allowing upload",
+		}, nil
+	}
+	// sql.ErrNoRows is OK - user just doesn't have a credit record yet
+
+	status := CreditStatus{
+		CurrentBytes:  usage.TotalSize,
+		FreeTierBytes: freeTierBytes,
+		BalanceFula:   balanceFula,
+		IsSuspended:   isSuspended == 1,
+	}
+
+	// CRITICAL: Free tier users are ALWAYS allowed
+	if usage.TotalSize < freeTierBytes {
+		status.CanUpload = true
+		usedMB := usage.TotalSize / (1024 * 1024)
+		freeMB := freeTierBytes / (1024 * 1024)
+		status.Message = fmt.Sprintf("Using free tier: %d/%d MB", usedMB, freeMB)
+		return status, nil
+	}
+
+	// Over free tier - check if suspended
+	if status.IsSuspended {
+		status.CanUpload = false
+		status.Message = "Account suspended. Please add FULA credits to continue."
+		return status, nil
+	}
+
+	// Over free tier - check credit balance
+	if balanceFula <= 0 {
+		status.CanUpload = false
+		status.Message = "Free tier exceeded. Please add FULA credits to continue."
+		return status, nil
+	}
+
+	// Has credits - allow upload
+	status.CanUpload = true
+	status.Message = fmt.Sprintf("Using paid storage. Balance: %.2f FULA", balanceFula)
+	return status, nil
+}
+
+// GetUserCredits returns credit information for a user
+func (s *SQLiteService) GetUserCredits(ctx context.Context, username string) (map[string]interface{}, error) {
+	if username == "" {
+		return nil, errors.New("username cannot be empty")
+	}
+
+	var balanceFula, totalDeposited, totalDeducted float64
+	var isSuspended int
+	var lastDeductionAt, suspendedAt, createdAt, updatedAt sql.NullTime
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT balance_fula, total_deposited_fula, total_deducted_fula,
+		       is_suspended, last_deduction_at, suspended_at, created_at, updated_at
+		FROM user_credits
+		WHERE user_email = ?
+	`, username).Scan(&balanceFula, &totalDeposited, &totalDeducted,
+		&isSuspended, &lastDeductionAt, &suspendedAt, &createdAt, &updatedAt)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Return default values if no record exists
+			return map[string]interface{}{
+				"balance_fula":      0.0,
+				"total_deposited":   0.0,
+				"total_deducted":    0.0,
+				"is_suspended":      false,
+				"last_deduction_at": nil,
+				"free_tier_bytes":   DefaultFreeTierBytes,
+			}, nil
+		}
+		return nil, fmt.Errorf("failed to get user credits: %w", err)
+	}
+
+	result := map[string]interface{}{
+		"balance_fula":      balanceFula,
+		"total_deposited":   totalDeposited,
+		"total_deducted":    totalDeducted,
+		"is_suspended":      isSuspended == 1,
+		"free_tier_bytes":   DefaultFreeTierBytes,
+	}
+
+	if lastDeductionAt.Valid {
+		result["last_deduction_at"] = lastDeductionAt.Time
+	}
+	if suspendedAt.Valid {
+		result["suspended_at"] = suspendedAt.Time
+	}
+
+	return result, nil
 }

@@ -4,6 +4,8 @@ import path from 'path';
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { createApp, initializeDatabase, type AppConfig } from './app.js';
+import { startBlockScanner, stopBlockScanner } from './services/blockScanner.js';
+import { startDeductionJob, stopDeductionJob } from './services/deductionJob.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,11 +53,27 @@ app.listen(config.port, () => {
   if (!config.googleClientId) {
     console.warn('[webui] WARNING: GOOGLE_CLIENT_ID not set - authentication will not work');
   }
+
+  // Start cron services in production
+  if (config.nodeEnv === 'production') {
+    const vaultAddress = process.env.VAULT_ADDRESS || '';
+    if (vaultAddress && vaultAddress !== '0x0000000000000000000000000000000000000000') {
+      console.log('[webui] Starting block scanner cron (every 10 minutes)...');
+      startBlockScanner(db, 10 * 60 * 1000); // 10 minutes
+
+      console.log('[webui] Starting deduction job cron (every hour)...');
+      startDeductionJob(db, 60 * 60 * 1000); // 1 hour
+    } else {
+      console.log('[webui] VAULT_ADDRESS not configured - payment crons disabled');
+    }
+  }
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('[webui] Shutting down...');
+  stopBlockScanner();
+  stopDeductionJob();
   db.close();
   process.exit(0);
 });

@@ -53,6 +53,16 @@ func (s *PinsAPIServiceSQLite) AddPin(ctx context.Context, pin Pin) (ImplRespons
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
+	// Check credit status (Web3 Payment gatekeeper)
+	creditStatus, creditErr := s.db.GetCreditStatus(ctx, userID)
+	if creditErr != nil {
+		log.Printf("Warning: credit check failed for user %s: %v", userID, creditErr)
+		// Fail open - allow upload if check fails
+	} else if !creditStatus.CanUpload {
+		log.Printf("Upload blocked for user %s: %s", userID, creditStatus.Message)
+		return createErrorResponse(http.StatusPaymentRequired, "INSUFFICIENT_CREDITS", creditStatus.Message), errors.New("insufficient credits")
+	}
+
 	// Check if user already has a pin for this CID (avoid duplicates)
 	existingPin, err := s.db.GetExistingPinByCID(ctx, userID, pin.Cid)
 	if err != nil {

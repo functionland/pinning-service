@@ -402,6 +402,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         imgSrc: ["'self'", "data:", "https:", "blob:"],
         connectSrc: ["'self'", "https://accounts.google.com", "https://oauth2.googleapis.com", "https://www.googleapis.com", "https://ipfs.cloud.fx.land", "https://s3.cloud.fx.land"],
         frameSrc: ["'self'", "blob:", "https://accounts.google.com"],
+        objectSrc: ["'self'", "blob:"],
         frameAncestors: ["'self'"],
       },
     },

@@ -10,6 +10,7 @@ export default function GetKey() {
   const { t } = useLanguage();
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
+  const [finalRedirectUrl, setFinalRedirectUrl] = useState<string | null>(null);
 
   const redirectUrl = searchParams.get('redirect');
 
@@ -62,9 +63,14 @@ export default function GetKey() {
         // Construct the redirect URL with the key parameter
         const url = new URL(redirectUrl);
         url.searchParams.set('key', data.key);
+        const fullUrl = url.toString();
 
-        // Redirect to the external URL
-        window.location.href = url.toString();
+        // Store the URL for manual redirect button
+        setFinalRedirectUrl(fullUrl);
+        setProcessing(false);
+
+        // Try automatic redirect (may be blocked by browser)
+        window.location.href = fullUrl;
       } catch (err) {
         console.error('[GetKey] Error:', err);
         setError(err instanceof Error ? err.message : 'An error occurred');
@@ -104,6 +110,32 @@ export default function GetKey() {
             >
               Go to Dashboard
             </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Show success state with manual redirect button
+  if (finalRedirectUrl) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <div className="max-w-md w-full">
+          <div className="bg-white rounded-2xl shadow-lg p-8 text-center">
+            <div className="text-5xl mb-4">✓</div>
+            <h1 className="text-xl font-bold text-gray-900 mb-2">API Key Retrieved!</h1>
+            <p className="text-gray-600 mb-6">
+              Click the button below to continue to FxFiles app. If the app doesn't open automatically, you may need to allow redirects in your browser settings.
+            </p>
+            <a
+              href={finalRedirectUrl}
+              className="btn-primary inline-block mb-4"
+            >
+              Continue to FxFiles
+            </a>
+            <p className="text-sm text-gray-500">
+              Or <button onClick={() => navigate('/')} className="text-primary-600 hover:underline">go to Dashboard</button>
+            </p>
           </div>
         </div>
       </div>

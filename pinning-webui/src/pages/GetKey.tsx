@@ -129,13 +129,10 @@ export default function GetKey() {
             </p>
             <a
               href={finalRedirectUrl}
-              className="btn-primary inline-block mb-4"
+              className="btn-primary inline-block"
             >
               Continue to FxFiles
             </a>
-            <p className="text-sm text-gray-500">
-              Or <button onClick={() => navigate('/')} className="text-primary-600 hover:underline">go to Dashboard</button>
-            </p>
           </div>
         </div>
       </div>

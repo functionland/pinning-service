@@ -377,21 +377,21 @@ export default function View() {
     return (
       <div className="min-h-screen bg-gray-900 flex flex-col">
         {/* Header */}
-        <div className="bg-gray-800 border-b border-gray-700 px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <h1 className="text-white font-medium truncate max-w-md">
+        <div className="bg-gray-800 border-b border-gray-700 px-3 sm:px-4 py-3 flex items-center justify-between gap-2 min-w-0">
+          <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
+            <h1 className="text-white font-medium truncate text-sm sm:text-base">
               {state.content.filename}
             </h1>
             {state.expiresAt && (
-              <span className="text-gray-400 text-sm hidden sm:inline">
+              <span className="text-gray-400 text-xs sm:text-sm hidden sm:inline whitespace-nowrap">
                 {t.view?.expiresIn || 'Expires in'}: {formatExpiryFromDate(state.expiresAt)}
               </span>
             )}
           </div>
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
             <button
               onClick={handleDownload}
-              className="bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+              className="bg-primary-600 hover:bg-primary-700 text-white px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap"
             >
               {t.view?.download || 'Download'}
             </button>

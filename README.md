@@ -265,6 +265,7 @@ Note: Firebase backend requires `GOOGLE_APPLICATION_CREDENTIALS` environment var
 ```
 # cd ~/pinning-service/pinning-webui/
 ~/pinning-service/pinning-webui# git pull
+npm install
 ~/pinning-service/pinning-webui# VITE_GOOGLE_CLIENT_ID={YOUR GOGLE VITE} npm run build
 ~/pinning-service/pinning-webui# cp -r dist/* /home/root/pinning-service/pinning-webui/dist/
 /pinning-service/pinning-webui# cp package.json package-lock.json /home/root/pinning-service/pinning-webui/

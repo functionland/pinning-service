@@ -78,6 +78,11 @@ declare global {
   }
 }
 
+interface PricingInfo {
+  freeTierMB: number;
+  fulaPerGBMonth: number;
+}
+
 export default function Login() {
   const { user, login } = useAuth();
   const navigate = useNavigate();
@@ -85,12 +90,13 @@ export default function Login() {
   const { t } = useLanguage();
   const [totalSize, setTotalSize] = useState(0);
   const [totalPins, setTotalPins] = useState(0);
+  const [pricing, setPricing] = useState<PricingInfo | null>(null);
   const animatedSize = useAnimatedCounter(totalSize, 5000);
   const animatedPins = useAnimatedCounter(totalPins, 5000);
   const formattedSize = formatStorageSize(animatedSize);
   const returnTo = searchParams.get('returnTo');
 
-  // Fetch public stats on mount
+  // Fetch public stats and pricing on mount
   useEffect(() => {
     fetch('/api/public/stats')
       .then(res => res.json())
@@ -103,6 +109,16 @@ export default function Login() {
         }
       })
       .catch(err => console.error('Failed to fetch stats:', err));
+
+    fetch('/api/credits/pricing')
+      .then(res => res.json())
+      .then(data => {
+        setPricing({
+          freeTierMB: data.freeTierMB || 500,
+          fulaPerGBMonth: data.fulaPerGBMonth || 3,
+        });
+      })
+      .catch(err => console.error('Failed to fetch pricing:', err));
   }, []);
 
   const handleCredentialResponse = useCallback(async (response: { credential: string }) => {
@@ -282,11 +298,11 @@ export default function Login() {
           <div className="flex items-center justify-center gap-4 text-sm">
             <div className="flex items-center gap-2">
               <span className="text-green-500">✓</span>
-              <span className="text-gray-700">500 MB Free</span>
+              <span className="text-gray-700">{pricing?.freeTierMB || 500} MB Free</span>
             </div>
             <div className="h-4 w-px bg-gray-300"></div>
             <div className="flex items-center gap-2">
-              <span className="text-primary-600 font-medium">3 FULA</span>
+              <span className="text-primary-600 font-medium">{pricing?.fulaPerGBMonth || 3} FULA</span>
               <span className="text-gray-500">/ GB / month</span>
             </div>
           </div>

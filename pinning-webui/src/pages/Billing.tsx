@@ -29,6 +29,12 @@ interface ChainInfo {
   isEnabled: boolean;
 }
 
+interface PricingInfo {
+  freeTierBytes: number;
+  freeTierMB: number;
+  fulaPerGBMonth: number;
+}
+
 interface CreditHistoryItem {
   txType: string;
   amountFula: number;
@@ -59,12 +65,12 @@ function getChainName(chainId: number): string {
 }
 
 export default function Billing() {
-  const { user } = useAuth();
   const { t } = useLanguage();
   const [creditStatus, setCreditStatus] = useState<CreditStatus | null>(null);
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [supportedChains, setSupportedChains] = useState<ChainInfo[]>([]);
   const [history, setHistory] = useState<CreditHistoryItem[]>([]);
+  const [pricing, setPricing] = useState<PricingInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -83,10 +89,11 @@ export default function Billing() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [creditsRes, walletsRes, historyRes] = await Promise.all([
+      const [creditsRes, walletsRes, historyRes, pricingRes] = await Promise.all([
         fetch('/api/credits', { credentials: 'include' }),
         fetch('/api/wallets', { credentials: 'include' }),
         fetch('/api/credits/history?limit=20', { credentials: 'include' }),
+        fetch('/api/credits/pricing'),
       ]);
 
       if (!creditsRes.ok || !walletsRes.ok) {
@@ -96,11 +103,15 @@ export default function Billing() {
       const creditsData = await creditsRes.json();
       const walletsData = await walletsRes.json();
       const historyData = await historyRes.json();
+      const pricingData = pricingRes.ok ? await pricingRes.json() : null;
 
       setCreditStatus(creditsData);
       setWallets(walletsData.wallets || []);
       setSupportedChains(walletsData.supportedChains || []);
       setHistory(historyData.history || []);
+      if (pricingData) {
+        setPricing(pricingData);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -305,8 +316,8 @@ export default function Billing() {
         </div>
 
         <div className="mt-4 p-4 bg-white rounded-lg">
-          <p className="text-sm font-medium text-gray-700">Pricing: <span className="text-primary-600">3 FULA per GB per month</span></p>
-          <p className="text-xs text-gray-500 mt-1">Free tier: 500 MB | 1 FULA = ~333 MB for 1 month</p>
+          <p className="text-sm font-medium text-gray-700">Pricing: <span className="text-primary-600">{pricing?.fulaPerGBMonth || 3} FULA per GB per month</span></p>
+          <p className="text-xs text-gray-500 mt-1">Free tier: {pricing?.freeTierMB || 500} MB | 1 FULA = ~{Math.round(1000 / (pricing?.fulaPerGBMonth || 3))} MB for 1 month</p>
         </div>
       </div>
 

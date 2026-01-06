@@ -278,8 +278,8 @@ Note: Firebase backend requires `GOOGLE_APPLICATION_CREDENTIALS` environment var
 ## update pinning-service port 6000
 cd /root/pinning-service
 git pull
-cd /root/pinning-service
 go mod download
+systemctl stop fula-pinning-service
 go build -o /home/root/pinning-service/ipfs-pinning -tags "sqlite" main_sqlite.go
-systemctl restart fula-pinning-service
+systemctl start fula-pinning-service
 systemctl status fula-pinning-service

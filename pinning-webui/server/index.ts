@@ -58,6 +58,7 @@ app.listen(config.port, () => {
   if (config.nodeEnv === 'production') {
     const vaultAddress = process.env.VAULT_ADDRESS || '';
     if (vaultAddress && vaultAddress !== '0x0000000000000000000000000000000000000000') {
+      console.log(`[webui] VAULT_ADDRESS configured: ${vaultAddress}`);
       console.log('[webui] Starting block scanner cron (every 10 minutes)...');
       startBlockScanner(db, 10 * 60 * 1000); // 10 minutes
 

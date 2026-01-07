@@ -596,6 +596,13 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
           // RainbowKit
           "https://api.rainbow.me",
           "https://*.rainbow.me",
+          // Web3Modal / Reown (WalletConnect v2)
+          "https://api.web3modal.org",
+          "https://*.web3modal.org",
+          "https://api.web3modal.com",
+          "https://*.web3modal.com",
+          "https://*.reown.com",
+          "wss://*.reown.com",
         ],
         frameSrc: ["'self'", "blob:", "https://accounts.google.com"],
         objectSrc: ["'self'", "blob:"],

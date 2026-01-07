@@ -615,8 +615,15 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
           "https://*.web3modal.com",
           "https://*.reown.com",
           "wss://*.reown.com",
+          // Phantom wallet
+          "https://api.phantom.app",
+          "https://*.phantom.app",
+          "https://phantom.app",
+          // Solana (for Phantom)
+          "https://*.solana.com",
+          "wss://*.solana.com",
         ],
-        frameSrc: ["'self'", "blob:", "https://accounts.google.com"],
+        frameSrc: ["'self'", "blob:", "https://accounts.google.com", "https://*.phantom.app", "https://verify.walletconnect.org", "https://verify.walletconnect.com", "https://*.walletconnect.org", "https://*.walletconnect.com"],
         objectSrc: ["'self'", "blob:"],
         mediaSrc: ["'self'", "blob:"],
         frameAncestors: ["'self'"],

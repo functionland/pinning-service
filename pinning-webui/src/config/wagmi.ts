@@ -20,6 +20,7 @@ export const skaleEuropa: Chain = {
 const walletConnectProjectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || '';
 
 // RainbowKit + Wagmi configuration
+// Base is first in the chains array to make it the default connection chain
 export const config = getDefaultConfig({
   appName: 'Fula Pinning Service',
   projectId: walletConnectProjectId,
@@ -30,6 +31,9 @@ export const config = getDefaultConfig({
     [skaleEuropa.id]: http('https://mainnet.skalenodes.com/v1/elated-tan-skat'),
   },
 });
+
+// Initial chain for RainbowKit modal
+export const INITIAL_CHAIN = base;
 
 // Supported chain IDs
 export const SUPPORTED_CHAIN_IDS = [base.id, mainnet.id, skaleEuropa.id] as const;

@@ -183,13 +183,25 @@ export function initializeDatabase(dbPath: string): Database.Database {
   const chainCount = database.prepare('SELECT COUNT(*) as count FROM chain_sync_state').get() as { count: number };
   if (chainCount.count === 0) {
     const vaultAddress = process.env.VAULT_ADDRESS || '0x0000000000000000000000000000000000000000';
+    // Starting blocks set to recent blocks to avoid scanning from genesis
     database.prepare(`
-      INSERT INTO chain_sync_state (chain_id, chain_name, token_address, vault_address, is_enabled)
+      INSERT INTO chain_sync_state (chain_id, chain_name, token_address, vault_address, is_enabled, last_scanned_block)
       VALUES
-        (1, 'Ethereum', '0x92217cCaEDBdbc54C76c15feA18823db1558fDc9', ?, 1),
-        (8453, 'Base', '0x9e12735d77c72c5C3670636D428f2F3815d8A4cB', ?, 1),
-        (2046399126, 'Skale Europa', '0x9e12735d77c72c5C3670636D428f2F3815d8A4cB', ?, 1)
+        (1, 'Ethereum', '0x92217cCaEDBdbc54C76c15feA18823db1558fDc9', ?, 1, 24179670),
+        (8453, 'Base', '0x9e12735d77c72c5C3670636D428f2F3815d8A4cB', ?, 1, 40480508),
+        (2046399126, 'Skale Europa', '0x9e12735d77c72c5C3670636D428f2F3815d8A4cB', ?, 1, 22856425)
     `).run(vaultAddress, vaultAddress, vaultAddress);
+  } else {
+    // Migration: Update chains that are still at block 0 to proper starting blocks
+    database.prepare(`
+      UPDATE chain_sync_state SET last_scanned_block = 24179670 WHERE chain_id = 1 AND last_scanned_block = 0
+    `).run();
+    database.prepare(`
+      UPDATE chain_sync_state SET last_scanned_block = 40480508 WHERE chain_id = 8453 AND last_scanned_block = 0
+    `).run();
+    database.prepare(`
+      UPDATE chain_sync_state SET last_scanned_block = 22856425 WHERE chain_id = 2046399126 AND last_scanned_block = 0
+    `).run();
   }
 
   return database;

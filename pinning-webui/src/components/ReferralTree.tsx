@@ -3,6 +3,7 @@ import { useLanguage } from '../context/LanguageContext';
 
 interface ReferredUser {
   email: string;
+  rawEmail?: string; // Actual email for API calls (non-admin only)
   joinedAt: string;
   referredAt?: string;
   totalCreditsPurchased: number;
@@ -143,21 +144,24 @@ export default function ReferralTree({
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
-          {data.items.map((user, idx) => (
-            <ReferralRow
-              key={`${user.email}-${idx}`}
-              user={user}
-              level={level}
-              maxLevel={maxLevel}
-              isAdmin={isAdmin}
-              maskEmail={maskEmail}
-              isExpanded={expandedEmails.has(user.email)}
-              onToggle={() => toggleExpand(user.email)}
-              displayEmail={displayEmail}
-              formatDate={formatDate}
-              t={t}
-            />
-          ))}
+          {data.items.map((user, idx) => {
+            const emailKey = user.rawEmail || user.email;
+            return (
+              <ReferralRow
+                key={`${emailKey}-${idx}`}
+                user={user}
+                level={level}
+                maxLevel={maxLevel}
+                isAdmin={isAdmin}
+                maskEmail={maskEmail}
+                isExpanded={expandedEmails.has(emailKey)}
+                onToggle={() => toggleExpand(emailKey)}
+                displayEmail={displayEmail}
+                formatDate={formatDate}
+                t={t}
+              />
+            );
+          })}
         </tbody>
       </table>
 
@@ -287,7 +291,7 @@ function ReferralRow({
           <td colSpan={5} className="p-0">
             <div className="border-l-2 border-primary-200 ml-4">
               <ReferralTree
-                email={user.email}
+                email={user.rawEmail || user.email}
                 level={level + 1}
                 maxLevel={maxLevel}
                 isAdmin={isAdmin}

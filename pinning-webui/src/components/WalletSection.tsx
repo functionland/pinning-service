@@ -85,7 +85,10 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
   // Get swap URL for selected chain
   const swapUrl = SWAP_URLS[selectedChainId];
 
-  // Sync selected chain with connected wallet chain
+  // Check if wallet is on the correct chain
+  const isWrongChain = isConnected && connectedChainId !== selectedChainId;
+
+  // Sync selected chain with connected wallet chain (only on initial connection)
   useEffect(() => {
     if (connectedChainId && SUPPORTED_CHAIN_IDS.includes(connectedChainId as typeof SUPPORTED_CHAIN_IDS[number])) {
       setSelectedChainId(connectedChainId);
@@ -167,9 +170,26 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
     setDepositAmount(amount);
   };
 
+  // Handle switching to the correct chain
+  const handleSwitchToCorrectChain = async () => {
+    try {
+      setTransferError(null);
+      switchChain({ chainId: selectedChainId });
+    } catch (err) {
+      console.error('Chain switch failed:', err);
+      setTransferError('Failed to switch network. Please switch manually in your wallet.');
+    }
+  };
+
   // Handle transfer
   const handleTransfer = async () => {
     if (!address || !vaultAddress || !depositAmount) return;
+
+    // Check if on correct chain
+    if (isWrongChain) {
+      setTransferError(`Please switch to ${CHAIN_NAMES[selectedChainId] || 'the correct network'} first`);
+      return;
+    }
 
     setTransferError(null);
     setTransferSuccess(null);
@@ -183,6 +203,7 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
         abi: ERC20_ABI,
         functionName: 'transfer',
         args: [vaultAddress as `0x${string}`, amount],
+        chainId: selectedChainId, // Explicitly specify chain
       });
     } catch (err) {
       setTransferError(err instanceof Error ? err.message : 'Transfer failed');
@@ -373,6 +394,14 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
             </div>
           )}
 
+          {/* Wrong Chain Warning */}
+          {isWrongChain && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-700 text-sm">
+              Your wallet is connected to {CHAIN_NAMES[connectedChainId!] || `Chain ${connectedChainId}`}.
+              Please switch to {CHAIN_NAMES[selectedChainId]} to transfer.
+            </div>
+          )}
+
           {/* Error/Success Messages */}
           {transferError && (
             <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm">
@@ -386,20 +415,30 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
             </div>
           )}
 
-          {/* Transfer Button */}
-          <button
-            onClick={handleTransfer}
-            disabled={!canTransfer || isTransferring}
-            className="w-full btn-primary py-3"
-          >
-            {isTransferPending
-              ? 'Confirm in Wallet...'
-              : isConfirming
-              ? 'Confirming Transaction...'
-              : isClaimingTx
-              ? 'Claiming Credits...'
-              : 'Transfer to Vault'}
-          </button>
+          {/* Switch Network or Transfer Button */}
+          {isWrongChain ? (
+            <button
+              onClick={handleSwitchToCorrectChain}
+              disabled={isSwitching}
+              className="w-full btn-primary py-3"
+            >
+              {isSwitching ? 'Switching Network...' : `Switch to ${CHAIN_NAMES[selectedChainId]}`}
+            </button>
+          ) : (
+            <button
+              onClick={handleTransfer}
+              disabled={!canTransfer || isTransferring}
+              className="w-full btn-primary py-3"
+            >
+              {isTransferPending
+                ? 'Confirm in Wallet...'
+                : isConfirming
+                ? 'Confirming Transaction...'
+                : isClaimingTx
+                ? 'Claiming Credits...'
+                : 'Transfer to Vault'}
+            </button>
+          )}
         </div>
       )}
 

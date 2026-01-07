@@ -98,6 +98,7 @@ export default function Login() {
   const animatedPins = useAnimatedCounter(totalPins, 5000);
   const formattedSize = formatStorageSize(animatedSize);
   const returnTo = searchParams.get('returnTo');
+  const redirectParam = searchParams.get('redirect');
 
   // Capture referral code and redirect from URL and store in localStorage (keep first code only)
   useEffect(() => {
@@ -146,28 +147,34 @@ export default function Login() {
       const result = await login(response.credential, referralCode);
       console.log('[Login] Login successful, isNew:', result.isNew);
 
-      // Clear referral code and get redirect URL after successful new registration
+      // Get stored redirect before clearing localStorage
+      const storedRedirect = localStorage.getItem(REFERRAL_REDIRECT_KEY);
+
+      // Clear referral data from localStorage after login
       if (result.isNew) {
-        const referralRedirect = localStorage.getItem(REFERRAL_REDIRECT_KEY);
         localStorage.removeItem(REFERRAL_CODE_KEY);
-        localStorage.removeItem(REFERRAL_REDIRECT_KEY);
+      }
+      localStorage.removeItem(REFERRAL_REDIRECT_KEY);
 
-        // Redirect new users to the referral redirect URL if present
-        if (referralRedirect && referralRedirect.startsWith('/')) {
-          navigate(referralRedirect, { replace: true });
-          return;
-        }
+      // Priority 1: Check for redirect param in URL (works for all users)
+      if (redirectParam && redirectParam.startsWith('/')) {
+        navigate(redirectParam, { replace: true });
+        return;
       }
 
-      // If there's a returnTo parameter, navigate there after login
-      if (returnTo) {
-        // Validate returnTo is a local path (starts with /)
-        if (returnTo.startsWith('/')) {
-          navigate(returnTo, { replace: true });
-          return;
-        }
+      // Priority 2: Check for stored redirect in localStorage (fallback)
+      if (storedRedirect && storedRedirect.startsWith('/')) {
+        navigate(storedRedirect, { replace: true });
+        return;
       }
 
+      // Priority 3: If there's a returnTo parameter, navigate there after login
+      if (returnTo && returnTo.startsWith('/')) {
+        navigate(returnTo, { replace: true });
+        return;
+      }
+
+      // Default: Navigate to dashboard
       if (result.isNew) {
         navigate('/?welcome=true');
       } else {
@@ -177,16 +184,22 @@ export default function Login() {
       console.error('[Login] Login failed:', error);
       alert('Login failed: ' + (error instanceof Error ? error.message : 'Unknown error'));
     }
-  }, [login, navigate, returnTo]);
+  }, [login, navigate, returnTo, redirectParam]);
 
   useEffect(() => {
     if (user) {
-      // If there's a returnTo parameter, navigate there
+      // Priority 1: redirect param
+      if (redirectParam && redirectParam.startsWith('/')) {
+        navigate(redirectParam, { replace: true });
+        return;
+      }
+      // Priority 2: returnTo param
       if (returnTo && returnTo.startsWith('/')) {
         navigate(returnTo, { replace: true });
-      } else {
-        navigate('/');
+        return;
       }
+      // Default: dashboard
+      navigate('/');
       return;
     }
 
@@ -233,7 +246,7 @@ export default function Login() {
       
       return () => clearInterval(checkGoogle);
     }
-  }, [user, navigate, handleCredentialResponse, returnTo]);
+  }, [user, navigate, handleCredentialResponse, returnTo, redirectParam]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary-50 to-gray-100 flex flex-col items-center justify-center p-4">

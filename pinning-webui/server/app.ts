@@ -217,6 +217,18 @@ export function initializeDatabase(dbPath: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_referrals_referred ON referrals(referred_email);
   `);
 
+  // Add app_downloaded column to webui_users if it doesn't exist (for tracking download clicks)
+  try {
+    database.exec(`ALTER TABLE webui_users ADD COLUMN app_downloaded INTEGER DEFAULT 0`);
+  } catch {
+    // Column already exists, ignore
+  }
+  try {
+    database.exec(`ALTER TABLE webui_users ADD COLUMN app_downloaded_at DATETIME`);
+  } catch {
+    // Column already exists, ignore
+  }
+
   // Seed chain_sync_state with supported chains (if empty)
   const chainCount = database.prepare('SELECT COUNT(*) as count FROM chain_sync_state').get() as { count: number };
   if (chainCount.count === 0) {
@@ -1706,21 +1718,54 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         codeRow = { code, created_at: new Date().toISOString() };
       }
 
-      // Get referral stats
-      const stats = db.prepare(`
+      // Get referral stats with 3-level breakdown using recursive CTE
+      const levelStats = db.prepare(`
+        WITH RECURSIVE referral_chain AS (
+          SELECT referred_email, 1 as level
+          FROM referrals WHERE referrer_email = ?
+          UNION ALL
+          SELECT r.referred_email, rc.level + 1
+          FROM referrals r
+          JOIN referral_chain rc ON r.referrer_email = rc.referred_email
+          WHERE rc.level < 3
+        )
         SELECT
-          COUNT(r.id) as totalReferred,
-          COALESCE(SUM(uc.total_deposited_fula), 0) as totalCreditsFromReferrals
-        FROM referrals r
-        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
-        WHERE r.referrer_email = ?
-      `).get(email) as { totalReferred: number; totalCreditsFromReferrals: number } | undefined;
+          rc.level,
+          COUNT(*) as count,
+          COALESCE(SUM(uc.total_deposited_fula), 0) as credits
+        FROM referral_chain rc
+        LEFT JOIN user_credits uc ON rc.referred_email = uc.user_email
+        GROUP BY rc.level
+        ORDER BY rc.level
+      `).all(email) as Array<{ level: number; count: number; credits: number }>;
+
+      // Build stats object with level breakdown
+      const stats = {
+        level1: { count: 0, credits: 0 },
+        level2: { count: 0, credits: 0 },
+        level3: { count: 0, credits: 0 },
+        total: { count: 0, credits: 0 },
+      };
+
+      for (const row of levelStats) {
+        if (row.level === 1) {
+          stats.level1 = { count: row.count, credits: row.credits };
+        } else if (row.level === 2) {
+          stats.level2 = { count: row.count, credits: row.credits };
+        } else if (row.level === 3) {
+          stats.level3 = { count: row.count, credits: row.credits };
+        }
+        stats.total.count += row.count;
+        stats.total.credits += row.credits;
+      }
 
       res.json({
         code: codeRow.code,
         createdAt: codeRow.created_at,
-        totalReferred: stats?.totalReferred || 0,
-        totalCreditsFromReferrals: stats?.totalCreditsFromReferrals || 0,
+        stats,
+        // Keep legacy fields for backward compatibility
+        totalReferred: stats.level1.count,
+        totalCreditsFromReferrals: stats.total.credits,
       });
     } catch (error) {
       console.error('[webui] Error getting referral info:', error);
@@ -1740,14 +1785,22 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         SELECT
           r.referred_email,
           wu.created_at as joined_at,
-          COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased
+          COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased,
+          COALESCE(wu.app_downloaded, 0) as app_downloaded,
+          wu.app_downloaded_at
         FROM referrals r
         JOIN webui_users wu ON r.referred_email = wu.email
         LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
         WHERE r.referrer_email = ?
         ORDER BY r.referred_at DESC
         LIMIT ? OFFSET ?
-      `).all(email, limit, offset) as Array<{ referred_email: string; joined_at: string; total_credits_purchased: number }>;
+      `).all(email, limit, offset) as Array<{
+        referred_email: string;
+        joined_at: string;
+        total_credits_purchased: number;
+        app_downloaded: number;
+        app_downloaded_at: string | null;
+      }>;
 
       const countResult = db.prepare('SELECT COUNT(*) as total FROM referrals WHERE referrer_email = ?').get(email) as { total: number };
       const total = countResult?.total || 0;
@@ -1757,6 +1810,8 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
           email: maskEmail(r.referred_email),
           joinedAt: r.joined_at,
           totalCreditsPurchased: r.total_credits_purchased,
+          appDownloaded: r.app_downloaded === 1,
+          appDownloadedAt: r.app_downloaded_at,
         })),
         total,
         page,
@@ -1766,6 +1821,102 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     } catch (error) {
       console.error('[webui] Error getting referred users:', error);
       res.status(500).json({ error: 'Failed to get referred users' });
+    }
+  });
+
+  // Mark app as downloaded (called when user clicks download link)
+  app.post('/api/user/app-downloaded', requireAuth, (req: Request, res: Response) => {
+    try {
+      const email = req.session.user!.email;
+
+      // Update the user's app_downloaded status
+      db.prepare(`
+        UPDATE webui_users
+        SET app_downloaded = 1, app_downloaded_at = CURRENT_TIMESTAMP
+        WHERE email = ? AND app_downloaded = 0
+      `).run(email);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[webui] Error marking app as downloaded:', error);
+      res.status(500).json({ error: 'Failed to mark app as downloaded' });
+    }
+  });
+
+  // Get referrals for a specific user (for multi-level lazy loading)
+  // User can only view their own referral chain
+  app.get('/api/referral/chain/:email', requireAuth, (req: Request, res: Response) => {
+    try {
+      const currentUserEmail = req.session.user!.email;
+      const targetEmail = decodeURIComponent(req.params.email);
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+      const offset = (page - 1) * limit;
+
+      // Verify the target email is in the current user's referral chain (up to 3 levels)
+      const isInChain = db.prepare(`
+        WITH RECURSIVE referral_chain AS (
+          SELECT referred_email, 1 as level
+          FROM referrals WHERE referrer_email = ?
+          UNION ALL
+          SELECT r.referred_email, rc.level + 1
+          FROM referrals r
+          JOIN referral_chain rc ON r.referrer_email = rc.referred_email
+          WHERE rc.level < 3
+        )
+        SELECT 1 FROM referral_chain WHERE referred_email = ?
+        UNION
+        SELECT 1 WHERE ? = ?
+      `).get(currentUserEmail, targetEmail, currentUserEmail, targetEmail);
+
+      if (!isInChain) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      const referred = db.prepare(`
+        SELECT
+          r.referred_email,
+          wu.created_at as joined_at,
+          COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased,
+          COALESCE(wu.app_downloaded, 0) as app_downloaded,
+          wu.app_downloaded_at,
+          (SELECT COUNT(*) FROM referrals WHERE referrer_email = r.referred_email) as referral_count
+        FROM referrals r
+        JOIN webui_users wu ON r.referred_email = wu.email
+        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
+        WHERE r.referrer_email = ?
+        ORDER BY r.referred_at DESC
+        LIMIT ? OFFSET ?
+      `).all(targetEmail, limit, offset) as Array<{
+        referred_email: string;
+        joined_at: string;
+        total_credits_purchased: number;
+        app_downloaded: number;
+        app_downloaded_at: string | null;
+        referral_count: number;
+      }>;
+
+      const countResult = db.prepare('SELECT COUNT(*) as total FROM referrals WHERE referrer_email = ?').get(targetEmail) as { total: number };
+      const total = countResult?.total || 0;
+
+      res.json({
+        items: referred.map(r => ({
+          email: maskEmail(r.referred_email),
+          rawEmail: r.referred_email, // Needed for further chain lookups
+          joinedAt: r.joined_at,
+          totalCreditsPurchased: r.total_credits_purchased,
+          appDownloaded: r.app_downloaded === 1,
+          appDownloadedAt: r.app_downloaded_at,
+          referralCount: r.referral_count,
+        })),
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      });
+    } catch (error) {
+      console.error('[webui] Error getting referral chain:', error);
+      res.status(500).json({ error: 'Failed to get referral chain' });
     }
   });
 
@@ -1961,6 +2112,64 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
+  // Get referral chain for a specific user (admin only, for multi-level viewing)
+  // MUST be before the :email route to avoid matching "chain" as an email
+  app.get('/api/admin/referrals/chain/:email', requireAdmin, (req: Request, res: Response) => {
+    try {
+      const targetEmail = decodeURIComponent(req.params.email);
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+      const offset = (page - 1) * limit;
+
+      const referred = db.prepare(`
+        SELECT
+          r.referred_email,
+          wu.created_at as joined_at,
+          r.referred_at,
+          COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased,
+          COALESCE(wu.app_downloaded, 0) as app_downloaded,
+          wu.app_downloaded_at,
+          (SELECT COUNT(*) FROM referrals WHERE referrer_email = r.referred_email) as referral_count
+        FROM referrals r
+        JOIN webui_users wu ON r.referred_email = wu.email
+        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
+        WHERE r.referrer_email = ?
+        ORDER BY r.referred_at DESC
+        LIMIT ? OFFSET ?
+      `).all(targetEmail, limit, offset) as Array<{
+        referred_email: string;
+        joined_at: string;
+        referred_at: string;
+        total_credits_purchased: number;
+        app_downloaded: number;
+        app_downloaded_at: string | null;
+        referral_count: number;
+      }>;
+
+      const countResult = db.prepare('SELECT COUNT(*) as total FROM referrals WHERE referrer_email = ?').get(targetEmail) as { total: number };
+      const total = countResult?.total || 0;
+
+      res.json({
+        items: referred.map(r => ({
+          email: r.referred_email,
+          joinedAt: r.joined_at,
+          referredAt: r.referred_at,
+          totalCreditsPurchased: r.total_credits_purchased,
+          appDownloaded: r.app_downloaded === 1,
+          appDownloadedAt: r.app_downloaded_at,
+          referralCount: r.referral_count,
+        })),
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      });
+    } catch (error) {
+      console.error('[webui] Error getting admin referral chain:', error);
+      res.status(500).json({ error: 'Failed to get referral chain' });
+    }
+  });
+
   // Get referred users for a specific referrer (admin only, paginated)
   app.get('/api/admin/referrals/:email', requireAdmin, (req: Request, res: Response) => {
     try {
@@ -1974,7 +2183,9 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
           r.referred_email as email,
           wu.created_at as joinedAt,
           r.referred_at as referredAt,
-          COALESCE(uc.total_deposited_fula, 0) as totalCreditsPurchased
+          COALESCE(uc.total_deposited_fula, 0) as totalCreditsPurchased,
+          COALESCE(wu.app_downloaded, 0) as appDownloaded,
+          wu.app_downloaded_at as appDownloadedAt
         FROM referrals r
         JOIN webui_users wu ON r.referred_email = wu.email
         LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
@@ -1986,6 +2197,8 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         joinedAt: string;
         referredAt: string;
         totalCreditsPurchased: number;
+        appDownloaded: number;
+        appDownloadedAt: string | null;
       }>;
 
       const countResult = db.prepare('SELECT COUNT(*) as total FROM referrals WHERE referrer_email = ?').get(referrerEmail) as { total: number };
@@ -1996,7 +2209,10 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       res.json({
         referrer: referrerEmail,
         referrerCode: referrerInfo?.code || null,
-        items: referred,
+        items: referred.map(r => ({
+          ...r,
+          appDownloaded: r.appDownloaded === 1,
+        })),
         total: countResult?.total || 0,
         page,
         limit,

@@ -1,7 +1,22 @@
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 
 export default function GetFxFiles() {
   const { t } = useLanguage();
+  const { user } = useAuth();
+
+  // Track download click if user is logged in
+  const trackDownloadClick = () => {
+    if (user) {
+      // Fire and forget - don't block the navigation
+      fetch('/api/user/app-downloaded', {
+        method: 'POST',
+        credentials: 'include',
+      }).catch(() => {
+        // Silently ignore errors - tracking shouldn't block the user
+      });
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary-50 via-white to-primary-100 flex flex-col">
@@ -33,6 +48,7 @@ export default function GetFxFiles() {
             href="https://play.google.com/store/apps/details?id=land.fx.files"
             target="_blank"
             rel="noopener noreferrer"
+            onClick={trackDownloadClick}
             className="flex items-center justify-center gap-3 w-full bg-gray-900 hover:bg-gray-800 text-white rounded-xl px-6 py-4 transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg"
           >
             <svg className="w-8 h-8" viewBox="0 0 24 24" fill="currentColor">

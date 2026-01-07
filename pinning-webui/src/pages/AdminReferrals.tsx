@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLanguage } from '../context/LanguageContext';
+import ReferralTree from '../components/ReferralTree';
 
 interface Referrer {
   email: string;
@@ -7,13 +8,6 @@ interface Referrer {
   codeCreatedAt: string;
   totalReferred: number;
   totalCreditsFromReferrals: number;
-}
-
-interface ReferredUser {
-  email: string;
-  joinedAt: string;
-  referredAt: string;
-  totalCreditsPurchased: number;
 }
 
 interface ReferrersResponse {
@@ -24,37 +18,18 @@ interface ReferrersResponse {
   totalPages: number;
 }
 
-interface ReferredResponse {
-  referrer: string;
-  referrerCode: string | null;
-  items: ReferredUser[];
-  total: number;
-  page: number;
-  limit: number;
-  totalPages: number;
-}
-
 export default function AdminReferrals() {
   const { t } = useLanguage();
   const [referrers, setReferrers] = useState<ReferrersResponse | null>(null);
   const [selectedReferrer, setSelectedReferrer] = useState<string | null>(null);
-  const [referredUsers, setReferredUsers] = useState<ReferredResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loadingReferred, setLoadingReferred] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  const [referredPage, setReferredPage] = useState(1);
   const [includeZero, setIncludeZero] = useState(false);
 
   useEffect(() => {
     fetchReferrers();
   }, [page, includeZero]);
-
-  useEffect(() => {
-    if (selectedReferrer) {
-      fetchReferredUsers(selectedReferrer);
-    }
-  }, [selectedReferrer, referredPage]);
 
   const fetchReferrers = async () => {
     try {
@@ -73,23 +48,6 @@ export default function AdminReferrals() {
     }
   };
 
-  const fetchReferredUsers = async (email: string) => {
-    try {
-      setLoadingReferred(true);
-      const res = await fetch(
-        `/api/admin/referrals/${encodeURIComponent(email)}?page=${referredPage}&limit=20`,
-        { credentials: 'include' }
-      );
-      if (!res.ok) throw new Error('Failed to fetch referred users');
-      const data = await res.json();
-      setReferredUsers(data);
-    } catch (err) {
-      console.error('Failed to fetch referred users:', err);
-    } finally {
-      setLoadingReferred(false);
-    }
-  };
-
   const handleExportCsv = () => {
     window.location.href = '/api/admin/referrals/export/csv';
   };
@@ -97,19 +55,9 @@ export default function AdminReferrals() {
   const handleSelectReferrer = (email: string) => {
     if (selectedReferrer === email) {
       setSelectedReferrer(null);
-      setReferredUsers(null);
     } else {
       setSelectedReferrer(email);
-      setReferredPage(1);
     }
-  };
-
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    });
   };
 
   return (
@@ -215,80 +163,24 @@ export default function AdminReferrals() {
                         </td>
                       </tr>
 
-                      {/* Expanded Row - Referred Users */}
+                      {/* Expanded Row - Referral Tree */}
                       {selectedReferrer === referrer.email && (
                         <tr>
                           <td colSpan={5} className="px-4 py-4 bg-gray-50">
-                            {loadingReferred ? (
-                              <div className="animate-pulse space-y-2">
-                                {[1, 2, 3].map(i => (
-                                  <div key={i} className="h-8 bg-gray-200 rounded"></div>
-                                ))}
-                              </div>
-                            ) : referredUsers && referredUsers.items.length > 0 ? (
-                              <div className="space-y-3">
-                                <h3 className="font-medium text-gray-900">
-                                  {t.adminReferrals?.referredBy || 'Users referred by'} {referrer.email}
-                                </h3>
-                                <table className="w-full">
-                                  <thead>
-                                    <tr className="text-xs text-gray-500">
-                                      <th className="text-left px-2 py-1">{t.adminReferrals?.email || 'Email'}</th>
-                                      <th className="text-left px-2 py-1">{t.adminReferrals?.joinedAt || 'Joined'}</th>
-                                      <th className="text-left px-2 py-1">{t.adminReferrals?.referredAt || 'Referred'}</th>
-                                      <th className="text-right px-2 py-1">{t.adminReferrals?.credits || 'Credits'}</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {referredUsers.items.map((user, idx) => (
-                                      <tr key={idx} className="text-sm">
-                                        <td className="px-2 py-1 text-gray-900">{user.email}</td>
-                                        <td className="px-2 py-1 text-gray-600">{formatDate(user.joinedAt)}</td>
-                                        <td className="px-2 py-1 text-gray-600">{formatDate(user.referredAt)}</td>
-                                        <td className="px-2 py-1 text-right text-gray-900">
-                                          {user.totalCreditsPurchased.toFixed(2)} FULA
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-
-                                {/* Referred Users Pagination */}
-                                {referredUsers.totalPages > 1 && (
-                                  <div className="flex justify-between items-center pt-2">
-                                    <span className="text-xs text-gray-500">
-                                      Page {referredUsers.page} of {referredUsers.totalPages}
-                                    </span>
-                                    <div className="flex gap-2">
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setReferredPage(p => Math.max(1, p - 1));
-                                        }}
-                                        disabled={referredPage === 1}
-                                        className="btn-secondary text-xs py-1 px-2 disabled:opacity-50"
-                                      >
-                                        Previous
-                                      </button>
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setReferredPage(p => Math.min(referredUsers.totalPages, p + 1));
-                                        }}
-                                        disabled={referredPage === referredUsers.totalPages}
-                                        className="btn-secondary text-xs py-1 px-2 disabled:opacity-50"
-                                      >
-                                        Next
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            ) : (
-                              <p className="text-sm text-gray-500 text-center py-4">
-                                {t.adminReferrals?.noReferred || 'No referred users'}
-                              </p>
-                            )}
+                            <div className="space-y-3">
+                              <h3 className="font-medium text-gray-900">
+                                {t.adminReferrals?.referredBy || 'Users referred by'} {referrer.email}
+                                <span className="text-sm font-normal text-gray-500 ml-2">
+                                  ({t.referrals?.expandHint || 'Click arrow to expand referral chain'})
+                                </span>
+                              </h3>
+                              <ReferralTree
+                                email={referrer.email}
+                                level={1}
+                                maxLevel={3}
+                                isAdmin={true}
+                              />
+                            </div>
                           </td>
                         </tr>
                       )}

@@ -234,8 +234,20 @@ export interface Translations {
     email: string;
     joinedAt: string;
     creditsPurchased: string;
+    appDownloaded: string;
+    downloaded: string;
     noReferrals: string;
     noReferralsDesc: string;
+    // Multi-level referrals
+    level1?: string;
+    level1Desc?: string;
+    level2?: string;
+    level2Desc?: string;
+    level3?: string;
+    level3Desc?: string;
+    totalNetwork?: string;
+    users?: string;
+    expandHint?: string;
   };
   admin?: {
     title: string;
@@ -272,6 +284,7 @@ export interface Translations {
     joinedAt: string;
     referredAt: string;
     credits: string;
+    appDownloaded: string;
     noReferrers: string;
     tryIncludeZero: string;
     noReferred: string;

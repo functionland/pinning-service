@@ -1,43 +1,34 @@
 import { useState, useEffect } from 'react';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
+import ReferralTree from '../components/ReferralTree';
+
+interface LevelStats {
+  count: number;
+  credits: number;
+}
 
 interface ReferralInfo {
   code: string;
   createdAt: string;
-  totalReferred: number;
-  totalCreditsFromReferrals: number;
-}
-
-interface ReferredUser {
-  email: string;
-  joinedAt: string;
-  totalCreditsPurchased: number;
-}
-
-interface ReferredResponse {
-  items: ReferredUser[];
-  total: number;
-  page: number;
-  limit: number;
-  totalPages: number;
+  stats: {
+    level1: LevelStats;
+    level2: LevelStats;
+    level3: LevelStats;
+    total: LevelStats;
+  };
 }
 
 export default function Referrals() {
   const { t } = useLanguage();
+  const { user } = useAuth();
   const [info, setInfo] = useState<ReferralInfo | null>(null);
-  const [referred, setReferred] = useState<ReferredResponse | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [page, setPage] = useState(1);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     fetchReferralInfo();
   }, []);
-
-  useEffect(() => {
-    fetchReferredUsers();
-  }, [page]);
 
   const fetchReferralInfo = async () => {
     try {
@@ -47,20 +38,6 @@ export default function Referrals() {
       setInfo(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
-    }
-  };
-
-  const fetchReferredUsers = async () => {
-    try {
-      setLoading(true);
-      const res = await fetch(`/api/referral/referred?page=${page}&limit=20`, { credentials: 'include' });
-      if (!res.ok) throw new Error('Failed to fetch referred users');
-      const data = await res.json();
-      setReferred(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -76,12 +53,11 @@ export default function Referrals() {
     }
   };
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    });
+  const maskEmail = (email: string): string => {
+    const [local, domain] = email.split('@');
+    if (!domain) return email;
+    const maskedLocal = local.length <= 2 ? local : local.slice(0, 2) + '****' + local.slice(-1);
+    return `${maskedLocal}@${domain}`;
   };
 
   if (error) {
@@ -153,97 +129,73 @@ export default function Referrals() {
         <h2 className="text-lg font-semibold text-gray-900 mb-4">{t.referrals?.stats || 'Referral Stats'}</h2>
 
         {info ? (
-          <div className="grid grid-cols-2 gap-6">
-            <div className="text-center p-4 bg-primary-50 rounded-lg">
-              <p className="text-3xl font-bold text-primary-600">{info.totalReferred}</p>
-              <p className="text-sm text-gray-600 mt-1">{t.referrals?.totalReferred || 'Total Referred'}</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {/* Level 1 - Direct */}
+            <div className="text-center p-4 bg-blue-50 rounded-lg">
+              <p className="text-2xl font-bold text-blue-600">{info.stats.level1.count}</p>
+              <p className="text-xs text-gray-500">{t.referrals?.level1 || 'Level 1'}</p>
+              <p className="text-sm font-medium text-blue-600 mt-1">{info.stats.level1.credits.toFixed(2)} FULA</p>
+              <p className="text-xs text-gray-400">{t.referrals?.level1Desc || 'Direct'}</p>
             </div>
-            <div className="text-center p-4 bg-green-50 rounded-lg">
-              <p className="text-3xl font-bold text-green-600">{info.totalCreditsFromReferrals.toFixed(2)}</p>
-              <p className="text-sm text-gray-600 mt-1">{t.referrals?.totalCredits || 'FULA Credits from Referrals'}</p>
+
+            {/* Level 2 */}
+            <div className="text-center p-4 bg-purple-50 rounded-lg">
+              <p className="text-2xl font-bold text-purple-600">{info.stats.level2.count}</p>
+              <p className="text-xs text-gray-500">{t.referrals?.level2 || 'Level 2'}</p>
+              <p className="text-sm font-medium text-purple-600 mt-1">{info.stats.level2.credits.toFixed(2)} FULA</p>
+              <p className="text-xs text-gray-400">{t.referrals?.level2Desc || '2nd Gen'}</p>
+            </div>
+
+            {/* Level 3 */}
+            <div className="text-center p-4 bg-orange-50 rounded-lg">
+              <p className="text-2xl font-bold text-orange-600">{info.stats.level3.count}</p>
+              <p className="text-xs text-gray-500">{t.referrals?.level3 || 'Level 3'}</p>
+              <p className="text-sm font-medium text-orange-600 mt-1">{info.stats.level3.credits.toFixed(2)} FULA</p>
+              <p className="text-xs text-gray-400">{t.referrals?.level3Desc || '3rd Gen'}</p>
+            </div>
+
+            {/* Total */}
+            <div className="text-center p-4 bg-green-50 rounded-lg border-2 border-green-200">
+              <p className="text-2xl font-bold text-green-600">{info.stats.total.count}</p>
+              <p className="text-xs text-gray-500">{t.referrals?.totalNetwork || 'Total Network'}</p>
+              <p className="text-sm font-medium text-green-600 mt-1">{info.stats.total.credits.toFixed(2)} FULA</p>
+              <p className="text-xs text-gray-400">{t.referrals?.users || 'users'}</p>
             </div>
           </div>
         ) : (
-          <div className="animate-pulse grid grid-cols-2 gap-6">
+          <div className="animate-pulse grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="h-24 bg-gray-100 rounded-lg"></div>
+            <div className="h-24 bg-gray-100 rounded-lg"></div>
             <div className="h-24 bg-gray-100 rounded-lg"></div>
             <div className="h-24 bg-gray-100 rounded-lg"></div>
           </div>
         )}
       </div>
 
-      {/* Referred Users Table */}
+      {/* Referred Users Tree */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">{t.referrals?.referredUsers || 'Referred Users'}</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">
+          {t.referrals?.referredUsers || 'Referred Users'}
+          <span className="text-sm font-normal text-gray-500 ml-2">
+            ({t.referrals?.expandHint || 'Click arrow to expand referral chain'})
+          </span>
+        </h2>
 
-        {loading && !referred ? (
+        {user?.email ? (
+          <div className="overflow-x-auto">
+            <ReferralTree
+              email={user.email}
+              level={1}
+              maxLevel={3}
+              isAdmin={false}
+              maskEmail={maskEmail}
+            />
+          </div>
+        ) : (
           <div className="animate-pulse space-y-3">
             {[1, 2, 3].map(i => (
               <div key={i} className="h-12 bg-gray-100 rounded"></div>
             ))}
-          </div>
-        ) : referred && referred.items.length > 0 ? (
-          <>
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50 border-b border-gray-100">
-                  <tr>
-                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
-                      {t.referrals?.email || 'Email'}
-                    </th>
-                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
-                      {t.referrals?.joinedAt || 'Joined'}
-                    </th>
-                    <th className="text-right text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
-                      {t.referrals?.creditsPurchased || 'Credits Purchased'}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {referred.items.map((user, index) => (
-                    <tr key={index} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 font-mono text-sm text-gray-900">{user.email}</td>
-                      <td className="px-4 py-3 text-sm text-gray-600">{formatDate(user.joinedAt)}</td>
-                      <td className="px-4 py-3 text-sm text-right font-medium text-gray-900">
-                        {user.totalCreditsPurchased.toFixed(2)} FULA
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Pagination */}
-            {referred.totalPages > 1 && (
-              <div className="flex justify-between items-center mt-4 pt-4 border-t border-gray-100">
-                <p className="text-sm text-gray-600">
-                  {t.pins?.page || 'Page'} {referred.page} {t.pins?.of || 'of'} {referred.totalPages}
-                </p>
-                <div className="flex space-x-2">
-                  <button
-                    onClick={() => setPage(p => Math.max(1, p - 1))}
-                    disabled={page === 1}
-                    className="btn-secondary disabled:opacity-50"
-                  >
-                    {t.pins?.previous || 'Previous'}
-                  </button>
-                  <button
-                    onClick={() => setPage(p => Math.min(referred.totalPages, p + 1))}
-                    disabled={page === referred.totalPages}
-                    className="btn-secondary disabled:opacity-50"
-                  >
-                    {t.pins?.next || 'Next'}
-                  </button>
-                </div>
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="text-center py-8">
-            <div className="text-4xl mb-3">👥</div>
-            <p className="text-gray-600">{t.referrals?.noReferrals || 'No referrals yet'}</p>
-            <p className="text-sm text-gray-500 mt-1">
-              {t.referrals?.noReferralsDesc || 'Share your referral link to start tracking referrals'}
-            </p>
           </div>
         )}
       </div>

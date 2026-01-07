@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLanguage } from '../context/LanguageContext';
+import WalletSection from '../components/WalletSection';
 
 interface CreditStatus {
   email: string;
@@ -389,21 +390,18 @@ export default function Billing() {
         )}
       </div>
 
-      {/* Connected wallets */}
+      {/* Wallet Connection and Transfer */}
       <div className="card">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-gray-900">{t.billing?.walletsTitle || 'Connected Wallets'}</h2>
-          <button
-            onClick={() => alert('Wallet connection coming soon! For now, contact support to link your wallet.')}
-            className="btn-primary text-sm"
-          >
-            Connect Wallet
-          </button>
-        </div>
+        <WalletSection
+          supportedChains={supportedChains}
+          onTransferSuccess={fetchData}
+        />
+      </div>
 
-        {wallets.length === 0 ? (
-          <p className="text-gray-500 text-sm">No wallets connected yet. Connect a wallet to receive automatic credits.</p>
-        ) : (
+      {/* Previously Linked Wallets */}
+      {wallets.length > 0 && (
+        <div className="card">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4">{t.billing?.walletsTitle || 'Linked Wallets'}</h2>
           <div className="space-y-3">
             {wallets.map((wallet) => (
               <div key={`${wallet.address}-${wallet.chainId}`} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
@@ -424,14 +422,14 @@ export default function Billing() {
                     onClick={() => handleDisconnectWallet(wallet.address)}
                     className="text-red-600 hover:text-red-700 text-sm"
                   >
-                    Disconnect
+                    Unlink
                   </button>
                 </div>
               </div>
             ))}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Credit history */}
       <div className="card">

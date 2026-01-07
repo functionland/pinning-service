@@ -41,6 +41,15 @@ declare module 'express-session' {
   }
 }
 
+// Extend express Request for API token auth
+declare global {
+  namespace Express {
+    interface Request {
+      apiUser?: { email: string };
+    }
+  }
+}
+
 // App configuration type
 export interface AppConfig {
   port: number;
@@ -664,11 +673,35 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     },
   }));
 
-  // Auth middleware
+  // Auth middleware (session-based for web UI)
   function requireAuth(req: Request, res: Response, next: NextFunction) {
     if (!req.session.user) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
+    next();
+  }
+
+  // API token auth middleware (Bearer token for external apps)
+  // Looks up token in api_keys table - same approach as Go pinning service
+  function requireApiAuth(req: Request, res: Response, next: NextFunction) {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Missing or invalid authorization header' });
+    }
+
+    const token = authHeader.substring(7);
+
+    // Lookup token in api_keys table (same token stored when user creates API key)
+    const apiKey = db.prepare(
+      'SELECT user_email FROM api_keys WHERE key_id = ? AND is_deleted = 0'
+    ).get(token) as { user_email: string } | undefined;
+
+    if (!apiKey) {
+      return res.status(401).json({ error: 'Invalid or revoked API key' });
+    }
+
+    req.apiUser = { email: apiKey.user_email };
     next();
   }
 
@@ -1659,6 +1692,346 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     } catch (error) {
       console.error('[webui] Error adjusting credits:', error);
       res.status(500).json({ error: 'Failed to adjust credits' });
+    }
+  });
+
+  // ============ API v1 Endpoints (Bearer Token Auth for External Apps) ============
+  // These endpoints use API key (JWT) authentication instead of browser sessions
+  // Existing /api/* endpoints remain unchanged for web UI compatibility
+
+  // GET /api/v1/storage - Storage usage and credit info
+  app.get('/api/v1/storage', requireApiAuth, (req: Request, res: Response) => {
+    try {
+      const status = getUserCreditStatus(db, req.apiUser!.email);
+
+      // Calculate paid storage from FULA balance
+      const paidStorageBytes = Math.floor((status.balanceFula / FULA_PER_GB_MONTH) * 1024 * 1024 * 1024);
+      const totalAvailableBytes = FREE_TIER_BYTES + paidStorageBytes;
+
+      // Calculate monthly burn rate (if over free tier)
+      const overageBytes = Math.max(0, status.currentStorageBytes - FREE_TIER_BYTES);
+      const overageGB = overageBytes / (1024 * 1024 * 1024);
+      const monthlyBurnRate = overageGB * FULA_PER_GB_MONTH;
+      const isConsuming = overageBytes > 0 && status.balanceFula > 0;
+
+      res.json({
+        currentStorageBytes: status.currentStorageBytes,
+        freeTierBytes: FREE_TIER_BYTES,
+        paidStorageBytes,
+        totalAvailableBytes,
+        balanceFula: status.balanceFula,
+        monthlyBurnRate,
+        isConsuming,
+        canUpload: status.canUpload,
+        isSuspended: status.isSuspended,
+      });
+    } catch (error) {
+      console.error('[api/v1] Error getting storage:', error);
+      res.status(500).json({ error: 'Failed to get storage info' });
+    }
+  });
+
+  // GET /api/v1/wallets - User's linked wallets
+  app.get('/api/v1/wallets', requireApiAuth, (req: Request, res: Response) => {
+    try {
+      const wallets = getUserWallets(db, req.apiUser!.email);
+      const chains = getSupportedChains(db);
+      res.json({
+        wallets: wallets.map(w => ({
+          address: w.address,
+          chainId: w.chainId,
+          isVerified: w.isVerified,
+          connectedAt: w.connectedAt,
+        })),
+        supportedChains: chains.filter(c => c.isEnabled).map(c => ({
+          chainId: c.chainId,
+          chainName: c.chainName,
+          vaultAddress: c.vaultAddress,
+          tokenAddress: c.tokenAddress,
+        })),
+      });
+    } catch (error) {
+      console.error('[api/v1] Error getting wallets:', error);
+      res.status(500).json({ error: 'Failed to get wallets' });
+    }
+  });
+
+  // POST /api/v1/wallets/link - Link wallet with signature verification
+  app.post('/api/v1/wallets/link', requireApiAuth, async (req: Request, res: Response) => {
+    try {
+      const { address, chainId, signature, message } = req.body;
+
+      if (!address || !chainId || !signature || !message) {
+        return res.status(400).json({ error: 'address, chainId, signature, and message are required' });
+      }
+
+      // Validate address format
+      if (!/^0x[a-fA-F0-9]{40}$/i.test(address)) {
+        return res.status(400).json({ error: 'Invalid wallet address format' });
+      }
+
+      const normalizedAddress = address.toLowerCase();
+      const userEmail = req.apiUser!.email;
+
+      // Verify the message contains user email and wallet address (prevents replay attacks)
+      if (!message.includes(userEmail) || !message.toLowerCase().includes(normalizedAddress)) {
+        return res.status(400).json({ error: 'Invalid signature message - must include your email and wallet address' });
+      }
+
+      // Verify signature format
+      if (!/^0x[a-fA-F0-9]+$/.test(signature)) {
+        return res.status(400).json({ error: 'Invalid signature format' });
+      }
+
+      // Verify the signature using viem
+      try {
+        const { recoverMessageAddress } = await import('viem');
+
+        const recoveredAddress = await recoverMessageAddress({
+          message,
+          signature: signature as `0x${string}`,
+        });
+
+        if (recoveredAddress.toLowerCase() !== normalizedAddress) {
+          return res.status(400).json({ error: 'Signature verification failed - address mismatch' });
+        }
+      } catch (sigError) {
+        console.error('[api/v1] Signature verification error:', sigError);
+        return res.status(400).json({ error: 'Invalid signature' });
+      }
+
+      // Check if this wallet is already linked to a DIFFERENT user
+      const existingLink = db.prepare(`
+        SELECT user_email FROM user_wallets
+        WHERE wallet_address = ? AND is_verified = 1
+      `).get(normalizedAddress) as { user_email: string } | undefined;
+
+      if (existingLink && existingLink.user_email !== userEmail) {
+        return res.status(400).json({
+          error: 'Wallet already linked to another account',
+        });
+      }
+
+      // Check if chain is supported
+      const chain = db.prepare('SELECT 1 FROM chain_sync_state WHERE chain_id = ? AND is_enabled = 1').get(chainId);
+      if (!chain) {
+        return res.status(400).json({ error: 'Unsupported or disabled chain' });
+      }
+
+      // Link the wallet (verified)
+      linkWallet(db, userEmail, normalizedAddress, chainId, true);
+
+      console.log(`[api/v1] Wallet ${normalizedAddress} linked to ${userEmail} on chain ${chainId}`);
+
+      res.json({ success: true, address: normalizedAddress, chainId });
+    } catch (error) {
+      console.error('[api/v1] Error linking wallet:', error);
+      res.status(500).json({ error: 'Failed to link wallet' });
+    }
+  });
+
+  // POST /api/v1/credits/claim - Claim transaction
+  app.post('/api/v1/credits/claim', requireApiAuth, async (req: Request, res: Response) => {
+    try {
+      const { txHash, chainId } = req.body;
+
+      if (!txHash || !chainId) {
+        return res.status(400).json({ error: 'txHash and chainId are required' });
+      }
+
+      // Validate tx hash format
+      if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) {
+        return res.status(400).json({ error: 'Invalid transaction hash format' });
+      }
+
+      // Check if already claimed
+      const existing = db.prepare(`
+        SELECT user_email, claimed_at FROM token_transactions
+        WHERE tx_hash = ? AND chain_id = ?
+      `).get(txHash.toLowerCase(), chainId) as { user_email: string | null; claimed_at: string | null } | undefined;
+
+      if (existing?.claimed_at) {
+        return res.status(400).json({ error: 'This transaction has already been credited' });
+      }
+
+      // Get chain config
+      const chain = db.prepare(`
+        SELECT token_address, vault_address FROM chain_sync_state
+        WHERE chain_id = ? AND is_enabled = 1
+      `).get(chainId) as { token_address: string; vault_address: string } | undefined;
+
+      if (!chain) {
+        return res.status(400).json({ error: 'Unsupported or disabled chain' });
+      }
+
+      // Fetch transaction from blockchain explorer
+      let explorerUrl: string;
+      switch (chainId) {
+        case 1:
+          explorerUrl = `https://api.etherscan.io/v2/api?chainid=1&module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}&apikey=${process.env.ETHERSCAN_API_KEY || ''}`;
+          break;
+        case 8453:
+          explorerUrl = `https://api.etherscan.io/v2/api?chainid=8453&module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}&apikey=${process.env.ETHERSCAN_API_KEY || ''}`;
+          break;
+        case 2046399126:
+          explorerUrl = `https://elated-tan-skat.explorer.mainnet.skalenodes.com/api?module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}`;
+          break;
+        default:
+          return res.status(400).json({ error: 'Unsupported chain' });
+      }
+
+      // Retry logic - transaction may not be indexed immediately
+      let data: any = null;
+      let retries = 3;
+      while (retries > 0) {
+        const response = await fetch(explorerUrl);
+        data = await response.json();
+
+        if (data.result && data.result !== null && data.result.logs) {
+          break;
+        }
+
+        retries--;
+        if (retries > 0) {
+          console.log(`[api/v1] Transaction ${txHash} not ready, retrying in 3s... (${retries} left)`);
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+
+      if (!data?.result || data.result === null) {
+        return res.status(404).json({ error: 'Transaction not found or not confirmed. Please try again later.' });
+      }
+
+      // Parse token transfer from logs
+      const receipt = data.result;
+      const transferTopic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+      const tokenAddressLower = chain.token_address.toLowerCase();
+      const vaultAddressLower = chain.vault_address.toLowerCase();
+
+      let transferFound = false;
+      let fromAddress = '';
+      let amountRaw = '0';
+
+      for (const log of receipt.logs || []) {
+        if (log.address.toLowerCase() !== tokenAddressLower) continue;
+        if (log.topics[0] !== transferTopic) continue;
+
+        const to = '0x' + log.topics[2].slice(26).toLowerCase();
+        if (to !== vaultAddressLower) continue;
+
+        fromAddress = '0x' + log.topics[1].slice(26).toLowerCase();
+        amountRaw = BigInt(log.data).toString();
+        transferFound = true;
+        break;
+      }
+
+      if (!transferFound) {
+        return res.status(400).json({ error: 'No FULA transfer to vault found in this transaction' });
+      }
+
+      const amountFula = rawToFula(amountRaw);
+      if (amountFula < 0.001) {
+        return res.status(400).json({ error: 'Transfer amount too small' });
+      }
+
+      // Check if user has this wallet linked
+      const userEmail = req.apiUser!.email;
+      const wallet = db.prepare(`
+        SELECT 1 FROM user_wallets
+        WHERE user_email = ? AND wallet_address = ? AND is_verified = 1
+      `).get(userEmail, fromAddress) as { 1: number } | undefined;
+
+      if (!wallet) {
+        return res.status(400).json({
+          error: 'Wallet not linked to your account',
+          walletAddress: fromAddress,
+        });
+      }
+
+      // Insert or update transaction
+      if (existing) {
+        db.prepare(`
+          UPDATE token_transactions
+          SET user_email = ?, claimed_at = CURRENT_TIMESTAMP, ingestion_source = 'manual'
+          WHERE tx_hash = ? AND chain_id = ?
+        `).run(userEmail, txHash.toLowerCase(), chainId);
+      } else {
+        db.prepare(`
+          INSERT INTO token_transactions
+            (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_email, claimed_at, ingestion_source)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'manual')
+        `).run(
+          txHash.toLowerCase(),
+          chainId,
+          fromAddress,
+          vaultAddressLower,
+          amountRaw,
+          amountFula,
+          parseInt(receipt.blockNumber, 16),
+          Math.floor(Date.now() / 1000),
+          userEmail
+        );
+      }
+
+      // Credit the user
+      creditUser(db, userEmail, amountFula, `${chainId}:${txHash}`);
+
+      console.log(`[api/v1] Claim: credited ${amountFula} FULA to ${userEmail} from tx ${txHash}`);
+
+      res.json({
+        success: true,
+        amountFula,
+        newBalance: getUserCreditStatus(db, userEmail).balanceFula,
+      });
+    } catch (error) {
+      console.error('[api/v1] Error claiming transaction:', error);
+      res.status(500).json({ error: 'Failed to claim transaction' });
+    }
+  });
+
+  // GET /api/v1/credits/history - Paginated credit history
+  app.get('/api/v1/credits/history', requireApiAuth, (req: Request, res: Response) => {
+    try {
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+      const offset = (page - 1) * limit;
+
+      const userEmail = req.apiUser!.email;
+
+      // Get total count
+      const countResult = db.prepare(`
+        SELECT COUNT(*) as total FROM credit_history WHERE user_email = ?
+      `).get(userEmail) as { total: number };
+
+      const total = countResult?.total || 0;
+      const totalPages = Math.ceil(total / limit);
+
+      // Get paginated history
+      const history = db.prepare(`
+        SELECT tx_type as txType, amount_fula as amountFula, balance_after as balanceAfter,
+               reference_id as referenceId, created_at as createdAt
+        FROM credit_history
+        WHERE user_email = ?
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+      `).all(userEmail, limit, offset) as Array<{
+        txType: string;
+        amountFula: number;
+        balanceAfter: number;
+        referenceId: string | null;
+        createdAt: string;
+      }>;
+
+      res.json({
+        history,
+        page,
+        limit,
+        total,
+        totalPages,
+      });
+    } catch (error) {
+      console.error('[api/v1] Error getting credit history:', error);
+      res.status(500).json({ error: 'Failed to get credit history' });
     }
   });
 

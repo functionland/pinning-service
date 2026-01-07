@@ -567,7 +567,33 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://accounts.google.com"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
         imgSrc: ["'self'", "data:", "https:", "blob:"],
-        connectSrc: ["'self'", "https://accounts.google.com", "https://oauth2.googleapis.com", "https://www.googleapis.com", "https://ipfs.cloud.fx.land", "https://s3.cloud.fx.land"],
+        connectSrc: [
+          "'self'",
+          // Google OAuth
+          "https://accounts.google.com",
+          "https://oauth2.googleapis.com",
+          "https://www.googleapis.com",
+          // IPFS/S3
+          "https://ipfs.cloud.fx.land",
+          "https://s3.cloud.fx.land",
+          // Blockchain RPC endpoints
+          "https://mainnet.base.org",
+          "https://*.base.org",
+          "https://eth.llamarpc.com",
+          "https://*.ethereum.org",
+          "https://mainnet.skalenodes.com",
+          "https://*.skalenodes.com",
+          // Wallet connectors
+          "https://*.walletconnect.com",
+          "https://*.walletconnect.org",
+          "wss://*.walletconnect.com",
+          "wss://*.walletconnect.org",
+          "https://cca-lite.coinbase.com",
+          "https://*.coinbase.com",
+          // Relay for WalletConnect
+          "wss://relay.walletconnect.com",
+          "wss://relay.walletconnect.org",
+        ],
         frameSrc: ["'self'", "blob:", "https://accounts.google.com"],
         objectSrc: ["'self'", "blob:"],
         mediaSrc: ["'self'", "blob:"],

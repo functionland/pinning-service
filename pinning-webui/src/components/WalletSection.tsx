@@ -9,11 +9,26 @@ import {
   useSimulateContract,
   useWaitForTransactionReceipt,
   useSwitchChain,
+  useBalance,
 } from 'wagmi';
 import { parseUnits, formatUnits, erc20Abi } from 'viem';
 import { useAuth } from '../context/AuthContext';
 import { FULA_TOKEN_ADDRESSES, SWAP_URLS, FULA_DECIMALS } from '../constants/tokens';
-import { CHAIN_NAMES, DEFAULT_CHAIN_ID, SUPPORTED_CHAIN_IDS } from '../config/wagmi';
+import { CHAIN_NAMES, DEFAULT_CHAIN_ID, SUPPORTED_CHAIN_IDS, skaleEuropa } from '../config/wagmi';
+
+// Gas token names per chain
+const GAS_TOKEN_NAMES: Record<number, string> = {
+  8453: 'ETH',      // Base
+  1: 'ETH',         // Ethereum
+  [skaleEuropa.id]: 'sFUEL',  // Skale Europa
+};
+
+// Minimum gas balance required (in native units)
+const MIN_GAS_BALANCE: Record<number, number> = {
+  8453: 0.0001,     // Base - ~$0.25 worth of ETH
+  1: 0.001,         // Ethereum - more expensive gas
+  [skaleEuropa.id]: 0.00001,  // Skale - sFUEL is free/cheap
+};
 
 interface ChainInfo {
   chainId: number;
@@ -78,6 +93,18 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
 
   const balance = balanceData ? formatUnits(balanceData as bigint, FULA_DECIMALS) : '0';
   const balanceNumber = parseFloat(balance);
+
+  // Read native gas token balance (ETH or sFUEL)
+  const { data: gasBalanceData } = useBalance({
+    address,
+    chainId: selectedChainId,
+    query: { enabled: !!address },
+  });
+
+  const gasBalance = gasBalanceData ? parseFloat(formatUnits(gasBalanceData.value, gasBalanceData.decimals)) : 0;
+  const gasTokenName = GAS_TOKEN_NAMES[selectedChainId] || 'ETH';
+  const minGasRequired = MIN_GAS_BALANCE[selectedChainId] || 0.0001;
+  const hasInsufficientGas = gasBalance < minGasRequired;
 
   // Prepare the transfer transaction (wagmi v2 pattern with explicit chainId)
   const { data: simulateData, error: simulateError } = useSimulateContract({
@@ -286,7 +313,7 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
 
   const isTransferring = isTransferPending || isConfirming || isClaimingTx;
   const isReady = !!simulateData?.request && !simulateError;
-  const canTransfer = isConnected && isWalletLinked && parsedAmount > BigInt(0) && balanceNumber >= parseFloat(depositAmount || '0') && vaultAddress;
+  const canTransfer = isConnected && isWalletLinked && parsedAmount > BigInt(0) && balanceNumber >= parseFloat(depositAmount || '0') && vaultAddress && !hasInsufficientGas;
 
   return (
     <div className="space-y-6">
@@ -416,6 +443,34 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
           {vaultAddress && (
             <div className="text-sm text-gray-500">
               To: <span className="font-mono">{shortenAddress(vaultAddress)}</span> ({CHAIN_NAMES[selectedChainId]})
+            </div>
+          )}
+
+          {/* Gas Balance Display */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-600">Gas Balance:</span>
+            <span className={hasInsufficientGas ? 'text-red-600 font-medium' : 'text-gray-900'}>
+              {gasBalance.toFixed(6)} {gasTokenName}
+            </span>
+          </div>
+
+          {/* Insufficient Gas Warning */}
+          {hasInsufficientGas && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm">
+              <div className="flex items-start gap-2">
+                <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                </svg>
+                <div>
+                  <p className="font-medium">Insufficient {gasTokenName} for gas fees</p>
+                  <p className="mt-1">
+                    You need at least {minGasRequired} {gasTokenName} to pay for transaction fees on {CHAIN_NAMES[selectedChainId]}.
+                    {selectedChainId === skaleEuropa.id
+                      ? ' You can get free sFUEL from the SKALE faucet.'
+                      : ` Please add ${gasTokenName} to your wallet.`}
+                  </p>
+                </div>
+              </div>
             </div>
           )}
 

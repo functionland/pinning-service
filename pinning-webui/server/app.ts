@@ -593,6 +593,9 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
           // Relay for WalletConnect
           "wss://relay.walletconnect.com",
           "wss://relay.walletconnect.org",
+          // RainbowKit
+          "https://api.rainbow.me",
+          "https://*.rainbow.me",
         ],
         frameSrc: ["'self'", "blob:", "https://accounts.google.com"],
         objectSrc: ["'self'", "blob:"],

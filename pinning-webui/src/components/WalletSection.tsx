@@ -1,52 +1,18 @@
 import { useState, useEffect, useMemo } from 'react';
+import { ConnectButton } from '@rainbow-me/rainbowkit';
 import {
   useAccount,
-  useConnect,
-  useDisconnect,
-  useSwitchChain,
   useSignMessage,
   useReadContract,
   useWriteContract,
   useSimulateContract,
   useWaitForTransactionReceipt,
-  useWalletClient,
+  useSwitchChain,
 } from 'wagmi';
 import { parseUnits, formatUnits } from 'viem';
-import { base, mainnet } from 'wagmi/chains';
 import { useAuth } from '../context/AuthContext';
 import { FULA_TOKEN_ADDRESSES, SWAP_URLS, ERC20_ABI, FULA_DECIMALS } from '../constants/tokens';
-import { CHAIN_NAMES, DEFAULT_CHAIN_ID, SUPPORTED_CHAIN_IDS, skaleEuropa } from '../config/wagmi';
-
-// Chain configurations for adding to wallet
-const CHAIN_CONFIGS: Record<number, {
-  chainId: string;
-  chainName: string;
-  nativeCurrency: { name: string; symbol: string; decimals: number };
-  rpcUrls: string[];
-  blockExplorerUrls: string[];
-}> = {
-  [base.id]: {
-    chainId: `0x${base.id.toString(16)}`,
-    chainName: 'Base',
-    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-    rpcUrls: ['https://mainnet.base.org'],
-    blockExplorerUrls: ['https://basescan.org'],
-  },
-  [mainnet.id]: {
-    chainId: `0x${mainnet.id.toString(16)}`,
-    chainName: 'Ethereum',
-    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-    rpcUrls: ['https://eth.llamarpc.com'],
-    blockExplorerUrls: ['https://etherscan.io'],
-  },
-  [skaleEuropa.id]: {
-    chainId: `0x${skaleEuropa.id.toString(16)}`,
-    chainName: 'SKALE Europa',
-    nativeCurrency: { name: 'sFUEL', symbol: 'sFUEL', decimals: 18 },
-    rpcUrls: ['https://mainnet.skalenodes.com/v1/elated-tan-skat'],
-    blockExplorerUrls: ['https://elated-tan-skat.explorer.mainnet.skalenodes.com'],
-  },
-};
+import { CHAIN_NAMES, DEFAULT_CHAIN_ID, SUPPORTED_CHAIN_IDS } from '../config/wagmi';
 
 interface ChainInfo {
   chainId: number;
@@ -68,15 +34,11 @@ function shortenAddress(address: string): string {
 export default function WalletSection({ supportedChains, onTransferSuccess }: WalletSectionProps) {
   const { user } = useAuth();
   const { address, isConnected, chainId: connectedChainId } = useAccount();
-  const { connect, connectors, isPending: isConnecting } = useConnect();
-  const { disconnect } = useDisconnect();
-  const { switchChain, isPending: isSwitching } = useSwitchChain();
   const { signMessageAsync } = useSignMessage();
-  const { data: walletClient } = useWalletClient();
+  const { switchChain } = useSwitchChain();
 
   // State
   const [selectedChainId, setSelectedChainId] = useState<number>(DEFAULT_CHAIN_ID);
-  const [showConnectors, setShowConnectors] = useState(false);
   const [depositAmount, setDepositAmount] = useState<string>('');
   const [isLinking, setIsLinking] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -158,16 +120,6 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
     }
   }, [isConfirmed, txHash]);
 
-  // Handle wallet connection with signature verification
-  const handleConnect = async (connector: typeof connectors[number]) => {
-    try {
-      setShowConnectors(false);
-      connect({ connector });
-    } catch (err) {
-      console.error('Connection failed:', err);
-    }
-  };
-
   // Link wallet to backend after connection
   const linkWalletToBackend = async () => {
     if (!address || !user?.email) return;
@@ -224,48 +176,6 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
   const handlePreset = (percentage: number) => {
     const amount = (balanceNumber * percentage / 100).toFixed(4);
     setDepositAmount(amount);
-  };
-
-  // Handle switching to the correct chain
-  const handleSwitchToCorrectChain = async () => {
-    if (!walletClient) return;
-
-    setTransferError(null);
-
-    try {
-      const chainConfig = CHAIN_CONFIGS[selectedChainId];
-
-      if (chainConfig) {
-        // First try to add the chain (this will be a no-op if already added)
-        try {
-          await walletClient.request({
-            method: 'wallet_addEthereumChain',
-            params: [chainConfig],
-          });
-        } catch (addError: unknown) {
-          // Chain might already exist, that's ok - continue to switch
-          // Error code 4902 means chain not added, other errors we can ignore
-          console.log('Add chain result:', addError);
-        }
-
-        // Now switch to the chain
-        try {
-          await walletClient.request({
-            method: 'wallet_switchEthereumChain',
-            params: [{ chainId: chainConfig.chainId }],
-          });
-        } catch (switchError: unknown) {
-          // If switch fails, try using wagmi's switchChain as fallback
-          switchChain({ chainId: selectedChainId });
-        }
-      } else {
-        // Fallback to wagmi's switchChain
-        switchChain({ chainId: selectedChainId });
-      }
-    } catch (err) {
-      console.error('Chain switch failed:', err);
-      setTransferError('Failed to switch network. Please switch manually in your wallet.');
-    }
   };
 
   // Handle transfer
@@ -354,49 +264,22 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
   }, [writeError]);
 
   const isTransferring = isTransferPending || isConfirming || isClaimingTx;
-  const isSimulating = !!parsedAmount && !!vaultAddress && !simulateData && !simulateError;
+  const isSimulating = !!parsedAmount && !!vaultAddress && !simulateData && !simulateError && !isWrongChain;
   const canTransfer = isConnected && depositAmount && parseFloat(depositAmount) > 0 && parseFloat(depositAmount) <= balanceNumber && vaultAddress && !isWrongChain;
 
   return (
     <div className="space-y-6">
-      {/* Connect Wallet Section */}
+      {/* Connect Wallet Section - Using RainbowKit */}
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-semibold text-gray-900">Wallet Connection</h3>
-        {isConnected ? (
-          <div className="flex items-center gap-3">
-            <span className="text-sm text-gray-600 font-mono">{shortenAddress(address!)}</span>
-            <button
-              onClick={() => disconnect()}
-              className="text-sm text-red-600 hover:text-red-700"
-            >
-              Disconnect
-            </button>
-          </div>
-        ) : (
-          <div className="relative">
-            <button
-              onClick={() => setShowConnectors(!showConnectors)}
-              disabled={isConnecting}
-              className="btn-primary text-sm"
-            >
-              {isConnecting ? 'Connecting...' : 'Connect Wallet'}
-            </button>
-
-            {showConnectors && (
-              <div className="absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-lg border border-gray-200 z-10">
-                {connectors.map((connector) => (
-                  <button
-                    key={connector.uid}
-                    onClick={() => handleConnect(connector)}
-                    className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg flex items-center gap-3"
-                  >
-                    <span className="font-medium">{connector.name}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        <ConnectButton
+          chainStatus="icon"
+          showBalance={false}
+          accountStatus={{
+            smallScreen: 'avatar',
+            largeScreen: 'full',
+          }}
+        />
       </div>
 
       {/* Link Wallet Button (after connection) */}
@@ -421,7 +304,6 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
             <select
               value={selectedChainId}
               onChange={(e) => handleChainSwitch(Number(e.target.value))}
-              disabled={isSwitching}
               className="border rounded-lg px-3 py-2 text-sm"
             >
               {supportedChains.filter(c => c.isEnabled).map((chain) => (
@@ -430,7 +312,6 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
                 </option>
               ))}
             </select>
-            {isSwitching && <span className="text-xs text-gray-500">Switching...</span>}
           </div>
 
           {swapUrl && (
@@ -508,6 +389,12 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-700 text-sm">
               Your wallet is connected to {CHAIN_NAMES[connectedChainId!] || `Chain ${connectedChainId}`}.
               Please switch to {CHAIN_NAMES[selectedChainId]} to transfer.
+              <button
+                onClick={() => switchChain({ chainId: selectedChainId })}
+                className="ml-2 underline font-medium"
+              >
+                Switch Network
+              </button>
             </div>
           )}
 
@@ -524,41 +411,23 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
             </div>
           )}
 
-          {/* Switch Network or Transfer Button */}
-          {isWrongChain ? (
-            <button
-              onClick={handleSwitchToCorrectChain}
-              disabled={isSwitching}
-              className="w-full btn-primary py-3"
-            >
-              {isSwitching ? 'Switching Network...' : `Switch to ${CHAIN_NAMES[selectedChainId]}`}
-            </button>
-          ) : (
-            <button
-              onClick={handleTransfer}
-              disabled={!canTransfer || isTransferring || isSimulating}
-              className="w-full btn-primary py-3"
-            >
-              {isSimulating
-                ? 'Preparing Transaction...'
-                : isTransferPending
-                ? 'Confirm in Wallet...'
-                : isConfirming
-                ? 'Confirming Transaction...'
-                : isClaimingTx
-                ? 'Claiming Credits...'
-                : 'Transfer to Vault'}
-            </button>
-          )}
+          {/* Transfer Button */}
+          <button
+            onClick={handleTransfer}
+            disabled={!canTransfer || isTransferring || isSimulating}
+            className="w-full btn-primary py-3"
+          >
+            {isSimulating
+              ? 'Preparing Transaction...'
+              : isTransferPending
+              ? 'Confirm in Wallet...'
+              : isConfirming
+              ? 'Confirming Transaction...'
+              : isClaimingTx
+              ? 'Claiming Credits...'
+              : 'Transfer to Vault'}
+          </button>
         </div>
-      )}
-
-      {/* Click outside to close connectors dropdown */}
-      {showConnectors && (
-        <div
-          className="fixed inset-0 z-0"
-          onClick={() => setShowConnectors(false)}
-        />
       )}
     </div>
   );

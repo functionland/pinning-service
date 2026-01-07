@@ -1,6 +1,6 @@
-import { http, createConfig } from 'wagmi';
+import { getDefaultConfig } from '@rainbow-me/rainbowkit';
+import { http } from 'wagmi';
 import { base, mainnet } from 'wagmi/chains';
-import { injected, walletConnect, coinbaseWallet } from 'wagmi/connectors';
 import type { Chain } from 'viem';
 
 // Custom chain definition for Skale Europa
@@ -19,16 +19,11 @@ export const skaleEuropa: Chain = {
 // WalletConnect project ID from environment
 const walletConnectProjectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || '';
 
-// Wagmi configuration
-export const config = createConfig({
+// RainbowKit + Wagmi configuration
+export const config = getDefaultConfig({
+  appName: 'Fula Pinning Service',
+  projectId: walletConnectProjectId,
   chains: [base, mainnet, skaleEuropa],
-  connectors: [
-    injected(),
-    ...(walletConnectProjectId
-      ? [walletConnect({ projectId: walletConnectProjectId })]
-      : []),
-    coinbaseWallet({ appName: 'Fula Pinning Service' }),
-  ],
   transports: {
     [base.id]: http('https://mainnet.base.org'),
     [mainnet.id]: http('https://eth.llamarpc.com'),

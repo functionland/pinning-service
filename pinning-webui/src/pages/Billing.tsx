@@ -170,18 +170,28 @@ export default function Billing() {
   // Calculate paid storage from FULA balance
   // Formula: FULA balance / fulaPerGBMonth = GB of paid storage
   const fulaPerGBMonth = pricing?.fulaPerGBMonth || 3;
-  const paidStorageGB = (creditStatus?.balanceFula || 0) / fulaPerGBMonth;
+  const fulaBalance = creditStatus?.balanceFula || 0;
+  const paidStorageGB = fulaBalance / fulaPerGBMonth;
   const paidStorageBytes = paidStorageGB * 1024 * 1024 * 1024; // Convert to bytes
+  const freeTierBytes = creditStatus?.freeTierBytes || 0;
+  const currentStorageBytes = creditStatus?.currentStorageBytes || 0;
 
   // Total available storage = free tier + paid storage
-  const totalAvailableBytes = (creditStatus?.freeTierBytes || 0) + paidStorageBytes;
+  const totalAvailableBytes = freeTierBytes + paidStorageBytes;
 
   // Calculate usage percentage against total available
   const usagePercent = totalAvailableBytes > 0
-    ? Math.min(100, (creditStatus?.currentStorageBytes || 0) / totalAvailableBytes * 100)
+    ? Math.min(100, currentStorageBytes / totalAvailableBytes * 100)
     : 0;
-  const isOverFreeTier = creditStatus && creditStatus.currentStorageBytes >= creditStatus.freeTierBytes;
+  const isOverFreeTier = currentStorageBytes > freeTierBytes;
   const isNearLimit = usagePercent >= 80;
+
+  // Calculate monthly burn rate and time remaining
+  // Only consuming credits when over free tier
+  const overageBytes = Math.max(0, currentStorageBytes - freeTierBytes);
+  const overageGB = overageBytes / (1024 * 1024 * 1024);
+  const monthlyBurnRate = overageGB * fulaPerGBMonth; // FULA per month
+  const monthsRemaining = monthlyBurnRate > 0 ? fulaBalance / monthlyBurnRate : Infinity;
 
   if (loading) {
     return (
@@ -239,19 +249,16 @@ export default function Billing() {
             <div>
               <p className="text-sm font-medium text-gray-500">{t.billing?.storageUsage || 'Storage Usage'}</p>
               <p className="text-2xl font-bold text-gray-900 mt-1">
-                {formatBytes(creditStatus?.currentStorageBytes || 0)}
+                {formatBytes(currentStorageBytes)} <span className="text-base font-normal text-gray-500">of {formatBytes(totalAvailableBytes)}</span>
               </p>
             </div>
             <div className="text-4xl opacity-20">💾</div>
           </div>
-          <div className="space-y-2">
+
+          {/* Progress bar */}
+          <div className="space-y-2 mb-4">
             <div className="flex justify-between text-sm">
-              <span className="text-gray-500">
-                Free: {formatBytes(creditStatus?.freeTierBytes || 0)}
-                {paidStorageBytes > 0 && (
-                  <> + Paid: {formatBytes(paidStorageBytes)}</>
-                )}
-              </span>
+              <span className="text-gray-500">Storage used</span>
               <span className={isNearLimit ? 'text-amber-600 font-medium' : 'text-green-600'}>
                 {usagePercent.toFixed(1)}%
               </span>
@@ -264,13 +271,50 @@ export default function Billing() {
                 style={{ width: `${Math.min(100, usagePercent)}%` }}
               ></div>
             </div>
-            <p className="text-xs text-gray-500">
-              Total available: {formatBytes(totalAvailableBytes)} | Remaining: {formatBytes(Math.max(0, totalAvailableBytes - (creditStatus?.currentStorageBytes || 0)))}
-            </p>
-            {isOverFreeTier && (
-              <p className="text-sm text-amber-600">
-                Using {formatBytes((creditStatus?.currentStorageBytes || 0) - (creditStatus?.freeTierBytes || 0))} beyond free tier
-              </p>
+          </div>
+
+          {/* Storage breakdown */}
+          <div className="border-t border-gray-100 pt-3 space-y-2">
+            <div className="flex items-center text-sm">
+              <span className="text-gray-400 mr-2">├─</span>
+              <span className="text-gray-600">Free tier:</span>
+              <span className="ml-2 font-medium text-gray-900">{formatBytes(freeTierBytes)}</span>
+              <span className="ml-2 text-xs text-gray-400">(always available)</span>
+            </div>
+            <div className="flex items-center text-sm">
+              <span className="text-gray-400 mr-2">└─</span>
+              <span className="text-gray-600">Paid:</span>
+              <span className="ml-2 font-medium text-gray-900">{formatBytes(paidStorageBytes)}</span>
+              <span className="ml-2 text-xs text-gray-400">(from {fulaBalance.toFixed(2)} FULA)</span>
+            </div>
+          </div>
+
+          {/* Credit consumption status */}
+          <div className={`mt-4 p-3 rounded-lg ${isOverFreeTier ? 'bg-amber-50 border border-amber-200' : 'bg-green-50 border border-green-200'}`}>
+            {isOverFreeTier ? (
+              <>
+                <div className="flex items-center text-amber-700">
+                  <span className="mr-2">⚡</span>
+                  <span className="font-medium">Consuming {monthlyBurnRate.toFixed(2)} FULA/month</span>
+                </div>
+                <p className="text-xs text-amber-600 mt-1">
+                  {monthsRemaining < 1
+                    ? `~${Math.ceil(monthsRemaining * 30)} days remaining at current usage`
+                    : monthsRemaining < 12
+                      ? `~${monthsRemaining.toFixed(1)} months remaining at current usage`
+                      : 'Over 1 year of storage remaining'}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center text-green-700">
+                  <span className="mr-2">✓</span>
+                  <span className="font-medium">Credits preserved</span>
+                </div>
+                <p className="text-xs text-green-600 mt-1">
+                  You're under free tier - no credits being consumed
+                </p>
+              </>
             )}
           </div>
         </div>

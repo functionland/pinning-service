@@ -1326,11 +1326,27 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
           return res.status(400).json({ error: 'Unsupported chain' });
       }
 
-      const response = await fetch(explorerUrl);
-      const data = await response.json();
+      // Retry logic - transaction may not be indexed immediately
+      let data: any = null;
+      let retries = 3;
+      while (retries > 0) {
+        const response = await fetch(explorerUrl);
+        data = await response.json();
 
-      if (!data.result || data.result === null) {
-        return res.status(404).json({ error: 'Transaction not found or not confirmed' });
+        if (data.result && data.result !== null && data.result.logs) {
+          break; // Got valid result with logs
+        }
+
+        retries--;
+        if (retries > 0) {
+          console.log(`[claim] Transaction ${txHash} not ready, retrying in 3s... (${retries} left)`);
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+
+      if (!data?.result || data.result === null) {
+        console.log(`[claim] Transaction ${txHash} not found. API response:`, JSON.stringify(data));
+        return res.status(404).json({ error: 'Transaction not found or not confirmed. Please try again in a few seconds.' });
       }
 
       // Parse token transfer from logs
@@ -1339,24 +1355,40 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       const tokenAddressLower = chain.token_address.toLowerCase();
       const vaultAddressLower = chain.vault_address.toLowerCase();
 
+      console.log(`[claim] Looking for FULA transfer: token=${tokenAddressLower}, vault=${vaultAddressLower}`);
+      console.log(`[claim] Transaction has ${receipt.logs?.length || 0} logs`);
+
       let transferFound = false;
       let fromAddress = '';
       let amountRaw = '0';
 
       for (const log of receipt.logs || []) {
-        if (log.address.toLowerCase() !== tokenAddressLower) continue;
-        if (log.topics[0] !== transferTopic) continue;
+        const logAddress = log.address.toLowerCase();
+        if (logAddress !== tokenAddressLower) {
+          console.log(`[claim] Log address ${logAddress} != token ${tokenAddressLower}`);
+          continue;
+        }
+        if (log.topics[0] !== transferTopic) {
+          console.log(`[claim] Log topic ${log.topics[0]} != Transfer topic`);
+          continue;
+        }
 
         const to = '0x' + log.topics[2].slice(26).toLowerCase();
-        if (to !== vaultAddressLower) continue;
+        console.log(`[claim] Transfer to: ${to}, vault: ${vaultAddressLower}`);
+        if (to !== vaultAddressLower) {
+          console.log(`[claim] Transfer destination ${to} != vault ${vaultAddressLower}`);
+          continue;
+        }
 
         fromAddress = '0x' + log.topics[1].slice(26).toLowerCase();
         amountRaw = BigInt(log.data).toString();
         transferFound = true;
+        console.log(`[claim] Found valid transfer: from=${fromAddress}, amount=${amountRaw}`);
         break;
       }
 
       if (!transferFound) {
+        console.log(`[claim] No FULA transfer found in tx ${txHash}. Logs:`, JSON.stringify(receipt.logs || []));
         return res.status(400).json({ error: 'No FULA transfer to vault found in this transaction' });
       }
 

@@ -290,6 +290,12 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
     setIsClaimingTx(true);
 
     try {
+      // Wait before first attempt to allow blockchain explorer to index the transaction
+      if (retryCount === 0) {
+        console.log(`[Claim] Waiting 5s for transaction to be indexed...`);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+
       const response = await fetch('/api/credits/claim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -300,9 +306,13 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
       const data = await response.json();
 
       if (!response.ok) {
-        // If transaction not found yet, retry after delay (blockchain confirmations)
-        if (data.error?.includes('not found') && retryCount < 3) {
-          console.log(`[Claim] Transaction not found yet, retrying in 5s (attempt ${retryCount + 1}/3)`);
+        // Retry on indexing delays (transaction not found OR logs not indexed yet)
+        const shouldRetry =
+          data.error?.includes('not found') ||
+          data.error?.includes('No FULA transfer to vault found');
+
+        if (shouldRetry && retryCount < 5) {
+          console.log(`[Claim] Transaction not indexed yet, retrying in 5s (attempt ${retryCount + 1}/5)`);
           await new Promise(resolve => setTimeout(resolve, 5000));
           return claimTransaction(hash, retryCount + 1);
         }

@@ -11,7 +11,7 @@ interface User {
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  login: (credential: string) => Promise<{ isNew: boolean }>;
+  login: (credential: string, referralCode?: string) => Promise<{ isNew: boolean }>;
   logout: () => Promise<void>;
 }
 
@@ -39,12 +39,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     checkAuth();
   }, [checkAuth]);
 
-  const login = async (credential: string) => {
+  const login = async (credential: string, referralCode?: string) => {
     const res = await fetch('/auth/google', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ credential }),
+      body: JSON.stringify({ credential, referralCode }),
     });
 
     if (!res.ok) {

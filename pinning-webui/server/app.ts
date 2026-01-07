@@ -63,7 +63,7 @@ export interface AppConfig {
 
 // Database operations type
 export interface DbOps {
-  getOrCreateUser(email: string, name: string, picture: string): any;
+  getOrCreateUser(email: string, name: string, picture: string, referralCode?: string): any;
   getUserByEmail(email: string): any;
   getApiKeys(email: string): any[];
   createApiKey(email: string): string;
@@ -186,6 +186,35 @@ export function initializeDatabase(dbPath: string): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_credit_history_email ON credit_history(user_email);
     CREATE INDEX IF NOT EXISTS idx_credit_history_type ON credit_history(tx_type);
+
+    -- ============================================
+    -- Referral System Tables
+    -- ============================================
+
+    -- Referral codes table (one unique code per user)
+    CREATE TABLE IF NOT EXISTS referral_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL UNIQUE,
+      code TEXT NOT NULL UNIQUE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_email) REFERENCES webui_users(email)
+    );
+    CREATE INDEX IF NOT EXISTS idx_referral_codes_code ON referral_codes(code);
+    CREATE INDEX IF NOT EXISTS idx_referral_codes_email ON referral_codes(user_email);
+
+    -- Referrals tracking table (who referred whom)
+    CREATE TABLE IF NOT EXISTS referrals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      referrer_email TEXT NOT NULL,
+      referred_email TEXT NOT NULL UNIQUE,
+      referral_code TEXT NOT NULL,
+      referred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (referrer_email) REFERENCES webui_users(email),
+      FOREIGN KEY (referred_email) REFERENCES webui_users(email),
+      FOREIGN KEY (referral_code) REFERENCES referral_codes(code)
+    );
+    CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_email);
+    CREATE INDEX IF NOT EXISTS idx_referrals_referred ON referrals(referred_email);
   `);
 
   // Seed chain_sync_state with supported chains (if empty)
@@ -354,10 +383,33 @@ export function generateJwtApiKey(email: string, jwtSecret: string): string {
   return jwt.sign(payload, jwtSecret, { algorithm: 'HS256' });
 }
 
+// Generate unique referral code (8 characters, alphanumeric, excluding confusing chars)
+function generateReferralCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Exclude 0, O, I, 1
+  let code = '';
+  for (let i = 0; i < 8; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
+// Mask email for privacy (show first 2 chars, mask middle, show last char before @)
+function maskEmail(email: string): string {
+  const [local, domain] = email.split('@');
+  if (!domain) return email;
+  if (local.length <= 4) {
+    return `${local[0]}${'*'.repeat(local.length - 1)}@${domain}`;
+  }
+  const start = local.slice(0, 2);
+  const end = local.slice(-1);
+  const masked = '*'.repeat(Math.min(4, local.length - 3));
+  return `${start}${masked}${end}@${domain}`;
+}
+
 // Create database operations
 export function createDbOps(db: Database.Database, jwtSecret: string): DbOps {
   return {
-    getOrCreateUser(email: string, name: string, picture: string) {
+    getOrCreateUser(email: string, name: string, picture: string, referralCode?: string) {
       const existing = db.prepare('SELECT * FROM webui_users WHERE email = ?').get(email) as any;
 
       if (existing) {
@@ -383,6 +435,24 @@ export function createDbOps(db: Database.Database, jwtSecret: string): DbOps {
       // Create session token that matches the API key
       db.prepare('INSERT OR REPLACE INTO sessions (session_token, username, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)')
         .run(keyId, email);
+
+      // Generate referral code for this new user
+      let newReferralCode = generateReferralCode();
+      // Ensure uniqueness with retry loop
+      while (db.prepare('SELECT 1 FROM referral_codes WHERE code = ?').get(newReferralCode)) {
+        newReferralCode = generateReferralCode();
+      }
+      db.prepare('INSERT INTO referral_codes (user_email, code) VALUES (?, ?)').run(email, newReferralCode);
+
+      // If referred by someone, create referral record
+      if (referralCode) {
+        const referrer = db.prepare('SELECT user_email FROM referral_codes WHERE code = ?').get(referralCode) as { user_email: string } | undefined;
+        // Prevent self-referral and only link if referrer exists
+        if (referrer && referrer.user_email !== email) {
+          db.prepare('INSERT OR IGNORE INTO referrals (referrer_email, referred_email, referral_code) VALUES (?, ?, ?)')
+            .run(referrer.user_email, email, referralCode);
+        }
+      }
 
       return { email, name, picture, isNew: true };
     },
@@ -708,7 +778,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   // Auth routes
   app.post('/auth/google', async (req: Request, res: Response) => {
     try {
-      const { credential } = req.body;
+      const { credential, referralCode } = req.body;
 
       if (!credential) {
         return res.status(400).json({ error: 'Missing credential' });
@@ -729,7 +799,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'Invalid token: missing user ID' });
       }
 
-      const user = dbOps.getOrCreateUser(email, name || '', picture || '');
+      const user = dbOps.getOrCreateUser(email, name || '', picture || '', referralCode || undefined);
 
       req.session.user = {
         id: sub,
@@ -1616,6 +1686,89 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     });
   });
 
+  // ============ Referral Endpoints ============
+
+  // Get user's referral info (code + stats)
+  app.get('/api/referral', requireAuth, (req: Request, res: Response) => {
+    try {
+      const email = req.session.user!.email;
+
+      // Get or create referral code
+      let codeRow = db.prepare('SELECT code, created_at FROM referral_codes WHERE user_email = ?').get(email) as { code: string; created_at: string } | undefined;
+
+      if (!codeRow) {
+        // Generate code for existing users who don't have one
+        let code = generateReferralCode();
+        while (db.prepare('SELECT 1 FROM referral_codes WHERE code = ?').get(code)) {
+          code = generateReferralCode();
+        }
+        db.prepare('INSERT INTO referral_codes (user_email, code) VALUES (?, ?)').run(email, code);
+        codeRow = { code, created_at: new Date().toISOString() };
+      }
+
+      // Get referral stats
+      const stats = db.prepare(`
+        SELECT
+          COUNT(r.id) as totalReferred,
+          COALESCE(SUM(uc.total_deposited_fula), 0) as totalCreditsFromReferrals
+        FROM referrals r
+        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
+        WHERE r.referrer_email = ?
+      `).get(email) as { totalReferred: number; totalCreditsFromReferrals: number } | undefined;
+
+      res.json({
+        code: codeRow.code,
+        createdAt: codeRow.created_at,
+        totalReferred: stats?.totalReferred || 0,
+        totalCreditsFromReferrals: stats?.totalCreditsFromReferrals || 0,
+      });
+    } catch (error) {
+      console.error('[webui] Error getting referral info:', error);
+      res.status(500).json({ error: 'Failed to get referral info' });
+    }
+  });
+
+  // Get list of users referred by current user (paginated)
+  app.get('/api/referral/referred', requireAuth, (req: Request, res: Response) => {
+    try {
+      const email = req.session.user!.email;
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+      const offset = (page - 1) * limit;
+
+      const referred = db.prepare(`
+        SELECT
+          r.referred_email,
+          wu.created_at as joined_at,
+          COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased
+        FROM referrals r
+        JOIN webui_users wu ON r.referred_email = wu.email
+        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
+        WHERE r.referrer_email = ?
+        ORDER BY r.referred_at DESC
+        LIMIT ? OFFSET ?
+      `).all(email, limit, offset) as Array<{ referred_email: string; joined_at: string; total_credits_purchased: number }>;
+
+      const countResult = db.prepare('SELECT COUNT(*) as total FROM referrals WHERE referrer_email = ?').get(email) as { total: number };
+      const total = countResult?.total || 0;
+
+      res.json({
+        items: referred.map(r => ({
+          email: maskEmail(r.referred_email),
+          joinedAt: r.joined_at,
+          totalCreditsPurchased: r.total_credits_purchased,
+        })),
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      });
+    } catch (error) {
+      console.error('[webui] Error getting referred users:', error);
+      res.status(500).json({ error: 'Failed to get referred users' });
+    }
+  });
+
   // ============ Admin Endpoints ============
 
   // Admin middleware
@@ -1692,6 +1845,166 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     } catch (error) {
       console.error('[webui] Error adjusting credits:', error);
       res.status(500).json({ error: 'Failed to adjust credits' });
+    }
+  });
+
+  // Check if current user is admin (for frontend)
+  app.get('/api/admin/check', requireAuth, (req: Request, res: Response) => {
+    if (isAdmin(req.session.user!.email)) {
+      res.json({ isAdmin: true });
+    } else {
+      res.status(403).json({ isAdmin: false });
+    }
+  });
+
+  // Get all referrers with stats (admin only, paginated)
+  app.get('/api/admin/referrals', requireAdmin, (req: Request, res: Response) => {
+    try {
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+      const offset = (page - 1) * limit;
+      const includeZero = req.query.includeZero === 'true';
+
+      // Get referrers with stats
+      const referrers = db.prepare(`
+        SELECT
+          rc.user_email as email,
+          rc.code,
+          rc.created_at as codeCreatedAt,
+          COUNT(r.id) as totalReferred,
+          COALESCE(SUM(uc.total_deposited_fula), 0) as totalCreditsFromReferrals
+        FROM referral_codes rc
+        LEFT JOIN referrals r ON rc.user_email = r.referrer_email
+        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
+        GROUP BY rc.user_email, rc.code, rc.created_at
+        ${includeZero ? '' : 'HAVING COUNT(r.id) > 0'}
+        ORDER BY totalReferred DESC, rc.created_at DESC
+        LIMIT ? OFFSET ?
+      `).all(limit, offset) as Array<{
+        email: string;
+        code: string;
+        codeCreatedAt: string;
+        totalReferred: number;
+        totalCreditsFromReferrals: number;
+      }>;
+
+      // Get total count
+      const countResult = db.prepare(`
+        SELECT COUNT(*) as total FROM (
+          SELECT rc.user_email
+          FROM referral_codes rc
+          LEFT JOIN referrals r ON rc.user_email = r.referrer_email
+          GROUP BY rc.user_email
+          ${includeZero ? '' : 'HAVING COUNT(r.id) > 0'}
+        )
+      `).get() as { total: number };
+
+      res.json({
+        items: referrers,
+        total: countResult?.total || 0,
+        page,
+        limit,
+        totalPages: Math.ceil((countResult?.total || 0) / limit),
+      });
+    } catch (error) {
+      console.error('[webui] Error getting admin referrals:', error);
+      res.status(500).json({ error: 'Failed to get referrals' });
+    }
+  });
+
+  // Export all referral data as CSV (admin only) - MUST be before :email route
+  app.get('/api/admin/referrals/export/csv', requireAdmin, (_req: Request, res: Response) => {
+    try {
+      const data = db.prepare(`
+        SELECT
+          rc.user_email as referrer_email,
+          rc.code as referral_code,
+          r.referred_email,
+          wu.created_at as referred_user_joined_at,
+          r.referred_at,
+          COALESCE(uc.total_deposited_fula, 0) as credits_purchased
+        FROM referral_codes rc
+        LEFT JOIN referrals r ON rc.user_email = r.referrer_email
+        LEFT JOIN webui_users wu ON r.referred_email = wu.email
+        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
+        ORDER BY rc.user_email, r.referred_at
+      `).all() as Array<{
+        referrer_email: string;
+        referral_code: string;
+        referred_email: string | null;
+        referred_user_joined_at: string | null;
+        referred_at: string | null;
+        credits_purchased: number;
+      }>;
+
+      // Generate CSV
+      const headers = ['Referrer Email', 'Referral Code', 'Referred Email', 'Referred User Joined At', 'Referred At', 'Credits Purchased'];
+      const csvRows = [headers.join(',')];
+
+      for (const row of data) {
+        csvRows.push([
+          row.referrer_email,
+          row.referral_code,
+          row.referred_email || '',
+          row.referred_user_joined_at || '',
+          row.referred_at || '',
+          row.credits_purchased || 0,
+        ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+      }
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="referrals-${new Date().toISOString().split('T')[0]}.csv"`);
+      res.send(csvRows.join('\n'));
+    } catch (error) {
+      console.error('[webui] Error exporting referrals:', error);
+      res.status(500).json({ error: 'Failed to export referrals' });
+    }
+  });
+
+  // Get referred users for a specific referrer (admin only, paginated)
+  app.get('/api/admin/referrals/:email', requireAdmin, (req: Request, res: Response) => {
+    try {
+      const referrerEmail = decodeURIComponent(req.params.email);
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+      const offset = (page - 1) * limit;
+
+      const referred = db.prepare(`
+        SELECT
+          r.referred_email as email,
+          wu.created_at as joinedAt,
+          r.referred_at as referredAt,
+          COALESCE(uc.total_deposited_fula, 0) as totalCreditsPurchased
+        FROM referrals r
+        JOIN webui_users wu ON r.referred_email = wu.email
+        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
+        WHERE r.referrer_email = ?
+        ORDER BY r.referred_at DESC
+        LIMIT ? OFFSET ?
+      `).all(referrerEmail, limit, offset) as Array<{
+        email: string;
+        joinedAt: string;
+        referredAt: string;
+        totalCreditsPurchased: number;
+      }>;
+
+      const countResult = db.prepare('SELECT COUNT(*) as total FROM referrals WHERE referrer_email = ?').get(referrerEmail) as { total: number };
+
+      // Get referrer info
+      const referrerInfo = db.prepare('SELECT code FROM referral_codes WHERE user_email = ?').get(referrerEmail) as { code: string } | undefined;
+
+      res.json({
+        referrer: referrerEmail,
+        referrerCode: referrerInfo?.code || null,
+        items: referred,
+        total: countResult?.total || 0,
+        page,
+        limit,
+        totalPages: Math.ceil((countResult?.total || 0) / limit),
+      });
+    } catch (error) {
+      console.error('[webui] Error getting admin referrer details:', error);
+      res.status(500).json({ error: 'Failed to get referrer details' });
     }
   });
 

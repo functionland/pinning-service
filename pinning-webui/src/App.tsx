@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { LanguageProvider } from './context/LanguageContext';
@@ -7,13 +8,17 @@ import ApiKeys from './pages/ApiKeys';
 import Pins from './pages/Pins';
 import Profile from './pages/Profile';
 import Billing from './pages/Billing';
+import Referrals from './pages/Referrals';
+import Admin from './pages/Admin';
+import AdminUsers from './pages/AdminUsers';
+import AdminReferrals from './pages/AdminReferrals';
 import GetKey from './pages/GetKey';
 import View from './pages/View';
 import Layout from './components/Layout';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
-  
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -21,11 +26,42 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
       </div>
     );
   }
-  
+
   if (!user) {
     return <Navigate to="/login" replace />;
   }
-  
+
+  return <>{children}</>;
+}
+
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (user) {
+      fetch('/api/admin/check', { credentials: 'include' })
+        .then(res => setIsAdmin(res.ok))
+        .catch(() => setIsAdmin(false));
+    }
+  }, [user]);
+
+  if (loading || isAdmin === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (!isAdmin) {
+    return <Navigate to="/" replace />;
+  }
+
   return <>{children}</>;
 }
 
@@ -46,7 +82,14 @@ function App() {
             <Route path="keys" element={<ApiKeys />} />
             <Route path="pins" element={<Pins />} />
             <Route path="billing" element={<Billing />} />
+            <Route path="referrals" element={<Referrals />} />
             <Route path="profile" element={<Profile />} />
+            {/* Admin Routes */}
+            <Route path="admin" element={<AdminRoute><Admin /></AdminRoute>}>
+              <Route index element={<Navigate to="/admin/users" replace />} />
+              <Route path="users" element={<AdminUsers />} />
+              <Route path="referrals" element={<AdminReferrals />} />
+            </Route>
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

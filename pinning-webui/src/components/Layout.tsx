@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
@@ -7,14 +8,28 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const { t } = useLanguage();
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // Check admin status
+  useEffect(() => {
+    if (user) {
+      fetch('/api/admin/check', { credentials: 'include' })
+        .then(res => setIsAdmin(res.ok))
+        .catch(() => setIsAdmin(false));
+    }
+  }, [user]);
 
   const navigation = [
     { name: t.nav.dashboard, href: '/' },
     { name: t.nav.apiKeys, href: '/keys' },
     { name: t.nav.myPins, href: '/pins' },
     { name: t.nav.billing || 'Billing', href: '/billing' },
+    { name: t.nav.referrals || 'Referrals', href: '/referrals' },
     { name: t.nav.profile, href: '/profile' },
   ];
+
+  // Add admin link if user is admin
+  const adminNav = isAdmin ? [{ name: t.nav.admin || 'Admin', href: '/admin' }] : [];
 
   const handleLogout = async () => {
     await logout();
@@ -48,6 +63,22 @@ export default function Layout() {
                       isActive
                         ? 'bg-primary-50 text-primary-700'
                         : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                    }`
+                  }
+                >
+                  {item.name}
+                </NavLink>
+              ))}
+              {/* Admin navigation */}
+              {adminNav.map((item) => (
+                <NavLink
+                  key={item.name}
+                  to={item.href}
+                  className={({ isActive }) =>
+                    `px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                      isActive
+                        ? 'bg-red-50 text-red-700'
+                        : 'text-red-600 hover:bg-red-50 hover:text-red-700'
                     }`
                   }
                 >
@@ -91,6 +122,22 @@ export default function Layout() {
                     isActive
                       ? 'bg-primary-50 text-primary-700'
                       : 'text-gray-600 hover:bg-gray-100'
+                  }`
+                }
+              >
+                {item.name}
+              </NavLink>
+            ))}
+            {/* Admin navigation for mobile */}
+            {adminNav.map((item) => (
+              <NavLink
+                key={item.name}
+                to={item.href}
+                className={({ isActive }) =>
+                  `px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap ${
+                    isActive
+                      ? 'bg-red-50 text-red-700'
+                      : 'text-red-600 hover:bg-red-50'
                   }`
                 }
               >

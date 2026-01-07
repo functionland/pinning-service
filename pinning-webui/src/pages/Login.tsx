@@ -83,6 +83,8 @@ interface PricingInfo {
   fulaPerGBMonth: number;
 }
 
+const REFERRAL_CODE_KEY = 'fula-referral-code';
+
 export default function Login() {
   const { user, login } = useAuth();
   const navigate = useNavigate();
@@ -95,6 +97,14 @@ export default function Login() {
   const animatedPins = useAnimatedCounter(totalPins, 5000);
   const formattedSize = formatStorageSize(animatedSize);
   const returnTo = searchParams.get('returnTo');
+
+  // Capture referral code from URL and store in localStorage (keep first code only)
+  useEffect(() => {
+    const refCode = searchParams.get('ref');
+    if (refCode && !localStorage.getItem(REFERRAL_CODE_KEY)) {
+      localStorage.setItem(REFERRAL_CODE_KEY, refCode);
+    }
+  }, [searchParams]);
 
   // Fetch public stats and pricing on mount
   useEffect(() => {
@@ -124,8 +134,16 @@ export default function Login() {
   const handleCredentialResponse = useCallback(async (response: { credential: string }) => {
     console.log('[Login] Google credential received, length:', response.credential?.length);
     try {
-      const result = await login(response.credential);
+      // Get referral code from localStorage
+      const referralCode = localStorage.getItem(REFERRAL_CODE_KEY) || undefined;
+
+      const result = await login(response.credential, referralCode);
       console.log('[Login] Login successful, isNew:', result.isNew);
+
+      // Clear referral code from localStorage after successful new registration
+      if (result.isNew) {
+        localStorage.removeItem(REFERRAL_CODE_KEY);
+      }
 
       // If there's a returnTo parameter, navigate there after login
       if (returnTo) {

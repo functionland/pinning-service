@@ -196,7 +196,9 @@ export interface Translations {
     apiKeys: string;
     myPins: string;
     billing?: string;
+    referrals?: string;
     profile: string;
+    admin?: string;
     logout: string;
   };
   billing?: {
@@ -216,5 +218,63 @@ export interface Translations {
     error: string;
     user: string;
     today: string;
+  };
+  referrals?: {
+    title: string;
+    subtitle: string;
+    yourCode: string;
+    shareLink: string;
+    copyCode: string;
+    copyLink: string;
+    copied: string;
+    stats: string;
+    totalReferred: string;
+    totalCredits: string;
+    referredUsers: string;
+    email: string;
+    joinedAt: string;
+    creditsPurchased: string;
+    noReferrals: string;
+    noReferralsDesc: string;
+  };
+  admin?: {
+    title: string;
+    subtitle: string;
+    users: string;
+    referrals: string;
+    suspendedUsers: string;
+    email: string;
+    balance: string;
+    storage: string;
+    suspendedAt: string;
+    actions: string;
+    unsuspend: string;
+    noSuspendedUsers: string;
+    creditAdjustment: string;
+    userEmail: string;
+    amount: string;
+    amountHint: string;
+    reason: string;
+    adjustCredits: string;
+  };
+  adminReferrals?: {
+    referrers: string;
+    includeZero: string;
+    exportCsv: string;
+    referrer: string;
+    code: string;
+    totalReferred: string;
+    totalCredits: string;
+    viewDetails: string;
+    hideDetails: string;
+    referredBy: string;
+    email: string;
+    joinedAt: string;
+    referredAt: string;
+    credits: string;
+    noReferrers: string;
+    tryIncludeZero: string;
+    noReferred: string;
+    actions: string;
   };
 }

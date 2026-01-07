@@ -1423,7 +1423,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Connect/link a wallet (with signature verification)
-  app.post('/api/wallets/connect', requireAuth, (req: Request, res: Response) => {
+  app.post('/api/wallets/connect', requireAuth, async (req: Request, res: Response) => {
     try {
       const { address, chainId, signature, message } = req.body;
 
@@ -1436,16 +1436,48 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'Invalid wallet address format' });
       }
 
-      // Verify the message contains user email (prevents replay attacks)
-      const expectedMessagePart = `Link wallet to ${req.session.user!.email}`;
-      if (!message.includes(expectedMessagePart)) {
-        return res.status(400).json({ error: 'Invalid signature message' });
+      const normalizedAddress = address.toLowerCase();
+      const userEmail = req.session.user!.email;
+
+      // Verify the message contains user email and wallet address (prevents replay attacks)
+      if (!message.includes(userEmail) || !message.toLowerCase().includes(normalizedAddress)) {
+        return res.status(400).json({ error: 'Invalid signature message - must include your email and wallet address' });
       }
 
-      // TODO: Add proper signature verification with viem/ethers
-      // For now, we just check signature format
+      // Verify signature format
       if (!/^0x[a-fA-F0-9]+$/.test(signature)) {
         return res.status(400).json({ error: 'Invalid signature format' });
+      }
+
+      // Verify the signature using viem
+      try {
+        const { verifyMessage } = await import('viem');
+        const { recoverMessageAddress } = await import('viem');
+
+        const recoveredAddress = await recoverMessageAddress({
+          message,
+          signature: signature as `0x${string}`,
+        });
+
+        if (recoveredAddress.toLowerCase() !== normalizedAddress) {
+          return res.status(400).json({ error: 'Signature verification failed - address mismatch' });
+        }
+      } catch (sigError) {
+        console.error('[webui] Signature verification error:', sigError);
+        return res.status(400).json({ error: 'Invalid signature' });
+      }
+
+      // Check if this wallet is already linked to a DIFFERENT user
+      const existingLink = db.prepare(`
+        SELECT user_email FROM user_wallets
+        WHERE wallet_address = ? AND is_verified = 1
+      `).get(normalizedAddress) as { user_email: string } | undefined;
+
+      if (existingLink && existingLink.user_email !== userEmail) {
+        return res.status(400).json({
+          error: 'Wallet already linked to another account',
+          message: 'This wallet is already verified and linked to a different user account.',
+        });
       }
 
       // Check if chain is supported
@@ -1455,11 +1487,11 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       }
 
       // Link the wallet (verified)
-      linkWallet(db, req.session.user!.email, address, chainId, true);
+      linkWallet(db, userEmail, normalizedAddress, chainId, true);
 
-      console.log(`[webui] Wallet ${address} linked to ${req.session.user!.email} on chain ${chainId}`);
+      console.log(`[webui] Wallet ${normalizedAddress} linked to ${userEmail} on chain ${chainId} (signature verified)`);
 
-      res.json({ success: true, address: address.toLowerCase(), chainId });
+      res.json({ success: true, address: normalizedAddress, chainId });
     } catch (error) {
       console.error('[webui] Error connecting wallet:', error);
       res.status(500).json({ error: 'Failed to connect wallet' });

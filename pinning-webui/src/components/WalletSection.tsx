@@ -43,10 +43,12 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
   const [selectedChainId, setSelectedChainId] = useState<number>(DEFAULT_CHAIN_ID);
   const [depositAmount, setDepositAmount] = useState<string>('');
   const [isLinking, setIsLinking] = useState(false);
+  const [isWalletLinked, setIsWalletLinked] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
   const [transferError, setTransferError] = useState<string | null>(null);
   const [transferSuccess, setTransferSuccess] = useState<string | null>(null);
   const [isClaimingTx, setIsClaimingTx] = useState(false);
+  const [hasPromptedLink, setHasPromptedLink] = useState(false);
 
   // Get token and vault addresses for selected chain
   const tokenAddress = FULA_TOKEN_ADDRESSES[selectedChainId];
@@ -110,6 +112,49 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
     }
   }, [chainId]);
 
+  // Check if wallet is already linked when address changes
+  useEffect(() => {
+    if (address) {
+      checkWalletLinked();
+    } else {
+      setIsWalletLinked(false);
+      setHasPromptedLink(false);
+    }
+  }, [address]);
+
+  // Auto-prompt for wallet linking after connection (if not already linked)
+  useEffect(() => {
+    if (isConnected && address && !isWalletLinked && !hasPromptedLink && !isLinking && user?.email) {
+      // Small delay to let the connection UI settle
+      const timer = setTimeout(() => {
+        setHasPromptedLink(true);
+        linkWalletToBackend();
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [isConnected, address, isWalletLinked, hasPromptedLink, isLinking, user?.email]);
+
+  // Check if wallet is already linked to this account
+  const checkWalletLinked = async () => {
+    if (!address) return;
+
+    try {
+      const response = await fetch('/api/wallets', {
+        credentials: 'include',
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const linked = data.wallets?.some(
+          (w: { address: string }) => w.address.toLowerCase() === address.toLowerCase()
+        );
+        setIsWalletLinked(linked);
+      }
+    } catch (err) {
+      console.error('Failed to check wallet status:', err);
+    }
+  };
+
   // Auto-claim transaction when confirmed
   useEffect(() => {
     if (isConfirmed && txHash && !isClaimingTx) {
@@ -131,7 +176,7 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
     }
   }, [writeError]);
 
-  // Link wallet to backend
+  // Link wallet to backend with signature verification
   const linkWalletToBackend = async () => {
     if (!address || !user?.email) return;
 
@@ -140,7 +185,7 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
 
     try {
       const timestamp = Date.now();
-      const message = `Link wallet to ${user.email}\nTimestamp: ${timestamp}`;
+      const message = `Link wallet ${address} to ${user.email}\nTimestamp: ${timestamp}\nThis signature proves you own this wallet.`;
       const signature = await signMessageAsync({ message });
 
       const response = await fetch('/api/wallets/connect', {
@@ -151,10 +196,22 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
       });
 
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to link wallet');
+      if (!response.ok) {
+        // Handle specific error cases
+        if (data.error?.includes('already linked to another')) {
+          throw new Error('This wallet is already linked to a different account. Please use a different wallet.');
+        }
+        throw new Error(data.error || 'Failed to link wallet');
+      }
+
+      // Successfully linked
+      setIsWalletLinked(true);
+      setLinkError(null);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to link wallet';
-      if (!errorMessage.includes('User rejected')) {
+      if (errorMessage.includes('User rejected') || errorMessage.includes('rejected')) {
+        setLinkError('Signature required to link wallet. Click "Verify & Link Wallet" to try again.');
+      } else {
         setLinkError(errorMessage);
       }
     } finally {
@@ -229,7 +286,7 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
 
   const isTransferring = isTransferPending || isConfirming || isClaimingTx;
   const isReady = !!simulateData?.request && !simulateError;
-  const canTransfer = isConnected && parsedAmount > BigInt(0) && balanceNumber >= parseFloat(depositAmount || '0') && vaultAddress;
+  const canTransfer = isConnected && isWalletLinked && parsedAmount > BigInt(0) && balanceNumber >= parseFloat(depositAmount || '0') && vaultAddress;
 
   return (
     <div className="space-y-6">
@@ -243,22 +300,48 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
         />
       </div>
 
-      {/* Link Wallet Button */}
+      {/* Wallet Link Status */}
       {isConnected && (
-        <div className="flex items-center gap-3">
-          <button
-            onClick={linkWalletToBackend}
-            disabled={isLinking}
-            className="text-sm text-primary-600 hover:text-primary-700 font-medium"
-          >
-            {isLinking ? 'Signing...' : 'Link Wallet to Account'}
-          </button>
-          {linkError && <span className="text-sm text-red-600">{linkError}</span>}
+        <div className="space-y-2">
+          {isWalletLinked ? (
+            <div className="flex items-center gap-2 text-sm text-green-600">
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+              </svg>
+              Wallet verified and linked to your account
+            </div>
+          ) : (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <div className="flex items-start gap-3">
+                <svg className="w-5 h-5 text-amber-600 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-amber-800">
+                    Wallet verification required
+                  </p>
+                  <p className="text-sm text-amber-700 mt-1">
+                    Sign a message to prove you own this wallet. This links it to your account for transaction tracking.
+                  </p>
+                  {linkError && (
+                    <p className="text-sm text-red-600 mt-2">{linkError}</p>
+                  )}
+                  <button
+                    onClick={linkWalletToBackend}
+                    disabled={isLinking}
+                    className="mt-3 px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700 disabled:opacity-50"
+                  >
+                    {isLinking ? 'Waiting for signature...' : 'Verify & Link Wallet'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Chain Selector + Get Token Button */}
-      {isConnected && (
+      {/* Chain Selector + Get Token Button - Show when linked */}
+      {isConnected && isWalletLinked && (
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
             <label className="text-sm font-medium text-gray-700">Chain:</label>
@@ -288,8 +371,8 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
         </div>
       )}
 
-      {/* Balance and Transfer Section */}
-      {isConnected && (
+      {/* Balance and Transfer Section - Only show when wallet is linked */}
+      {isConnected && isWalletLinked && (
         <div className="bg-gray-50 rounded-xl p-6 space-y-4">
           {/* Balance Display */}
           <div className="flex items-center justify-between">

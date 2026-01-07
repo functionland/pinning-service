@@ -167,11 +167,21 @@ export default function Billing() {
     }
   };
 
-  // Calculate usage percentage
-  const usagePercent = creditStatus
-    ? Math.min(100, (creditStatus.currentStorageBytes / creditStatus.freeTierBytes) * 100)
+  // Calculate paid storage from FULA balance
+  // Formula: FULA balance / fulaPerGBMonth = GB of paid storage
+  const fulaPerGBMonth = pricing?.fulaPerGBMonth || 3;
+  const paidStorageGB = (creditStatus?.balanceFula || 0) / fulaPerGBMonth;
+  const paidStorageBytes = paidStorageGB * 1024 * 1024 * 1024; // Convert to bytes
+
+  // Total available storage = free tier + paid storage
+  const totalAvailableBytes = (creditStatus?.freeTierBytes || 0) + paidStorageBytes;
+
+  // Calculate usage percentage against total available
+  const usagePercent = totalAvailableBytes > 0
+    ? Math.min(100, (creditStatus?.currentStorageBytes || 0) / totalAvailableBytes * 100)
     : 0;
   const isOverFreeTier = creditStatus && creditStatus.currentStorageBytes >= creditStatus.freeTierBytes;
+  const isNearLimit = usagePercent >= 80;
 
   if (loading) {
     return (
@@ -236,8 +246,13 @@ export default function Billing() {
           </div>
           <div className="space-y-2">
             <div className="flex justify-between text-sm">
-              <span className="text-gray-500">Free tier: {formatBytes(creditStatus?.freeTierBytes || 0)}</span>
-              <span className={isOverFreeTier ? 'text-amber-600 font-medium' : 'text-green-600'}>
+              <span className="text-gray-500">
+                Free: {formatBytes(creditStatus?.freeTierBytes || 0)}
+                {paidStorageBytes > 0 && (
+                  <> + Paid: {formatBytes(paidStorageBytes)}</>
+                )}
+              </span>
+              <span className={isNearLimit ? 'text-amber-600 font-medium' : 'text-green-600'}>
                 {usagePercent.toFixed(1)}%
               </span>
             </div>
@@ -249,9 +264,12 @@ export default function Billing() {
                 style={{ width: `${Math.min(100, usagePercent)}%` }}
               ></div>
             </div>
+            <p className="text-xs text-gray-500">
+              Total available: {formatBytes(totalAvailableBytes)} | Remaining: {formatBytes(Math.max(0, totalAvailableBytes - (creditStatus?.currentStorageBytes || 0)))}
+            </p>
             {isOverFreeTier && (
               <p className="text-sm text-amber-600">
-                Using {formatBytes((creditStatus?.currentStorageBytes || 0) - (creditStatus?.freeTierBytes || 0))} paid storage
+                Using {formatBytes((creditStatus?.currentStorageBytes || 0) - (creditStatus?.freeTierBytes || 0))} beyond free tier
               </p>
             )}
           </div>

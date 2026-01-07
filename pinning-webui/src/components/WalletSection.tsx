@@ -286,7 +286,7 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
   };
 
   // Claim transaction to backend
-  const claimTransaction = async (hash: string) => {
+  const claimTransaction = async (hash: string, retryCount = 0) => {
     setIsClaimingTx(true);
 
     try {
@@ -298,14 +298,39 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
       });
 
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to claim credits');
 
-      setTransferSuccess(`Successfully credited ${data.amountFula?.toFixed(4) || depositAmount} FULA!`);
+      if (!response.ok) {
+        // If transaction not found yet, retry after delay (blockchain confirmations)
+        if (data.error?.includes('not found') && retryCount < 3) {
+          console.log(`[Claim] Transaction not found yet, retrying in 5s (attempt ${retryCount + 1}/3)`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          return claimTransaction(hash, retryCount + 1);
+        }
+        throw new Error(data.error || data.message || 'Failed to claim credits');
+      }
+
+      setTransferSuccess(`Successfully credited ${data.amountFula?.toFixed(4) || depositAmount} FULA! Your balance has been updated.`);
       setDepositAmount('');
       refetchBalance();
       onTransferSuccess?.();
     } catch (err) {
-      setTransferSuccess(`Transfer successful! TX: ${shortenAddress(hash)}. Credits will be applied within 10 minutes.`);
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      console.error('[Claim] Error:', errorMessage);
+
+      // Show specific error or fallback message
+      if (errorMessage.includes('not linked')) {
+        setTransferError(`Transfer successful but wallet not linked. Please link your wallet first.`);
+        setTransferSuccess(null);
+      } else if (errorMessage.includes('already been credited')) {
+        setTransferSuccess(`Transaction already credited!`);
+      } else {
+        // Show tx hash for manual verification
+        setTransferSuccess(
+          `Transfer complete! TX: ${hash}\n` +
+          `Auto-claim failed: ${errorMessage}\n` +
+          `Credits will be applied within 10 minutes via background scan.`
+        );
+      }
     } finally {
       setIsClaimingTx(false);
     }

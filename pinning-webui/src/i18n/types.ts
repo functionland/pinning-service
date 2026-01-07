@@ -277,4 +277,15 @@ export interface Translations {
     noReferred: string;
     actions: string;
   };
+  download?: {
+    title: string;
+    subtitle: string;
+    getItOn: string;
+    comingSoon: string;
+    featureSecure: string;
+    featureDecentralized: string;
+    featureShare: string;
+    goToDashboard: string;
+    poweredBy: string;
+  };
 }

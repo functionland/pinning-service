@@ -64,7 +64,7 @@ export default function Referrals() {
     }
   };
 
-  const referralLink = info ? `${window.location.origin}/?ref=${info.code}` : '';
+  const referralLink = info ? `${window.location.origin}/login?ref=${info.code}&redirect=/download` : '';
 
   const copyToClipboard = async (text: string) => {
     try {

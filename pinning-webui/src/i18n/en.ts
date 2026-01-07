@@ -264,4 +264,15 @@ export const en: Translations = {
     noReferred: 'No referred users',
     actions: 'Actions',
   },
+  download: {
+    title: 'Get FxFiles',
+    subtitle: 'Secure, decentralized file storage powered by FULA network. Your files, your control.',
+    getItOn: 'GET IT ON',
+    comingSoon: 'COMING SOON',
+    featureSecure: 'Secure',
+    featureDecentralized: 'Decentralized',
+    featureShare: 'Easy Share',
+    goToDashboard: 'Go to Dashboard',
+    poweredBy: 'Powered by FULA Network',
+  },
 };

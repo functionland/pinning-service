@@ -14,6 +14,7 @@ import AdminUsers from './pages/AdminUsers';
 import AdminReferrals from './pages/AdminReferrals';
 import GetKey from './pages/GetKey';
 import View from './pages/View';
+import GetFxFiles from './pages/GetFxFiles';
 import Layout from './components/Layout';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -73,6 +74,7 @@ function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/get-key" element={<GetKey />} />
           <Route path="/view/:shareId" element={<View />} />
+          <Route path="/download" element={<GetFxFiles />} />
           <Route path="/" element={
             <PrivateRoute>
               <Layout />

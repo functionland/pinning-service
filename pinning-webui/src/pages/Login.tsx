@@ -84,6 +84,7 @@ interface PricingInfo {
 }
 
 const REFERRAL_CODE_KEY = 'fula-referral-code';
+const REFERRAL_REDIRECT_KEY = 'fula-referral-redirect';
 
 export default function Login() {
   const { user, login } = useAuth();
@@ -98,11 +99,16 @@ export default function Login() {
   const formattedSize = formatStorageSize(animatedSize);
   const returnTo = searchParams.get('returnTo');
 
-  // Capture referral code from URL and store in localStorage (keep first code only)
+  // Capture referral code and redirect from URL and store in localStorage (keep first code only)
   useEffect(() => {
     const refCode = searchParams.get('ref');
+    const redirect = searchParams.get('redirect');
     if (refCode && !localStorage.getItem(REFERRAL_CODE_KEY)) {
       localStorage.setItem(REFERRAL_CODE_KEY, refCode);
+      // Also store redirect URL if provided with the referral code
+      if (redirect && redirect.startsWith('/')) {
+        localStorage.setItem(REFERRAL_REDIRECT_KEY, redirect);
+      }
     }
   }, [searchParams]);
 
@@ -140,9 +146,17 @@ export default function Login() {
       const result = await login(response.credential, referralCode);
       console.log('[Login] Login successful, isNew:', result.isNew);
 
-      // Clear referral code from localStorage after successful new registration
+      // Clear referral code and get redirect URL after successful new registration
       if (result.isNew) {
+        const referralRedirect = localStorage.getItem(REFERRAL_REDIRECT_KEY);
         localStorage.removeItem(REFERRAL_CODE_KEY);
+        localStorage.removeItem(REFERRAL_REDIRECT_KEY);
+
+        // Redirect new users to the referral redirect URL if present
+        if (referralRedirect && referralRedirect.startsWith('/')) {
+          navigate(referralRedirect, { replace: true });
+          return;
+        }
       }
 
       // If there's a returnTo parameter, navigate there after login

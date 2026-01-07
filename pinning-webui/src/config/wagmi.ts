@@ -30,9 +30,9 @@ export const config = createConfig({
     coinbaseWallet({ appName: 'Fula Pinning Service' }),
   ],
   transports: {
-    [base.id]: http(),
-    [mainnet.id]: http(),
-    [skaleEuropa.id]: http(),
+    [base.id]: http('https://mainnet.base.org'),
+    [mainnet.id]: http('https://eth.llamarpc.com'),
+    [skaleEuropa.id]: http('https://mainnet.skalenodes.com/v1/elated-tan-skat'),
   },
 });
 

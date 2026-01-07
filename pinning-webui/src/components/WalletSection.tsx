@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   useAccount,
   useConnect,
@@ -7,12 +7,46 @@ import {
   useSignMessage,
   useReadContract,
   useWriteContract,
+  useSimulateContract,
   useWaitForTransactionReceipt,
+  useWalletClient,
 } from 'wagmi';
 import { parseUnits, formatUnits } from 'viem';
+import { base, mainnet } from 'wagmi/chains';
 import { useAuth } from '../context/AuthContext';
 import { FULA_TOKEN_ADDRESSES, SWAP_URLS, ERC20_ABI, FULA_DECIMALS } from '../constants/tokens';
-import { CHAIN_NAMES, DEFAULT_CHAIN_ID, SUPPORTED_CHAIN_IDS } from '../config/wagmi';
+import { CHAIN_NAMES, DEFAULT_CHAIN_ID, SUPPORTED_CHAIN_IDS, skaleEuropa } from '../config/wagmi';
+
+// Chain configurations for adding to wallet
+const CHAIN_CONFIGS: Record<number, {
+  chainId: string;
+  chainName: string;
+  nativeCurrency: { name: string; symbol: string; decimals: number };
+  rpcUrls: string[];
+  blockExplorerUrls: string[];
+}> = {
+  [base.id]: {
+    chainId: `0x${base.id.toString(16)}`,
+    chainName: 'Base',
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: ['https://mainnet.base.org'],
+    blockExplorerUrls: ['https://basescan.org'],
+  },
+  [mainnet.id]: {
+    chainId: `0x${mainnet.id.toString(16)}`,
+    chainName: 'Ethereum',
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: ['https://eth.llamarpc.com'],
+    blockExplorerUrls: ['https://etherscan.io'],
+  },
+  [skaleEuropa.id]: {
+    chainId: `0x${skaleEuropa.id.toString(16)}`,
+    chainName: 'SKALE Europa',
+    nativeCurrency: { name: 'sFUEL', symbol: 'sFUEL', decimals: 18 },
+    rpcUrls: ['https://mainnet.skalenodes.com/v1/elated-tan-skat'],
+    blockExplorerUrls: ['https://elated-tan-skat.explorer.mainnet.skalenodes.com'],
+  },
+};
 
 interface ChainInfo {
   chainId: number;
@@ -38,6 +72,7 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
   const { disconnect } = useDisconnect();
   const { switchChain, isPending: isSwitching } = useSwitchChain();
   const { signMessageAsync } = useSignMessage();
+  const { data: walletClient } = useWalletClient();
 
   // State
   const [selectedChainId, setSelectedChainId] = useState<number>(DEFAULT_CHAIN_ID);
@@ -87,6 +122,27 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
 
   // Check if wallet is on the correct chain
   const isWrongChain = isConnected && connectedChainId !== selectedChainId;
+
+  // Parse deposit amount for simulation
+  const parsedAmount = useMemo(() => {
+    if (!depositAmount || parseFloat(depositAmount) <= 0) return undefined;
+    try {
+      return parseUnits(depositAmount, FULA_DECIMALS);
+    } catch {
+      return undefined;
+    }
+  }, [depositAmount]);
+
+  // Simulate the contract call first (prepares gas estimation properly)
+  const { data: simulateData, error: simulateError } = useSimulateContract({
+    address: tokenAddress,
+    abi: ERC20_ABI,
+    functionName: 'transfer',
+    args: vaultAddress && parsedAmount ? [vaultAddress as `0x${string}`, parsedAmount] : undefined,
+    query: {
+      enabled: !!address && !!vaultAddress && !!parsedAmount && !isWrongChain && connectedChainId === selectedChainId,
+    },
+  });
 
   // Sync selected chain with connected wallet chain (only on initial connection)
   useEffect(() => {
@@ -172,9 +228,40 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
 
   // Handle switching to the correct chain
   const handleSwitchToCorrectChain = async () => {
+    if (!walletClient) return;
+
+    setTransferError(null);
+
     try {
-      setTransferError(null);
-      switchChain({ chainId: selectedChainId });
+      const chainConfig = CHAIN_CONFIGS[selectedChainId];
+
+      if (chainConfig) {
+        // First try to add the chain (this will be a no-op if already added)
+        try {
+          await walletClient.request({
+            method: 'wallet_addEthereumChain',
+            params: [chainConfig],
+          });
+        } catch (addError: unknown) {
+          // Chain might already exist, that's ok - continue to switch
+          // Error code 4902 means chain not added, other errors we can ignore
+          console.log('Add chain result:', addError);
+        }
+
+        // Now switch to the chain
+        try {
+          await walletClient.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: chainConfig.chainId }],
+          });
+        } catch (switchError: unknown) {
+          // If switch fails, try using wagmi's switchChain as fallback
+          switchChain({ chainId: selectedChainId });
+        }
+      } else {
+        // Fallback to wagmi's switchChain
+        switchChain({ chainId: selectedChainId });
+      }
     } catch (err) {
       console.error('Chain switch failed:', err);
       setTransferError('Failed to switch network. Please switch manually in your wallet.');
@@ -196,15 +283,27 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
     resetWrite();
 
     try {
-      const amount = parseUnits(depositAmount, FULA_DECIMALS);
-
-      writeContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: 'transfer',
-        args: [vaultAddress as `0x${string}`, amount],
-        chainId: selectedChainId, // Explicitly specify chain
-      });
+      // Use the simulated request if available (includes proper gas estimation)
+      if (simulateData?.request) {
+        writeContract(simulateData.request);
+      } else if (simulateError) {
+        // Simulation failed - show the error
+        const errMsg = simulateError.message || 'Transaction simulation failed';
+        if (errMsg.includes('insufficient') || errMsg.includes('balance')) {
+          setTransferError('Insufficient FULA balance for this transfer');
+        } else {
+          setTransferError(`Simulation failed: ${errMsg.slice(0, 80)}`);
+        }
+      } else {
+        // Fallback: build the request manually
+        const amount = parseUnits(depositAmount, FULA_DECIMALS);
+        writeContract({
+          address: tokenAddress,
+          abi: ERC20_ABI,
+          functionName: 'transfer',
+          args: [vaultAddress as `0x${string}`, amount],
+        });
+      }
     } catch (err) {
       setTransferError(err instanceof Error ? err.message : 'Transfer failed');
     }
@@ -255,7 +354,8 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
   }, [writeError]);
 
   const isTransferring = isTransferPending || isConfirming || isClaimingTx;
-  const canTransfer = isConnected && depositAmount && parseFloat(depositAmount) > 0 && parseFloat(depositAmount) <= balanceNumber && vaultAddress;
+  const isSimulating = !!parsedAmount && !!vaultAddress && !simulateData && !simulateError;
+  const canTransfer = isConnected && depositAmount && parseFloat(depositAmount) > 0 && parseFloat(depositAmount) <= balanceNumber && vaultAddress && !isWrongChain;
 
   return (
     <div className="space-y-6">
@@ -394,6 +494,15 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
             </div>
           )}
 
+          {/* Simulation Status */}
+          {simulateError && parsedAmount && !isWrongChain && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-700 text-sm">
+              {simulateError.message?.includes('insufficient') || simulateError.message?.includes('balance')
+                ? 'Insufficient FULA balance for this transfer'
+                : 'Unable to simulate transaction. Transfer may still work.'}
+            </div>
+          )}
+
           {/* Wrong Chain Warning */}
           {isWrongChain && (
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-700 text-sm">
@@ -427,10 +536,12 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
           ) : (
             <button
               onClick={handleTransfer}
-              disabled={!canTransfer || isTransferring}
+              disabled={!canTransfer || isTransferring || isSimulating}
               className="w-full btn-primary py-3"
             >
-              {isTransferPending
+              {isSimulating
+                ? 'Preparing Transaction...'
+                : isTransferPending
                 ? 'Confirm in Wallet...'
                 : isConfirming
                 ? 'Confirming Transaction...'

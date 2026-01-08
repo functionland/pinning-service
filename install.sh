@@ -564,6 +564,14 @@ ETHERSCAN_API_KEY=${ETHERSCAN_API_KEY:-}
 
 # Admin emails (comma-separated) - can manage suspended users
 ADMIN_EMAILS=${ADMIN_EMAILS:-}
+
+# ============================================
+# x402 Gateway Integration
+# ============================================
+
+# System key for x402 gateway to adjust credits
+# Must match PINNING_SYSTEM_KEY in x402-skale .env
+PINNING_SYSTEM_KEY=${PINNING_SYSTEM_KEY:-}
 EOF
 
     chmod 600 "$target_dir/pinning-webui/.env"
@@ -1674,6 +1682,7 @@ main() {
     if [ -n "$GOOGLE_CLIENT_ID" ]; then
         INSTALL_WEBUI=true
         prompt_value "WebUI domain (e.g., cloud.fx.land, leave empty for localhost)" "${WEBUI_DOMAIN:-}" "WEBUI_DOMAIN"
+        prompt_value "System key for x402 gateway integration (leave empty to skip)" "${PINNING_SYSTEM_KEY:-}" "PINNING_SYSTEM_KEY"
     fi
 
     # ===========================================

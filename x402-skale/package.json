@@ -6,10 +6,12 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:test": "cp .env.test .env && tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:local": "tsx scripts/local-test.ts",
     "migrate": "tsx scripts/migrate.ts",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"

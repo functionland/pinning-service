@@ -66,7 +66,7 @@ mockS3.delete('/:bucket/:key{.+}', (c) => {
   return c.text('', 204);
 });
 
-mockS3.head('/:bucket/:key{.+}', (c) => {
+mockS3.on('HEAD', '/:bucket/:key{.+}', (c) => {
   const bucket = c.req.param('bucket');
   const key = c.req.param('key');
   const obj = s3Objects.get(`${bucket}/${key}`);

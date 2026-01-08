@@ -13,6 +13,9 @@ export interface Env {
     // x402 payment info (set by x402 middleware after verification)
     x402Payment?: X402PaymentInfo;
 
+    // x402 payment header (raw header for settlement)
+    x402PaymentHeader?: string;
+
     // JWT user info (set by JWT validator)
     jwtUser?: JwtUserInfo;
 

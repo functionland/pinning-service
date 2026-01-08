@@ -66,7 +66,7 @@ export async function adjustPinningCredits(params: {
       };
     }
 
-    const result = await response.json();
+    const result = await response.json() as { newBalance: number; isSuspended?: boolean };
 
     console.log(`[pinning] Credits adjusted: ${email} new balance ${result.newBalance} FULA`);
 

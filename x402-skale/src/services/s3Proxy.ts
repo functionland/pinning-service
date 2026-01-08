@@ -38,7 +38,7 @@ export async function proxyToS3(
     const response = await fetch(url, {
       method,
       headers: proxyHeaders,
-      body: body instanceof Buffer ? body : body as BodyInit | undefined,
+      body: body instanceof Buffer ? body : (body as RequestInit['body']),
       // @ts-ignore - duplex is needed for streaming bodies
       duplex: body ? 'half' : undefined,
     });

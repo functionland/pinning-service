@@ -176,7 +176,7 @@ s3ProxyRoutes.get('/:bucket/:key{.+}', async (c) => {
   if (!result.success) {
     return c.json(
       { error: result.error || 'Object not found' },
-      result.status || 404
+      (result.status || 404) as 404
     );
   }
 
@@ -271,7 +271,7 @@ s3ProxyRoutes.delete(
     if (!result.success) {
       return c.json(
         { error: result.error || 'Delete failed' },
-        result.status || 500
+        (result.status || 500) as 500
       );
     }
 

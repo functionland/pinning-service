@@ -225,7 +225,7 @@ async function verifyWithFacilitator(
     throw new Error(`Facilitator verify failed: ${response.status} ${errorText}`);
   }
 
-  return response.json();
+  return response.json() as Promise<FacilitatorVerifyResponse>;
 }
 
 /**
@@ -249,7 +249,7 @@ async function settleWithFacilitator(
     throw new Error(`Facilitator settle failed: ${response.status} ${errorText}`);
   }
 
-  return response.json();
+  return response.json() as Promise<FacilitatorSettleResponse>;
 }
 
 /**

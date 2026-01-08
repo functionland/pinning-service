@@ -60,7 +60,7 @@ check_root() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="x402-gateway"
 INSTALL_DIR="/opt/x402-skale"
-DATA_DIR="/var/lib/x402-skale"
+DATA_DIR="/opt/pinning-service/data"  # Shared data directory with pinning service
 
 # Default values
 DEFAULT_PORT=4002
@@ -111,6 +111,16 @@ collect_config() {
     read -p "Enter S3 backend URL [${DEFAULT_S3_BACKEND_URL}]: " S3_BACKEND_URL
     S3_BACKEND_URL=${S3_BACKEND_URL:-$DEFAULT_S3_BACKEND_URL}
 
+    # Shared database path (pinning.db)
+    read -p "Enter shared database path [${DATA_DIR}/pinning.db]: " DATABASE_PATH
+    DATABASE_PATH=${DATABASE_PATH:-$DATA_DIR/pinning.db}
+
+    # Verify database exists
+    if [ ! -f "$DATABASE_PATH" ]; then
+        print_warn "Database not found at $DATABASE_PATH"
+        print_info "Make sure pinning-service is installed first, or the database will be created."
+    fi
+
     # Optional: JWT secret
     read -p "Enter JWT secret (optional, press enter to skip): " JWT_SECRET
 
@@ -125,6 +135,7 @@ collect_config() {
     echo "  Facilitator:       $FACILITATOR_URL"
     echo "  Pinning WebUI:     $PINNING_WEBUI_URL"
     echo "  S3 Backend:        $S3_BACKEND_URL"
+    echo "  Database:          $DATABASE_PATH"
     echo "  Port:              $PORT"
     echo ""
 
@@ -178,7 +189,13 @@ copy_files() {
 
     # Create directories
     mkdir -p "$INSTALL_DIR"
-    mkdir -p "$DATA_DIR"
+
+    # Ensure database directory exists
+    DB_DIR=$(dirname "$DATABASE_PATH")
+    if [ ! -d "$DB_DIR" ]; then
+        print_info "Creating database directory: $DB_DIR"
+        mkdir -p "$DB_DIR"
+    fi
 
     # Copy source files
     cp -r "$SCRIPT_DIR/src" "$INSTALL_DIR/"
@@ -208,8 +225,8 @@ S3_BACKEND_URL=$S3_BACKEND_URL
 PINNING_WEBUI_URL=$PINNING_WEBUI_URL
 PINNING_SYSTEM_KEY=$PINNING_SYSTEM_KEY
 
-# Database
-DATABASE_PATH=$DATA_DIR/x402.db
+# Database (shared with pinning service)
+DATABASE_PATH=$DATABASE_PATH
 
 # Pricing
 BASE_PRICE_MICRO_USDC=$DEFAULT_BASE_PRICE
@@ -377,8 +394,8 @@ print_summary() {
     echo "Configuration:"
     echo "  $INSTALL_DIR/.env"
     echo ""
-    echo "Database:"
-    echo "  $DATA_DIR/x402.db"
+    echo "Database (shared with pinning service):"
+    echo "  $DATABASE_PATH"
     echo ""
     echo "To restart:"
     echo "  systemctl restart $SERVICE_NAME"

@@ -38,8 +38,8 @@ const configSchema = z.object({
   pinningWebuiUrl: z.string().url().default('http://127.0.0.1:3001'),
   pinningSystemKey: z.string().min(1, 'PINNING_SYSTEM_KEY is required'),
 
-  // Database
-  databasePath: z.string().default('./data/x402.db'),
+  // Database (shared with pinning service)
+  databasePath: z.string().default('../data/pinning.db'),
 
   // Pricing (in microUSDC - 6 decimals)
   basePriceMicroUsdc: z.coerce.number().default(10000),   // $0.01

@@ -19,6 +19,7 @@ const config: AppConfig = {
   jwtSecret: process.env.JWT_SECRET || process.env.SESSION_SECRET || 'change-this-jwt-secret-in-production',
   nodeEnv: process.env.NODE_ENV || 'development',
   pinningServiceUrl: process.env.PINNING_SERVICE_URL || 'http://localhost:8080',
+  systemKey: process.env.PINNING_SYSTEM_KEY,  // For x402 gateway integration
 };
 
 // Debug .env loading
@@ -27,6 +28,7 @@ console.log(`[webui]   JWT_SECRET: ${config.jwtSecret.substring(0, 10)}...`);
 console.log(`[webui]   SESSION_SECRET: ${config.sessionSecret.substring(0, 10)}...`);
 console.log(`[webui]   DATABASE_PATH: ${config.databasePath}`);
 console.log(`[webui]   NODE_ENV: ${config.nodeEnv}`);
+console.log(`[webui]   PINNING_SYSTEM_KEY: ${config.systemKey ? '****' : '(not set)'}`);
 
 // Initialize database
 const db = initializeDatabase(config.databasePath);

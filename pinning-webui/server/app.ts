@@ -59,6 +59,7 @@ export interface AppConfig {
   jwtSecret: string;
   nodeEnv: string;
   pinningServiceUrl: string;
+  systemKey?: string;  // For x402 gateway integration
 }
 
 // Database operations type
@@ -1933,6 +1934,26 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     next();
   }
 
+  // Admin OR System Key middleware (for x402 gateway integration)
+  function requireAdminOrSystemKey(req: Request, res: Response, next: NextFunction) {
+    // Check for system key in header
+    const systemKeyHeader = req.header('X-System-Key');
+    if (systemKeyHeader && config.systemKey && systemKeyHeader === config.systemKey) {
+      // System key authentication - mark as system caller
+      (req as any).isSystemCall = true;
+      return next();
+    }
+
+    // Fall back to admin session authentication
+    if (!req.session.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!isAdmin(req.session.user.email)) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    next();
+  }
+
   // Get suspended users (admin only)
   app.get('/api/admin/suspended', requireAdmin, (_req: Request, res: Response) => {
     try {
@@ -1968,8 +1989,8 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
-  // Manual credit adjustment (admin only)
-  app.post('/api/admin/adjust', requireAdmin, (req: Request, res: Response) => {
+  // Manual credit adjustment (admin or system key for x402 gateway)
+  app.post('/api/admin/adjust', requireAdminOrSystemKey, (req: Request, res: Response) => {
     try {
       const { email, amount, reason } = req.body;
 
@@ -1982,9 +2003,13 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'Invalid amount' });
       }
 
-      creditUser(db, email, numAmount, `admin:${req.session.user!.email}:${reason}`, 'adjustment');
+      // Determine caller for audit log
+      const isSystemCall = (req as any).isSystemCall;
+      const caller = isSystemCall ? 'system:x402' : `admin:${req.session.user!.email}`;
 
-      console.log(`[webui] Admin ${req.session.user!.email} adjusted ${email} by ${numAmount} FULA: ${reason}`);
+      creditUser(db, email, numAmount, `${caller}:${reason}`, 'adjustment');
+
+      console.log(`[webui] ${caller} adjusted ${email} by ${numAmount} FULA: ${reason}`);
 
       const newStatus = getUserCreditStatus(db, email);
 

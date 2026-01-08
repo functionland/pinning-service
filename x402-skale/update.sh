@@ -13,7 +13,7 @@
 # Options:
 #   --force         Force rebuild even if no changes detected
 #   --no-restart    Don't restart the service after update
-#   --target PATH   Deploy to target directory (default: /opt/x402-gateway)
+#   --target PATH   Deploy to target directory (default: /home/root/pinning-service/x402-skale)
 #
 
 set -e
@@ -30,7 +30,7 @@ CHECKSUM_PKG="$CHECKSUM_DIR/package.json.md5"
 CHECKSUM_SRC="$CHECKSUM_DIR/src.md5"
 
 # Default target directory (where service runs from)
-TARGET_DIR="/opt/x402-gateway"
+TARGET_DIR="/home/root/pinning-service/x402-skale"
 
 # Colors for output
 RED='\033[0;31m'
@@ -66,7 +66,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --force         Force rebuild even if no changes detected"
             echo "  --no-restart    Don't restart the service after update"
-            echo "  --target PATH   Deploy to target directory (default: /opt/x402-gateway)"
+            echo "  --target PATH   Deploy to target directory (default: /home/root/pinning-service/x402-skale)"
             echo ""
             echo "Source directory: $SCRIPT_DIR"
             echo "Target directory: $TARGET_DIR"
@@ -197,9 +197,6 @@ deploy_to_target() {
         log_info "Copying .env to target (first deploy only)"
         sudo cp .env "$TARGET_DIR/.env"
     fi
-
-    # Ensure data directory exists
-    sudo mkdir -p "$TARGET_DIR/data"
 
     # Set ownership (adjust user as needed)
     if id "node" &>/dev/null; then

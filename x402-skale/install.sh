@@ -59,8 +59,8 @@ check_root() {
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="x402-gateway"
-INSTALL_DIR="/opt/x402-skale"
-DATA_DIR="/opt/pinning-service/data"  # Shared data directory with pinning service
+DEFAULT_INSTALL_DIR="/home/root/pinning-service/x402-skale"
+DEFAULT_DATA_DIR="/home/root/pinning-service/data"
 
 # Default values
 DEFAULT_PORT=4002
@@ -77,6 +77,13 @@ DEFAULT_MIN_PAYMENT=1000
 collect_config() {
     print_step "Collecting configuration..."
     echo ""
+
+    # Install directory
+    read -p "Enter install directory [${DEFAULT_INSTALL_DIR}]: " INSTALL_DIR
+    INSTALL_DIR=${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}
+
+    # Data directory (for shared database)
+    DATA_DIR=$(dirname "$INSTALL_DIR")/data
 
     # Domain
     read -p "Enter domain name (e.g., x402.cloud.fx.land): " DOMAIN
@@ -130,6 +137,7 @@ collect_config() {
 
     echo ""
     print_info "Configuration summary:"
+    echo "  Install Dir:       $INSTALL_DIR"
     echo "  Domain:            $DOMAIN"
     echo "  Receiving Address: $RECEIVING_ADDRESS"
     echo "  Facilitator:       $FACILITATOR_URL"

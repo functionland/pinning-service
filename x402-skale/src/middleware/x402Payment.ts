@@ -1,0 +1,399 @@
+/**
+ * x402 Payment Middleware - Standards Compliant
+ *
+ * Implements the x402 protocol as specified by Coinbase/x402.
+ *
+ * Standard Headers:
+ * - X-PAYMENT-REQUIRED: Base64-encoded payment requirements (402 response)
+ * - X-PAYMENT: Base64-encoded payment payload (client request)
+ * - X-PAYMENT-RESPONSE: Base64-encoded settlement response (success response)
+ *
+ * Flow:
+ * 1. Client requests resource
+ * 2. Server returns 402 with X-PAYMENT-REQUIRED header
+ * 3. Client signs payment and retries with X-PAYMENT header
+ * 4. Server verifies via facilitator /verify
+ * 5. Server performs work (proxy to S3)
+ * 6. Server settles via facilitator /settle
+ * 7. Server returns resource with X-PAYMENT-RESPONSE header
+ *
+ * IMPORTANT: No JWT required - the payment signature IS the authentication.
+ * The payer's wallet address becomes the user identity.
+ */
+
+import { createMiddleware } from 'hono/factory';
+import type { Context } from 'hono';
+import type {
+  Env,
+  X402PaymentInfo,
+  FacilitatorVerifyResponse,
+  FacilitatorSettleResponse,
+} from '../types/index.js';
+import { config, getNetworkIdentifier, getAssetIdentifier } from '../config/index.js';
+import { calculatePriceMicroUsdc, microUsdcToUsdc } from '../utils/pricing.js';
+import { HttpError } from './errorHandler.js';
+import {
+  createPaymentLog,
+  markPaymentVerified,
+  markPaymentSettled,
+  markPaymentFailed,
+} from '../database/repositories/paymentLogs.js';
+
+// Constants
+const DEFAULT_TTL_SECONDS = 3600;      // 1 hour default
+const MAX_TTL_SECONDS = 30 * 24 * 3600; // 30 days max
+const MIN_TTL_SECONDS = 60;             // 1 minute min
+const PAYMENT_TIMEOUT_SECONDS = 300;    // 5 minutes to complete payment
+
+/**
+ * x402 Payment Required Response
+ *
+ * This is the standard x402 response format sent in the X-PAYMENT-REQUIRED header.
+ * Also included in response body for convenience.
+ */
+export interface X402PaymentRequired {
+  /** Unique identifier for this payment request */
+  x402Version: 1;
+  /** Accepted payment options */
+  accepts: X402PaymentOption[];
+  /** Human-readable error message */
+  error?: string;
+}
+
+/**
+ * Payment option in x402 accepts array
+ */
+export interface X402PaymentOption {
+  /** Payment scheme (e.g., "exact" for exact amount) */
+  scheme: 'exact';
+  /** Network in CAIP-2 format (e.g., "eip155:324705682") */
+  network: string;
+  /** Maximum amount required in smallest unit (e.g., microUSDC) */
+  maxAmountRequired: string;
+  /** Recipient address */
+  payTo: string;
+  /** Asset in CAIP-19 format */
+  asset: string;
+  /** Human-readable description */
+  description?: string;
+  /** MIME type of the resource */
+  mimeType?: string;
+  /** Maximum time for payment to be valid */
+  maxTimeoutSeconds?: number;
+  /** Resource being purchased */
+  resource?: string;
+  /** Additional metadata */
+  extra?: {
+    /** Facilitator URL for verification */
+    facilitatorUrl?: string;
+    /** Token name */
+    name?: string;
+    /** Token version for EIP-712 */
+    version?: string;
+  };
+}
+
+/**
+ * Settlement response in X-PAYMENT-RESPONSE header
+ */
+export interface X402PaymentResponse {
+  success: boolean;
+  transaction?: string;
+  network?: string;
+  error?: string;
+}
+
+/**
+ * Encode object to base64 for headers
+ */
+function encodeHeader(obj: unknown): string {
+  return Buffer.from(JSON.stringify(obj)).toString('base64');
+}
+
+/**
+ * Decode base64 header to object
+ */
+function decodeHeader<T>(base64: string): T {
+  return JSON.parse(Buffer.from(base64, 'base64').toString('utf-8'));
+}
+
+/**
+ * Extract payment header from request
+ * Supports both X-PAYMENT and Payment-Authorization headers
+ */
+function getPaymentHeader(c: Context): string | null {
+  // Standard x402 header
+  const xPayment = c.req.header('X-PAYMENT');
+  if (xPayment) return xPayment;
+
+  // Alternative header used by some implementations
+  const paymentAuth = c.req.header('Payment-Authorization');
+  if (paymentAuth) {
+    // Remove "x402 " prefix if present
+    return paymentAuth.replace(/^x402\s+/i, '');
+  }
+
+  return null;
+}
+
+/**
+ * Parse TTL from request headers
+ */
+function parseTtl(c: Context): number {
+  const ttlHeader = c.req.header('X-Fula-TTL') || c.req.header('X-TTL-Seconds');
+  const ttl = parseInt(ttlHeader || String(DEFAULT_TTL_SECONDS), 10);
+  return Math.min(Math.max(ttl, MIN_TTL_SECONDS), MAX_TTL_SECONDS);
+}
+
+/**
+ * Build 402 Payment Required response
+ */
+function buildPaymentRequiredResponse(
+  c: Context,
+  sizeBytes: number,
+  ttlSeconds: number,
+  requiredMicroUsdc: number
+): Response {
+  const sizeMb = sizeBytes / (1024 * 1024);
+  const hours = Math.ceil(ttlSeconds / 3600);
+
+  const paymentRequired: X402PaymentRequired = {
+    x402Version: 1,
+    accepts: [
+      {
+        scheme: 'exact',
+        network: getNetworkIdentifier(),
+        maxAmountRequired: requiredMicroUsdc.toString(),
+        payTo: config.receivingAddress,
+        asset: getAssetIdentifier(),
+        description: `Storage: ${sizeMb.toFixed(2)} MB for ${hours} hour${hours > 1 ? 's' : ''}`,
+        mimeType: 'application/octet-stream',
+        maxTimeoutSeconds: PAYMENT_TIMEOUT_SECONDS,
+        resource: c.req.url,
+        extra: {
+          facilitatorUrl: config.facilitatorUrl,
+          name: config.paymentTokenName,
+          version: '1',
+        },
+      },
+    ],
+    error: 'Payment Required',
+  };
+
+  // Encode for header
+  const headerValue = encodeHeader(paymentRequired);
+
+  return c.json(paymentRequired, 402, {
+    'X-PAYMENT-REQUIRED': headerValue,
+  });
+}
+
+/**
+ * Verify payment with facilitator
+ */
+async function verifyWithFacilitator(
+  paymentHeader: string,
+  expectedAmount: string
+): Promise<FacilitatorVerifyResponse> {
+  const response = await fetch(`${config.facilitatorUrl}/verify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      payload: paymentHeader,
+      details: {
+        scheme: 'exact',
+        network: getNetworkIdentifier(),
+        maxAmountRequired: expectedAmount,
+        resource: '*', // Accept any resource
+        description: 'x402-skale storage payment',
+        mimeType: 'application/octet-stream',
+        payTo: config.receivingAddress,
+        maxTimeoutSeconds: PAYMENT_TIMEOUT_SECONDS,
+        asset: getAssetIdentifier(),
+        extra: {
+          name: config.paymentTokenName,
+          version: '1',
+        },
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Facilitator verify failed: ${response.status} ${errorText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Settle payment with facilitator
+ */
+async function settleWithFacilitator(
+  paymentHeader: string
+): Promise<FacilitatorSettleResponse> {
+  const response = await fetch(`${config.facilitatorUrl}/settle`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      payload: paymentHeader,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Facilitator settle failed: ${response.status} ${errorText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * x402 Payment Middleware
+ *
+ * Standards-compliant implementation of x402 protocol.
+ * NO JWT REQUIRED - payment signature is the authentication.
+ */
+export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
+  // Only apply to PUT and DELETE requests (operations that require payment)
+  if (c.req.method !== 'PUT' && c.req.method !== 'DELETE') {
+    await next();
+    return;
+  }
+
+  // Get request parameters
+  const contentLength = parseInt(c.req.header('Content-Length') || '0', 10);
+  const ttlSeconds = parseTtl(c);
+  const sizeBytes = contentLength;
+  const sizeMb = sizeBytes / (1024 * 1024);
+
+  // Calculate required payment
+  const requiredMicroUsdc = calculatePriceMicroUsdc(sizeBytes, ttlSeconds);
+
+  // Check for payment header
+  const paymentHeader = getPaymentHeader(c);
+
+  // No payment header - return 402 Payment Required
+  if (!paymentHeader) {
+    console.log(`[x402] No payment header, returning 402 for ${sizeMb.toFixed(2)} MB`);
+    return buildPaymentRequiredResponse(c, sizeBytes, ttlSeconds, requiredMicroUsdc);
+  }
+
+  // Payment header present - verify with facilitator
+  let paymentInfo: X402PaymentInfo;
+
+  try {
+    console.log('[x402] Verifying payment with facilitator...');
+
+    const verification = await verifyWithFacilitator(
+      paymentHeader,
+      requiredMicroUsdc.toString()
+    );
+
+    if (!verification.valid) {
+      console.error('[x402] Payment verification failed:', verification.error);
+      throw new HttpError(402, verification.error || 'Invalid payment', 'PAYMENT_INVALID');
+    }
+
+    console.log(`[x402] Payment verified: ${verification.paymentId} from ${verification.payer}`);
+
+    // Build payment info
+    paymentInfo = {
+      paymentId: verification.paymentId,
+      payer: verification.payer.toLowerCase(),
+      amount: verification.amount,
+      amountUsdc: microUsdcToUsdc(parseInt(verification.amount, 10)),
+      asset: verification.asset,
+      network: verification.network,
+      sizeBytes,
+      sizeMb,
+      ttlSeconds,
+      priceUsdc: microUsdcToUsdc(requiredMicroUsdc),
+    };
+
+    // Log payment to database
+    const bucket = c.req.param('bucket');
+    const key = c.req.param('key');
+    createPaymentLog(paymentInfo, bucket, key);
+    markPaymentVerified(paymentInfo.paymentId);
+
+    // Store payment info in context for downstream handlers
+    c.set('x402Payment', paymentInfo);
+    c.set('x402PaymentHeader', paymentHeader);
+
+  } catch (error) {
+    if (error instanceof HttpError) {
+      throw error;
+    }
+    console.error('[x402] Payment verification error:', error);
+    const message = error instanceof Error ? error.message : 'Payment verification failed';
+    throw new HttpError(402, message, 'PAYMENT_VERIFICATION_FAILED');
+  }
+
+  // Proceed with request
+  await next();
+
+  // After handler completes, settle payment if successful (2xx response)
+  if (c.res.status >= 200 && c.res.status < 300) {
+    try {
+      console.log(`[x402] Settling payment ${paymentInfo.paymentId}...`);
+
+      const settlement = await settleWithFacilitator(paymentHeader);
+
+      if (settlement.success) {
+        console.log(`[x402] Payment settled: ${paymentInfo.paymentId}, tx: ${settlement.txHash}`);
+        markPaymentSettled(paymentInfo.paymentId, settlement.txHash);
+        paymentInfo.txHash = settlement.txHash;
+        c.set('x402Payment', paymentInfo);
+
+        // Add X-PAYMENT-RESPONSE header to response
+        const paymentResponse: X402PaymentResponse = {
+          success: true,
+          transaction: settlement.txHash,
+          network: paymentInfo.network,
+        };
+
+        // Clone response and add header
+        const originalResponse = c.res;
+        const body = await originalResponse.clone().text();
+        const headers = new Headers(originalResponse.headers);
+        headers.set('X-PAYMENT-RESPONSE', encodeHeader(paymentResponse));
+
+        c.res = new Response(body, {
+          status: originalResponse.status,
+          headers,
+        });
+      } else {
+        console.error('[x402] Settlement failed:', settlement.error);
+        markPaymentFailed(paymentInfo.paymentId, settlement.error || 'Settlement failed');
+      }
+    } catch (error) {
+      console.error('[x402] Settlement error:', error);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      markPaymentFailed(paymentInfo.paymentId, message);
+    }
+  } else {
+    // Request failed, mark payment as failed
+    markPaymentFailed(paymentInfo.paymentId, `Request failed with status ${c.res.status}`);
+  }
+});
+
+/**
+ * Get payment info from context
+ */
+export function getPaymentInfo(c: Context<Env>): X402PaymentInfo | undefined {
+  return c.get('x402Payment');
+}
+
+/**
+ * Check if request has payment header
+ */
+export function hasPaymentHeader(c: Context): boolean {
+  return getPaymentHeader(c) !== null;
+}
+
+export default x402PaymentMiddleware;

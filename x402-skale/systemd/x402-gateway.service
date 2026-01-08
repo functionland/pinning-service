@@ -1,0 +1,49 @@
+# x402-skale Gateway Systemd Service
+#
+# Copy this to /etc/systemd/system/x402-gateway.service
+# Then run:
+#   systemctl daemon-reload
+#   systemctl enable x402-gateway
+#   systemctl start x402-gateway
+#
+
+[Unit]
+Description=x402-skale Payment Gateway
+Documentation=https://github.com/functionland/pinning-service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/x402-skale
+ExecStart=/usr/bin/node /opt/x402-skale/dist/index.js
+Restart=always
+RestartSec=10
+
+# Environment
+Environment=NODE_ENV=production
+
+# Limits
+LimitNOFILE=65535
+LimitNPROC=65535
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/x402-skale
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=x402-gateway
+
+# Timeout
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

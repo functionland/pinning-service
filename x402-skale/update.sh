@@ -182,9 +182,16 @@ deploy_to_target() {
     # Copy dist folder
     sudo rsync -av --delete "$DIST_DIR/" "$TARGET_DIR/dist/"
 
+    # Copy scripts folder (for migrations)
+    sudo rsync -av --delete "scripts/" "$TARGET_DIR/scripts/"
+
+    # Copy src folder (needed for tsx to run scripts that import from src)
+    sudo rsync -av --delete "src/" "$TARGET_DIR/src/"
+
     # Copy package files (needed for node to resolve dependencies)
     sudo cp package.json "$TARGET_DIR/"
     sudo cp package-lock.json "$TARGET_DIR/" 2>/dev/null || true
+    sudo cp tsconfig.json "$TARGET_DIR/" 2>/dev/null || true
 
     # Sync node_modules (only copy if target doesn't have it or package changed)
     if [ ! -d "$TARGET_DIR/node_modules" ] || [ "$npm_updated" = true ]; then
@@ -261,14 +268,14 @@ main() {
         log_warning "No changes to deploy"
     fi
 
-    # Step 4: Run database migrations if deployed
+    # Step 4: Run database migrations in TARGET directory
     if [ "$deployed" = true ]; then
         log_info "Running database migrations..."
-        if (cd "$TARGET_DIR" && node dist/scripts/migrate.js 2>&1) || \
-           (cd "$SCRIPT_DIR" && npm run migrate 2>&1); then
+        if (cd "$TARGET_DIR" && npm run migrate 2>&1); then
             log_success "Database migrations complete"
         else
-            log_warning "Migration script not available (non-fatal)"
+            log_error "Migration failed"
+            exit 1
         fi
     fi
 

@@ -12,7 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:local": "tsx scripts/local-test.ts",
-    "migrate": "node node_modules/tsx/dist/cli.mjs scripts/migrate.ts",
+    "migrate": "./node_modules/.bin/tsx scripts/migrate.ts",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"
   },

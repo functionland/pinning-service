@@ -1,0 +1,61 @@
+# x402-skale Gateway Docker Compose
+#
+# Usage:
+#   docker-compose up -d
+#
+# With build:
+#   docker-compose up -d --build
+#
+
+version: '3.8'
+
+services:
+  x402-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: x402-skale-gateway
+    restart: unless-stopped
+    ports:
+      - "4002:4002"
+    environment:
+      - NODE_ENV=production
+      - PORT=4002
+      - DATABASE_PATH=/app/data/x402.db
+      # x402 Payment
+      - FACILITATOR_URL=${FACILITATOR_URL:-https://facilitator.dirtroad.dev}
+      - RECEIVING_ADDRESS=${RECEIVING_ADDRESS}
+      - NETWORK_CHAIN_ID=${NETWORK_CHAIN_ID:-324705682}
+      - PAYMENT_TOKEN_ADDRESS=${PAYMENT_TOKEN_ADDRESS:-0x2e08028E3C4c2356572E096d8EF835cD5C6030bD}
+      - PAYMENT_TOKEN_NAME=${PAYMENT_TOKEN_NAME:-Bridged USDC (SKALE Bridge)}
+      # S3 Backend
+      - S3_BACKEND_URL=${S3_BACKEND_URL:-http://host.docker.internal:9000}
+      # Pinning Service
+      - PINNING_WEBUI_URL=${PINNING_WEBUI_URL:-http://host.docker.internal:3001}
+      - PINNING_SYSTEM_KEY=${PINNING_SYSTEM_KEY}
+      # Pricing
+      - BASE_PRICE_MICRO_USDC=${BASE_PRICE_MICRO_USDC:-10000}
+      - MIN_PAYMENT_MICRO_USDC=${MIN_PAYMENT_MICRO_USDC:-1000}
+      - FULA_EXCHANGE_RATE=${FULA_EXCHANGE_RATE:-1.0}
+      # JWT
+      - JWT_SECRET=${JWT_SECRET:-}
+    volumes:
+      - x402-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - x402-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  x402-data:
+    driver: local
+
+networks:
+  x402-network:
+    driver: bridge

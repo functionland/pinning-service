@@ -1,11 +1,20 @@
 ---
 layout: default
-title: Status Codes Reference
+title: Status Codes
+parent: Reference
+nav_order: 1
 ---
 
-# HTTP Status Codes Reference
+# HTTP Status Codes
+{: .no_toc }
 
-Complete reference for HTTP status codes across all Fx.Land services.
+## Table of contents
+{: .no_toc .text-delta }
+
+1. TOC
+{:toc}
+
+---
 
 ## Success Codes
 
@@ -13,26 +22,27 @@ Complete reference for HTTP status codes across all Fx.Land services.
 
 Request succeeded.
 
-**Used by:**
-- GET /pins - List pins
-- GET /pins/{requestid} - Get pin details
-- GET /api/credits - Credit status
-- GET requests on x402 gateway
+| Service | Usage |
+|:--------|:------|
+| Pinning API | GET requests |
+| x402 | Downloads, uploads with payment |
+| WebUI | All successful requests |
 
 ### 202 Accepted
 
-Request accepted for processing.
+Request accepted for async processing.
 
-**Used by:**
-- POST /pins - Create pin (processing asynchronously)
-- POST /pins/{requestid} - Replace pin
-- DELETE /pins/{requestid} - Delete pin
+| Service | Usage |
+|:--------|:------|
+| Pinning API | POST /pins, DELETE /pins |
 
-## Client Error Codes
+---
+
+## Client Errors
 
 ### 400 Bad Request
 
-Invalid request format or parameters.
+Invalid request format.
 
 ```json
 {
@@ -43,15 +53,16 @@ Invalid request format or parameters.
 }
 ```
 
-**Common causes:**
-- Invalid JSON body
-- Missing required fields
-- Invalid parameter values
-- Malformed CID
+| Cause | Solution |
+|:------|:---------|
+| Invalid JSON | Check JSON syntax |
+| Missing field | Include required fields |
+| Invalid CID | Verify CID format |
+| Invalid date | Use ISO 8601 format |
 
 ### 401 Unauthorized
 
-Authentication required or failed.
+Authentication failed.
 
 ```json
 {
@@ -62,14 +73,18 @@ Authentication required or failed.
 }
 ```
 
-**Common causes:**
-- Missing Authorization header
-- Invalid or expired token
-- Revoked API key
+| Cause | Solution |
+|:------|:---------|
+| Missing header | Add `Authorization: Bearer <token>` |
+| Invalid token | Check token format |
+| Revoked key | Generate new key |
+| Expired session | Re-authenticate |
 
 ### 402 Payment Required
 
-Payment needed for x402 operations.
+**x402 Gateway only.**
+
+Payment needed or rejected.
 
 ```json
 {
@@ -79,9 +94,10 @@ Payment needed for x402 operations.
 }
 ```
 
-**Used by:**
-- x402 PUT requests (initial and rejected payments)
-- x402 DELETE requests
+| Situation | Meaning |
+|:----------|:--------|
+| No X-PAYMENT header | Get payment requirements |
+| With X-PAYMENT header | Payment was rejected |
 
 ### 404 Not Found
 
@@ -96,14 +112,15 @@ Resource doesn't exist.
 }
 ```
 
-**Common causes:**
-- Invalid requestid
-- Pin already deleted
-- Wrong bucket/key on x402
+| Cause | Solution |
+|:------|:---------|
+| Invalid ID | Verify requestid |
+| Already deleted | Resource is gone |
+| Wrong user | Can't access others' pins |
 
-### 409 Conflict / Insufficient Funds
+### 409 Conflict
 
-Operation cannot be completed due to state.
+State conflict (usually insufficient funds).
 
 ```json
 {
@@ -114,37 +131,38 @@ Operation cannot be completed due to state.
 }
 ```
 
-**Used by:**
-- Pinning API when user exceeds free tier without credits
+| Service | Meaning |
+|:--------|:--------|
+| Pinning API | Storage exceeds free tier without credits |
 
 ### 413 Payload Too Large
 
-Request body exceeds limits.
+Request body too big.
 
 ```json
 {
-  "error": "PAYLOAD_TOO_LARGE",
-  "message": "Request body too large"
+  "error": "PAYLOAD_TOO_LARGE"
 }
 ```
 
 ### 429 Too Many Requests
 
-Rate limit exceeded.
+Rate limited.
 
 ```json
 {
   "error": "RATE_LIMITED",
-  "message": "Too many requests",
   "retry_after": 60
 }
 ```
 
-## Server Error Codes
+---
+
+## Server Errors
 
 ### 500 Internal Server Error
 
-Unexpected server error.
+Unexpected error.
 
 ```json
 {
@@ -155,149 +173,71 @@ Unexpected server error.
 }
 ```
 
-**Action:** Retry after short delay; contact support if persistent.
+**Action:** Retry with exponential backoff.
 
 ### 502 Bad Gateway
 
 Upstream service unavailable.
 
-**Action:** Retry after short delay.
+**Action:** Retry after delay.
 
 ### 503 Service Unavailable
 
-Service temporarily down.
+Service down for maintenance.
 
-**Action:** Retry with exponential backoff.
+**Action:** Wait and retry.
 
 ### 504 Gateway Timeout
 
-Request took too long.
+Request timed out.
 
-**Action:** Retry with longer timeout or smaller request.
+**Action:** Retry with smaller payload or longer timeout.
 
-## Service-Specific Codes
+---
+
+## Service-Specific Summary
 
 ### Pinning API
 
 | Code | Reason | Description |
-|------|--------|-------------|
-| 200 | Success | GET requests |
-| 202 | Accepted | POST/DELETE requests |
+|:-----|:-------|:------------|
+| 200 | OK | GET success |
+| 202 | Accepted | POST/DELETE success |
 | 400 | BAD_REQUEST | Invalid request |
 | 401 | UNAUTHORIZED | Auth failed |
-| 404 | NOT_FOUND | Pin not found |
+| 404 | NOT_FOUND | Pin missing |
 | 409 | INSUFFICIENT_FUNDS | No credits |
 | 500 | INTERNAL_SERVER_ERROR | Server error |
 
 ### x402 Gateway
 
 | Code | Reason | Description |
-|------|--------|-------------|
-| 200 | Success | Upload/download complete |
-| 402 | Payment Required | Need payment |
+|:-----|:-------|:------------|
+| 200 | OK | Upload/download success |
 | 400 | BAD_REQUEST | Invalid request |
+| 402 | Payment Required | Need payment |
 | 413 | PAYLOAD_TOO_LARGE | File too big |
 | 500 | INTERNAL_ERROR | Server error |
 
 ### WebUI API
 
 | Code | Reason | Description |
-|------|--------|-------------|
-| 200 | Success | Request succeeded |
+|:-----|:-------|:------------|
+| 200 | OK | Success |
 | 400 | BAD_REQUEST | Invalid input |
 | 401 | UNAUTHORIZED | Not logged in |
-| 403 | FORBIDDEN | Not authorized |
-| 404 | NOT_FOUND | Resource missing |
+| 403 | FORBIDDEN | No permission |
+| 404 | NOT_FOUND | Missing |
+
+---
 
 ## Pin Status Values
 
 Not HTTP codes, but pin lifecycle states:
 
 | Status | Description |
-|--------|-------------|
-| `queued` | Added to queue, waiting |
-| `pinning` | Actively fetching content |
+|:-------|:------------|
+| `queued` | Waiting to process |
+| `pinning` | Fetching from IPFS |
 | `pinned` | Successfully stored |
 | `failed` | Unable to pin |
-
-## Error Response Format
-
-### Pinning API Format
-
-```json
-{
-  "error": {
-    "reason": "ERROR_CODE",
-    "details": "Human-readable message"
-  }
-}
-```
-
-### x402 Gateway Format
-
-```json
-{
-  "error": "ERROR_CODE",
-  "message": "Human-readable message"
-}
-```
-
-### WebUI API Format
-
-```json
-{
-  "error": "Human-readable message"
-}
-```
-
-Or with code:
-
-```json
-{
-  "error": {
-    "code": "ERROR_CODE",
-    "message": "Human-readable message"
-  }
-}
-```
-
-## Handling Errors
-
-### Best Practices
-
-1. **Check status code first** before parsing body
-2. **Handle 401** by refreshing auth or prompting login
-3. **Retry 5xx** with exponential backoff
-4. **Don't retry 4xx** (except 429) - fix the request
-5. **Log error details** for debugging
-
-### Example Error Handler
-
-```javascript
-async function handleResponse(response) {
-  if (response.ok) {
-    return response.json();
-  }
-
-  const error = await response.json().catch(() => ({}));
-
-  switch (response.status) {
-    case 401:
-      throw new AuthError('Please log in again');
-    case 402:
-      return { paymentRequired: true, requirements: error };
-    case 404:
-      throw new NotFoundError(error.error?.details || 'Not found');
-    case 409:
-      throw new InsufficientFundsError('Add credits to continue');
-    case 429:
-      const retryAfter = response.headers.get('Retry-After') || 60;
-      throw new RateLimitError(`Retry after ${retryAfter}s`);
-    default:
-      throw new ApiError(
-        error.error?.details || error.message || 'Unknown error',
-        response.status
-      );
-  }
-}
-```

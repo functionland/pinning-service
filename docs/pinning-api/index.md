@@ -1,84 +1,153 @@
 ---
 layout: default
-title: IPFS Pinning API
+title: Pinning API
+nav_order: 3
+has_children: true
+permalink: /pinning-api/
 ---
 
-# IPFS Pinning API
+# Pinning API Documentation
+{: .no_toc }
+
+<span class="audience-badge developers">For Developers</span>
+
+Build applications with the IPFS Pinning Service API at `api.cloud.fx.land`.
+{: .fs-6 .fw-300 }
+
+---
+
+## Overview
 
 **Base URL**: `https://api.cloud.fx.land`
 
-The Fx.Land Pinning API implements the standard [IPFS Pinning Service API Specification](https://ipfs.github.io/pinning-services-api-spec/) (v1.0.0).
+The Fx.Land Pinning API implements the standard [IPFS Pinning Service API Specification](https://ipfs.github.io/pinning-services-api-spec/) (v1.0.0), making it compatible with:
 
-## In This Section
+- IPFS CLI (`ipfs pin remote`)
+- Kubo (go-ipfs)
+- Any client library for the IPFS Pinning Service spec
 
-- [Authentication](authentication/) - API keys and Bearer tokens
-- [Pins Endpoints](pins/) - Create, list, and manage pins
-- [Error Handling](errors/) - Error responses and status codes
+---
 
-## Endpoints Overview
+## Quick Start
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/pins` | Create a new pin |
-| GET | `/pins` | List pins with optional filters |
-| GET | `/pins/{requestid}` | Get pin status by ID |
-| POST | `/pins/{requestid}` | Replace an existing pin |
-| DELETE | `/pins/{requestid}` | Remove a pin |
-| POST | `/auth/token` | Create a session token |
-| DELETE | `/auth/token` | Delete session (logout) |
+### 1. Get an API Key
 
-## Authentication
+Get your API key from [cloud.fx.land](https://cloud.fx.land):
 
-All endpoints (except `/auth/token` POST) require Bearer token authentication:
+1. Sign in with Google
+2. Go to **API Keys**
+3. Copy your key
 
-```
-Authorization: Bearer YOUR_API_KEY
-```
-
-API keys are JWT tokens obtained from the [WebUI](https://cloud.fx.land). See the [Authentication Guide](authentication/) for details.
-
-## Pin Lifecycle
-
-```
-POST /pins
-    |
-    v
-[queued] --> [pinning] --> [pinned]
-                |
-                v
-            [failed]
-```
-
-1. **queued**: Pin request received, waiting to process
-2. **pinning**: Actively fetching content from IPFS network
-3. **pinned**: Content successfully stored
-4. **failed**: Unable to pin (check `info.status_details`)
-
-## Request/Response Format
-
-All requests and responses use JSON:
+### 2. Pin Content
 
 ```bash
 curl -X POST "https://api.cloud.fx.land/pins" \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"cid": "Qm...", "name": "example"}'
+  -d '{
+    "cid": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+    "name": "my-file"
+  }'
 ```
+
+### 3. Check Status
+
+```bash
+curl "https://api.cloud.fx.land/pins/REQUEST_ID" \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+---
+
+## Endpoints
+
+| Method | Endpoint | Description |
+|:-------|:---------|:------------|
+| `POST` | `/pins` | Create a new pin |
+| `GET` | `/pins` | List pins (with filters) |
+| `GET` | `/pins/{requestid}` | Get pin by ID |
+| `POST` | `/pins/{requestid}` | Replace a pin |
+| `DELETE` | `/pins/{requestid}` | Remove a pin |
+| `POST` | `/auth/token` | Create session token |
+| `DELETE` | `/auth/token` | Delete session |
+{: .endpoint-table }
+
+---
+
+## Authentication
+
+All endpoints require Bearer token authentication:
+
+```
+Authorization: Bearer YOUR_API_KEY
+```
+
+API keys are JWT tokens. See [Authentication]({{ site.baseurl }}/pinning-api/authentication/) for details.
+
+---
+
+## Pin Status Lifecycle
+
+```
+POST /pins
+    │
+    ▼
+┌─────────┐     ┌──────────┐     ┌─────────┐
+│ queued  │ ──► │ pinning  │ ──► │ pinned  │
+└─────────┘     └──────────┘     └─────────┘
+                     │
+                     ▼
+                ┌─────────┐
+                │ failed  │
+                └─────────┘
+```
+
+| Status | Description |
+|:-------|:------------|
+| `queued` | Added to queue, waiting to process |
+| `pinning` | Actively fetching from IPFS network |
+| `pinned` | Successfully stored |
+| `failed` | Unable to pin (check `info.status_details`) |
+
+---
+
+## IPFS CLI Integration
+
+```bash
+# Add remote pinning service
+ipfs pin remote service add fxland https://api.cloud.fx.land YOUR_API_KEY
+
+# Pin content
+ipfs pin remote add --service=fxland QmYourCID
+
+# List remote pins
+ipfs pin remote ls --service=fxland
+
+# Remove remote pin
+ipfs pin remote rm --service=fxland --cid=QmYourCID
+```
+
+---
+
+## In This Section
+
+| Page | Description |
+|:-----|:------------|
+| [Authentication]({{ site.baseurl }}/pinning-api/authentication/) | API keys, JWT tokens, OAuth flow |
+| [Endpoints]({{ site.baseurl }}/pinning-api/endpoints/) | Full API reference with examples |
+| [Filtering & Pagination]({{ site.baseurl }}/pinning-api/filtering/) | Query pins with filters |
+| [Error Handling]({{ site.baseurl }}/pinning-api/errors/) | Error responses and codes |
+| [Examples]({{ site.baseurl }}/pinning-api/examples/) | Code examples in multiple languages |
+
+---
 
 ## Rate Limits
 
-There are no strict rate limits, but excessive requests may be throttled. For bulk operations, consider spacing requests.
+No strict rate limits, but excessive requests may be throttled. For bulk operations, space requests by ~100ms.
 
-## IPFS Pinning Service Compatibility
+## Storage Limits
 
-This API is compatible with:
-- IPFS CLI: `ipfs pin remote add --service=fxland`
-- Kubo (go-ipfs) remote pinning
-- Any client implementing the IPFS Pinning Service API spec
+- **Free tier**: 500 MB per account
+- **With credits**: Unlimited (pay as you go)
 
-### Configure IPFS CLI
-
-```bash
-ipfs pin remote service add fxland https://api.cloud.fx.land YOUR_API_KEY
-ipfs pin remote add --service=fxland QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG
-```
+Exceeding free tier without credits returns `409 INSUFFICIENT_FUNDS`.

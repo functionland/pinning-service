@@ -1,26 +1,45 @@
 ---
 layout: default
-title: Pins Endpoints - Pinning API
+title: Endpoints
+parent: Pinning API
+nav_order: 2
 ---
 
-# Pins Endpoints
+# API Endpoints
+{: .no_toc }
 
-CRUD operations for pin objects.
+## Table of contents
+{: .no_toc .text-delta }
+
+1. TOC
+{:toc}
+
+---
+
+## Base URL
+
+```
+https://api.cloud.fx.land
+```
+
+All endpoints require `Authorization: Bearer <token>` header.
+
+---
 
 ## Create Pin
 
-**POST /pins**
+`POST /pins`
 
 Pin content by CID.
 
 ### Request Body
 
 | Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `cid` | string | Yes | Content Identifier to pin |
+|:------|:-----|:---------|:------------|
+| `cid` | string | **Yes** | Content Identifier |
 | `name` | string | No | Human-readable name (max 255 chars) |
 | `origins` | array | No | Multiaddrs of content providers (max 20) |
-| `meta` | object | No | Custom metadata key-value pairs |
+| `meta` | object | No | Custom key-value metadata |
 
 ### Example
 
@@ -50,10 +69,7 @@ curl -X POST "https://api.cloud.fx.land/pins" \
     "cid": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
     "name": "my-website",
     "origins": ["/ip4/192.168.1.1/tcp/4001/p2p/QmPeerId"],
-    "meta": {
-      "app_id": "my-app",
-      "version": "1.0"
-    }
+    "meta": {"app_id": "my-app", "version": "1.0"}
   },
   "delegates": ["/ip4/203.0.113.1/tcp/4001/p2p/QmServicePeerId"]
 }
@@ -63,38 +79,47 @@ curl -X POST "https://api.cloud.fx.land/pins" \
 
 ## List Pins
 
-**GET /pins**
+`GET /pins`
 
-List pins with optional filtering.
+List pins with optional filters.
 
 ### Query Parameters
 
 | Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `cid` | array | - | Filter by CID(s), comma-separated |
+|:----------|:-----|:--------|:------------|
+| `cid` | array | - | Filter by CID(s) |
 | `name` | string | - | Filter by name |
-| `match` | string | `exact` | Name matching: `exact`, `iexact`, `partial`, `ipartial` |
-| `status` | array | `pinned` | Filter by status(es): `queued`, `pinning`, `pinned`, `failed` |
-| `before` | datetime | - | Created before timestamp (ISO 8601) |
-| `after` | datetime | - | Created after timestamp (ISO 8601) |
-| `limit` | integer | 10 | Max results (1-1000) |
+| `match` | string | `exact` | Name match strategy |
+| `status` | array | `pinned` | Filter by status(es) |
+| `before` | datetime | - | Created before (ISO 8601) |
+| `after` | datetime | - | Created after (ISO 8601) |
+| `limit` | integer | 10 | Results per page (1-1000) |
 | `meta` | object | - | Filter by metadata (URL-encoded JSON) |
+
+### Match Strategies
+
+| Value | Description |
+|:------|:------------|
+| `exact` | Case-sensitive exact match |
+| `iexact` | Case-insensitive exact match |
+| `partial` | Contains substring |
+| `ipartial` | Contains substring (case-insensitive) |
 
 ### Examples
 
-**List all pinned content:**
+**List all pinned:**
 ```bash
 curl "https://api.cloud.fx.land/pins" \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
-**List by status:**
+**Filter by status:**
 ```bash
 curl "https://api.cloud.fx.land/pins?status=queued,pinning" \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
-**Search by name (partial match, case-insensitive):**
+**Search by name:**
 ```bash
 curl "https://api.cloud.fx.land/pins?name=website&match=ipartial" \
   -H "Authorization: Bearer YOUR_API_KEY"
@@ -109,7 +134,6 @@ curl "https://api.cloud.fx.land/pins?meta=%7B%22app_id%22%3A%22my-app%22%7D" \
 
 **Pagination:**
 ```bash
-# Get next page using 'before' from oldest result
 curl "https://api.cloud.fx.land/pins?before=2024-01-10T00:00:00.000Z&limit=20" \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
@@ -134,18 +158,13 @@ curl "https://api.cloud.fx.land/pins?before=2024-01-10T00:00:00.000Z&limit=20" \
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `count` | Total number of pins matching filters |
-| `results` | Array of PinStatus objects (may be less than `count` due to pagination) |
-
 ---
 
 ## Get Pin
 
-**GET /pins/{requestid}**
+`GET /pins/{requestid}`
 
-Get a specific pin by request ID.
+Get pin by request ID.
 
 ### Example
 
@@ -177,9 +196,9 @@ curl "https://api.cloud.fx.land/pins/a1b2c3d4-e5f6-7890-abcd-ef1234567890" \
 
 ## Replace Pin
 
-**POST /pins/{requestid}**
+`POST /pins/{requestid}`
 
-Replace an existing pin. This atomically removes the old pin and creates a new one, preventing garbage collection of shared blocks.
+Atomically replace a pin. Prevents garbage collection of shared blocks between old and new content.
 
 ### Example
 
@@ -188,14 +207,14 @@ curl -X POST "https://api.cloud.fx.land/pins/a1b2c3d4-e5f6-7890-abcd-ef123456789
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "cid": "QmNewContentIdentifier",
+    "cid": "QmNewContentCID",
     "name": "my-website-v2"
   }'
 ```
 
 ### Response (202 Accepted)
 
-Returns a new PinStatus with a **new requestid**. The old pin is automatically deleted.
+Returns a **new** PinStatus with a **new requestid**. The old pin is deleted.
 
 ```json
 {
@@ -203,7 +222,7 @@ Returns a new PinStatus with a **new requestid**. The old pin is automatically d
   "status": "queued",
   "created": "2024-01-16T10:00:00.000Z",
   "pin": {
-    "cid": "QmNewContentIdentifier",
+    "cid": "QmNewContentCID",
     "name": "my-website-v2"
   },
   "delegates": []
@@ -214,7 +233,7 @@ Returns a new PinStatus with a **new requestid**. The old pin is automatically d
 
 ## Delete Pin
 
-**DELETE /pins/{requestid}**
+`DELETE /pins/{requestid}`
 
 Remove a pin.
 
@@ -227,46 +246,51 @@ curl -X DELETE "https://api.cloud.fx.land/pins/a1b2c3d4-e5f6-7890-abcd-ef1234567
 
 ### Response (202 Accepted)
 
-Empty response body on success.
+Empty body on success.
 
 ---
 
-## Pin Status Object
+## PinStatus Object
 
-All responses include a PinStatus object:
+All responses include this structure:
 
 | Field | Type | Description |
-|-------|------|-------------|
-| `requestid` | string | Unique identifier for this pin request |
-| `status` | string | Current status: `queued`, `pinning`, `pinned`, `failed` |
-| `created` | datetime | When the pin was created (ISO 8601) |
-| `pin` | object | Original pin request data |
-| `delegates` | array | Multiaddrs of service peers to connect to |
-| `info` | object | Optional vendor-specific info |
+|:------|:-----|:------------|
+| `requestid` | string | Unique ID for this pin request |
+| `status` | string | `queued`, `pinning`, `pinned`, `failed` |
+| `created` | datetime | Creation timestamp (ISO 8601) |
+| `pin` | object | Original pin data (cid, name, origins, meta) |
+| `delegates` | array | Service peer multiaddrs |
+| `info` | object | Optional status details |
 
 ### Status Values
 
 | Status | Description |
-|--------|-------------|
-| `queued` | Added to queue, not yet processing |
-| `pinning` | Actively fetching from IPFS network |
-| `pinned` | Successfully pinned and available |
-| `failed` | Could not pin; see `info.status_details` for reason |
-
-### Delegates
-
-The `delegates` array contains multiaddrs of IPFS peers operated by the pinning service. Connect to these peers to speed up pinning:
-
-```bash
-ipfs swarm connect /ip4/203.0.113.1/tcp/4001/p2p/QmServicePeerId
-```
+|:-------|:------------|
+| `queued` | Waiting to process |
+| `pinning` | Fetching from IPFS |
+| `pinned` | Successfully stored |
+| `failed` | Could not pin (see `info.status_details`) |
 
 ### Info Object
 
-Optional metadata returned by the service:
+Optional vendor-specific metadata:
 
 | Key | Description |
-|-----|-------------|
-| `status_details` | Human-readable status message |
-| `dag_size` | Size of pinned DAG in bytes |
-| `pinned_until` | Expiration timestamp (if applicable) |
+|:----|:------------|
+| `status_details` | Human-readable status |
+| `dag_size` | Total DAG size in bytes |
+| `pinned_until` | Expiration (if time-limited) |
+
+---
+
+## Using Delegates
+
+The `delegates` array contains multiaddrs of service peers. Connect to them to speed up pinning:
+
+```bash
+# After creating a pin, connect to delegates
+ipfs swarm connect /ip4/203.0.113.1/tcp/4001/p2p/QmServicePeerId
+```
+
+This helps the service fetch your content faster, especially if you're behind NAT.

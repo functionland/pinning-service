@@ -1,15 +1,24 @@
 ---
 layout: default
-title: Authentication - Pinning API
+title: Authentication
+parent: Pinning API
+nav_order: 1
 ---
 
 # Authentication
+{: .no_toc }
 
-The Pinning API uses Bearer token authentication for all endpoints.
+## Table of contents
+{: .no_toc .text-delta }
 
-## Bearer Token Format
+1. TOC
+{:toc}
 
-Include your API key in the `Authorization` header:
+---
+
+## Bearer Token Authentication
+
+All API requests require a Bearer token in the `Authorization` header:
 
 ```
 Authorization: Bearer YOUR_API_KEY
@@ -22,50 +31,61 @@ curl "https://api.cloud.fx.land/pins" \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 ```
 
-## Obtaining API Keys
+---
+
+## Getting an API Key
 
 ### Via WebUI (Recommended)
 
 1. Go to [cloud.fx.land](https://cloud.fx.land)
-2. Sign in with Google OAuth
-3. Navigate to **Settings** > **API Keys**
-4. Click **Generate New Key** or copy the default key
+2. Sign in with Google
+3. Navigate to **API Keys**
+4. Copy existing key or click **Generate New Key**
 
-### Via Native App OAuth Flow
+### Via Native App OAuth
 
-For desktop or mobile applications, use the OAuth redirect flow:
+For desktop/mobile apps:
 
 ```
-GET https://cloud.fx.land/get-key?redirect=YOUR_APP_SCHEME://callback
+GET https://cloud.fx.land/get-key?redirect=myapp://callback
 ```
 
-After Google authentication, the user is redirected to:
+After authentication:
 ```
-YOUR_APP_SCHEME://callback?key=JWT_TOKEN
+myapp://callback?key=JWT_TOKEN_HERE
 ```
 
-## API Key Format
+---
 
-API keys are JWT tokens containing:
+## Token Format
+
+API keys are JWT (JSON Web Token) format:
+
+```
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyQGV4YW1wbGUuY29tIiwic2NvcGUiOiJzdG9yYWdlOnJlYWQgc3RvcmFnZTp3cml0ZSIsImp0aSI6InVuaXF1ZS1pZCJ9.signature
+```
+
+### JWT Claims
 
 | Claim | Description |
-|-------|-------------|
+|:------|:------------|
 | `sub` | User email address |
 | `scope` | Permissions: `storage:read storage:write` |
-| `jti` | Unique token identifier |
+| `jti` | Unique token ID (for revocation) |
 | `iat` | Issued at timestamp |
 
-### Decoding a Token (Example)
+### Decoding Tokens
 
 ```bash
-# Decode the payload (base64)
-echo "eyJzdWIiOiJ1c2VyQGV4YW1wbGUuY29tIn0" | base64 -d
-# Output: {"sub":"user@example.com"}
+# Decode the payload (middle part)
+echo "YOUR_TOKEN" | cut -d. -f2 | base64 -d | jq
 ```
+
+---
 
 ## Session Token (Alternative)
 
-For server-to-server authentication, you can create a session token:
+For server-to-server auth, create a session token:
 
 ### Create Session
 
@@ -78,38 +98,49 @@ curl -X POST "https://api.cloud.fx.land/auth/token" \
 **Response:**
 ```json
 {
-  "token": "session-uuid-token-here"
+  "token": "session-uuid-here"
 }
 ```
 
-### Delete Session (Logout)
+### Delete Session
 
 ```bash
 curl -X DELETE "https://api.cloud.fx.land/auth/token" \
   -H "Authorization: Bearer YOUR_SESSION_TOKEN"
 ```
 
+---
+
 ## Token Management
 
 ### Multiple Keys
 
-You can create multiple API keys for different applications:
-- Each key can be revoked independently
-- Keys do not expire automatically
-- Revoke compromised keys immediately via WebUI
+Create separate keys for:
+- Different applications
+- Development vs. production
+- Different team members
 
-### Security Best Practices
+### Key Rotation
 
-1. **Never expose keys in client-side code** - Use a backend proxy
-2. **Use environment variables** - Don't hardcode keys
-3. **Rotate keys periodically** - Create new keys and revoke old ones
-4. **Use separate keys per application** - Easier to track and revoke
+1. Generate new key
+2. Update your application
+3. Test functionality
+4. Revoke old key
+
+### Revoking Keys
+
+In the WebUI:
+1. Go to **API Keys**
+2. Find the key to revoke
+3. Click **Revoke**
+
+Revoked keys are immediately invalid.
+
+---
 
 ## Error Responses
 
 ### 401 Unauthorized
-
-Missing or invalid token:
 
 ```json
 {
@@ -122,13 +153,100 @@ Missing or invalid token:
 
 **Common causes:**
 - Missing `Authorization` header
-- Malformed token
+- Invalid token format
 - Revoked API key
-- Expired session token
+- Expired session
 
 ### Troubleshooting
 
-1. **Check header format**: Must be `Authorization: Bearer <token>` (note the space)
-2. **Verify token**: Ensure no extra whitespace or newlines
-3. **Check key status**: Verify key hasn't been revoked in WebUI
-4. **Try a new key**: Generate a fresh API key
+| Issue | Solution |
+|:------|:---------|
+| Missing header | Add `Authorization: Bearer <token>` |
+| Extra whitespace | Trim the token |
+| "Bearer" missing | Format must be `Bearer <token>` |
+| Key revoked | Generate a new key |
+
+---
+
+## Security Best Practices
+
+### Do
+
+- Store keys in environment variables
+- Use HTTPS only
+- Rotate keys periodically
+- Use separate keys per application
+- Revoke unused keys
+
+### Don't
+
+- Commit keys to source control
+- Log tokens in production
+- Share keys via insecure channels
+- Use the same key everywhere
+- Expose keys in client-side code
+
+### Environment Variables
+
+```bash
+# .env file (never commit!)
+FXLAND_API_KEY=eyJhbGciOiJIUzI1NiIs...
+
+# In code
+const apiKey = process.env.FXLAND_API_KEY;
+```
+
+---
+
+## Code Examples
+
+### JavaScript/Node.js
+
+```javascript
+const API_KEY = process.env.FXLAND_API_KEY;
+
+async function listPins() {
+  const response = await fetch('https://api.cloud.fx.land/pins', {
+    headers: {
+      'Authorization': `Bearer ${API_KEY}`
+    }
+  });
+  return response.json();
+}
+```
+
+### Python
+
+```python
+import os
+import requests
+
+API_KEY = os.environ['FXLAND_API_KEY']
+
+def list_pins():
+    response = requests.get(
+        'https://api.cloud.fx.land/pins',
+        headers={'Authorization': f'Bearer {API_KEY}'}
+    )
+    return response.json()
+```
+
+### Go
+
+```go
+package main
+
+import (
+    "net/http"
+    "os"
+)
+
+func listPins() (*http.Response, error) {
+    apiKey := os.Getenv("FXLAND_API_KEY")
+
+    req, _ := http.NewRequest("GET", "https://api.cloud.fx.land/pins", nil)
+    req.Header.Set("Authorization", "Bearer "+apiKey)
+
+    return http.DefaultClient.Do(req)
+}
+```

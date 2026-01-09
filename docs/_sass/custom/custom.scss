@@ -1,0 +1,274 @@
+// Custom styles for Fx.Land documentation
+
+// Brand colors
+$fx-primary: #6366f1;
+$fx-secondary: #8b5cf6;
+$fx-accent: #06b6d4;
+
+// Override primary color
+$link-color: $fx-primary;
+
+// Hero section on homepage
+.hero {
+  background: linear-gradient(135deg, $fx-primary 0%, $fx-secondary 100%);
+  color: white;
+  padding: 3rem 2rem;
+  border-radius: 12px;
+  margin-bottom: 2rem;
+  text-align: center;
+
+  h1 {
+    color: white;
+    margin-bottom: 1rem;
+    font-size: 2.5rem;
+  }
+
+  p {
+    font-size: 1.2rem;
+    opacity: 0.95;
+    max-width: 600px;
+    margin: 0 auto;
+  }
+}
+
+// Service cards grid
+.service-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.5rem;
+  margin: 2rem 0;
+}
+
+.service-card {
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 1.5rem;
+  transition: all 0.2s ease;
+  background: var(--body-background-color);
+
+  &:hover {
+    border-color: $fx-primary;
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.15);
+    transform: translateY(-2px);
+  }
+
+  .card-icon {
+    font-size: 2rem;
+    margin-bottom: 0.75rem;
+  }
+
+  h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.25rem;
+
+    a {
+      color: var(--body-text-color);
+      text-decoration: none;
+
+      &:hover {
+        color: $fx-primary;
+      }
+    }
+  }
+
+  p {
+    color: var(--body-text-color);
+    opacity: 0.8;
+    margin: 0 0 1rem 0;
+    font-size: 0.9rem;
+  }
+
+  .card-link {
+    color: $fx-primary;
+    font-weight: 500;
+    text-decoration: none;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+}
+
+// Quick links section
+.quick-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.5rem 0;
+
+  a {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    background: var(--code-background-color);
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: all 0.2s ease;
+
+    &:hover {
+      background: $fx-primary;
+      color: white;
+    }
+  }
+}
+
+// API endpoint tables
+.endpoint-table {
+  width: 100%;
+  margin: 1rem 0;
+
+  th {
+    text-align: left;
+    font-weight: 600;
+    background: var(--code-background-color);
+  }
+
+  td, th {
+    padding: 0.75rem;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  code {
+    background: var(--code-background-color);
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+  }
+
+  .method {
+    font-weight: 600;
+    font-family: var(--mono-font-family);
+
+    &.get { color: #22c55e; }
+    &.post { color: #3b82f6; }
+    &.put { color: #f59e0b; }
+    &.delete { color: #ef4444; }
+  }
+}
+
+// Audience badges
+.audience-badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+
+  &.developers {
+    background: #dbeafe;
+    color: #1d4ed8;
+  }
+
+  &.users {
+    background: #dcfce7;
+    color: #16a34a;
+  }
+
+  &.x402 {
+    background: #fef3c7;
+    color: #d97706;
+  }
+}
+
+// Dark mode adjustments
+.dark-mode {
+  .service-card {
+    &:hover {
+      box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+    }
+  }
+
+  .audience-badge {
+    &.developers {
+      background: #1e3a5f;
+      color: #93c5fd;
+    }
+
+    &.users {
+      background: #14532d;
+      color: #86efac;
+    }
+
+    &.x402 {
+      background: #451a03;
+      color: #fcd34d;
+    }
+  }
+}
+
+// Code block improvements
+pre.highlight {
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
+// Responsive improvements
+@media (max-width: 768px) {
+  .hero {
+    padding: 2rem 1rem;
+
+    h1 {
+      font-size: 1.75rem;
+    }
+
+    p {
+      font-size: 1rem;
+    }
+  }
+
+  .service-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+// Section header styling
+.section-header {
+  border-bottom: 2px solid $fx-primary;
+  padding-bottom: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+// Info boxes
+.info-box {
+  padding: 1rem 1.25rem;
+  border-radius: 8px;
+  margin: 1rem 0;
+
+  &.tip {
+    background: #ecfdf5;
+    border-left: 4px solid #10b981;
+  }
+
+  &.warning {
+    background: #fffbeb;
+    border-left: 4px solid #f59e0b;
+  }
+
+  &.danger {
+    background: #fef2f2;
+    border-left: 4px solid #ef4444;
+  }
+
+  p:last-child {
+    margin-bottom: 0;
+  }
+}
+
+.dark-mode {
+  .info-box {
+    &.tip {
+      background: #064e3b;
+    }
+
+    &.warning {
+      background: #451a03;
+    }
+
+    &.danger {
+      background: #450a0a;
+    }
+  }
+}

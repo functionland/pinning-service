@@ -1,13 +1,24 @@
 ---
 layout: default
-title: Error Handling - Pinning API
+title: Error Handling
+parent: Pinning API
+nav_order: 4
 ---
 
 # Error Handling
+{: .no_toc }
 
-All errors return a JSON response with an `error` object.
+## Table of contents
+{: .no_toc .text-delta }
+
+1. TOC
+{:toc}
+
+---
 
 ## Error Response Format
+
+All errors return JSON with an `error` object:
 
 ```json
 {
@@ -18,10 +29,7 @@ All errors return a JSON response with an `error` object.
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `reason` | Machine-readable error code (uppercase with underscores) |
-| `details` | Human-readable description with additional context |
+---
 
 ## HTTP Status Codes
 
@@ -42,8 +50,8 @@ Invalid request format or parameters.
 - Invalid CID format
 - Missing required field (`cid`)
 - Name exceeds 255 characters
-- Invalid date format in `before`/`after`
-- Malformed JSON body
+- Invalid JSON body
+- Invalid date format
 
 ### 401 Unauthorized
 
@@ -60,9 +68,9 @@ Authentication failed.
 
 **Common causes:**
 - Missing `Authorization` header
-- Invalid or malformed token
+- Invalid token format
 - Revoked API key
-- Expired session
+- Expired session token
 
 ### 404 Not Found
 
@@ -78,13 +86,13 @@ Resource doesn't exist.
 ```
 
 **Common causes:**
-- Invalid `requestid` in URL
-- Pin was already deleted
-- Trying to access another user's pin
+- Invalid `requestid`
+- Pin already deleted
+- Accessing another user's pin
 
-### 409 Insufficient Funds
+### 409 Conflict / Insufficient Funds
 
-Account has exceeded free tier without credits.
+Operation cannot complete due to state.
 
 ```json
 {
@@ -95,32 +103,15 @@ Account has exceeded free tier without credits.
 }
 ```
 
+**Cause:** Storage exceeds free tier (500 MB) without credits.
+
 **Resolution:**
-- Check storage usage in [WebUI dashboard](https://cloud.fx.land)
 - Add FULA credits to your account
-- Delete unused pins to free up space
+- Delete unused pins to free space
 
-### 4XX Custom Errors
+### 500 Internal Server Error
 
-Service-specific errors.
-
-```json
-{
-  "error": {
-    "reason": "CUSTOM_ERROR_CODE",
-    "details": "Specific error explanation"
-  }
-}
-```
-
-**Examples:**
-- `PIN_ALREADY_EXISTS` - Same CID already pinned
-- `INVALID_ORIGINS` - Malformed multiaddr in origins array
-- `METADATA_TOO_LARGE` - Metadata exceeds size limit
-
-### 5XX Server Errors
-
-Internal service errors.
+Unexpected server error.
 
 ```json
 {
@@ -131,31 +122,46 @@ Internal service errors.
 }
 ```
 
-**What to do:**
-- Retry the request after a short delay
-- Check [status page](https://cloud.fx.land) for outages
-- Contact support if the error persists
+**Action:** Retry after a short delay. Contact support if persistent.
 
-## Error Handling Best Practices
+---
 
-### 1. Check Status Codes First
+## Error Codes Reference
+
+| Code | HTTP | Description |
+|:-----|:-----|:------------|
+| `BAD_REQUEST` | 400 | Invalid request format |
+| `UNAUTHORIZED` | 401 | Auth failed |
+| `NOT_FOUND` | 404 | Resource missing |
+| `INSUFFICIENT_FUNDS` | 409 | No credits available |
+| `INTERNAL_SERVER_ERROR` | 500 | Server error |
+
+---
+
+## Handling Errors
+
+### Check Status Code First
 
 ```python
+import requests
+
 response = requests.post(url, headers=headers, json=data)
 
 if response.status_code == 202:
     pin = response.json()
+    print(f"Created pin: {pin['requestid']}")
 elif response.status_code == 401:
-    refresh_token()
-    retry()
+    print("Authentication failed - check your API key")
 elif response.status_code == 409:
-    add_credits()
+    print("Insufficient funds - add credits or delete pins")
+elif response.status_code >= 500:
+    print("Server error - retry later")
 else:
-    error = response.json()['error']
-    log(f"Error: {error['reason']} - {error['details']}")
+    error = response.json().get('error', {})
+    print(f"Error: {error.get('reason')} - {error.get('details')}")
 ```
 
-### 2. Implement Retries for 5XX
+### Retry Logic for Server Errors
 
 ```python
 import time
@@ -168,40 +174,106 @@ def pin_with_retry(data, max_retries=3):
             return response
 
         # Exponential backoff
-        time.sleep(2 ** attempt)
+        wait_time = 2 ** attempt
+        print(f"Server error, retrying in {wait_time}s...")
+        time.sleep(wait_time)
 
     return response
 ```
 
-### 3. Handle Rate Limiting
+### JavaScript Error Handler
 
-If you receive errors during high-volume operations, implement delays:
+```javascript
+async function handlePinResponse(response) {
+  if (response.ok) {
+    return response.json();
+  }
 
-```python
-import time
+  const error = await response.json();
 
-for cid in cids_to_pin:
-    response = pin(cid)
-    time.sleep(0.1)  # 100ms between requests
+  switch (response.status) {
+    case 401:
+      throw new Error('Invalid API key');
+    case 404:
+      throw new Error('Pin not found');
+    case 409:
+      throw new Error('Insufficient funds - add credits');
+    case 500:
+      throw new Error('Server error - try again');
+    default:
+      throw new Error(error.error?.details || 'Unknown error');
+  }
+}
 ```
+
+---
+
+## Common Issues & Solutions
+
+### "Invalid CID format"
+
+```json
+{"error": {"reason": "BAD_REQUEST", "details": "Invalid CID format"}}
+```
+
+**Solution:** Verify CID is valid. Should start with `Qm` (CIDv0) or `bafy` (CIDv1).
+
+### "Access token is missing"
+
+```json
+{"error": {"reason": "UNAUTHORIZED", "details": "Access token is missing or invalid"}}
+```
+
+**Solution:**
+- Add `Authorization: Bearer YOUR_KEY` header
+- Check for typos in the header name
+- Regenerate key if needed
+
+### "Insufficient funds"
+
+```json
+{"error": {"reason": "INSUFFICIENT_FUNDS", "details": "..."}}
+```
+
+**Solution:**
+- Check your storage usage at cloud.fx.land
+- Add FULA credits
+- Delete unused pins
+
+### Pin stuck in "failed" status
+
+The `info.status_details` field explains why:
+
+```json
+{
+  "status": "failed",
+  "info": {
+    "status_details": "Could not find content on IPFS network"
+  }
+}
+```
+
+**Common reasons:**
+- CID doesn't exist
+- Content only on offline peer
+- Network timeout
+
+---
 
 ## Debugging Tips
 
-### Verify Request Format
+### Verbose curl Output
 
 ```bash
-# Use -v for verbose output
-curl -v -X POST "https://api.cloud.fx.land/pins" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"cid": "Qm..."}'
+curl -v "https://api.cloud.fx.land/pins" \
+  -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
 ### Check Token Validity
 
 ```bash
-# Decode JWT payload (middle section)
-echo "YOUR_TOKEN" | cut -d. -f2 | base64 -d
+# Decode JWT payload
+echo "YOUR_TOKEN" | cut -d. -f2 | base64 -d | jq
 ```
 
 ### Test Authentication
@@ -211,3 +283,5 @@ echo "YOUR_TOKEN" | cut -d. -f2 | base64 -d
 curl "https://api.cloud.fx.land/pins?limit=1" \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
+
+If this returns 401, your token is invalid.

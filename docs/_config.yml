@@ -1,48 +1,111 @@
-# Site Settings
-title: Fx.Land Cloud Documentation
-description: Documentation for Fx.Land IPFS Pinning Service, WebUI, and x402 Gateway
-url: "https://functionland.github.io"
+title: Fx.Land Cloud Docs
+description: Documentation for IPFS Pinning Service, x402 Gateway, and Cloud Dashboard
 baseurl: "/pinning-service"
+url: "https://functionland.github.io"
 
-# Build Settings
-markdown: kramdown
-highlighter: rouge
-permalink: pretty
+# Theme
+remote_theme: just-the-docs/just-the-docs@v0.8.2
 
-# Theme - minimal theme for clean look
-remote_theme: pages-themes/minimal@v0.2.0
+# Logo (optional - can add later)
+# logo: "/assets/images/logo.svg"
+
+# Aux links (top right)
+aux_links:
+  "GitHub":
+    - "https://github.com/functionland/pinning-service"
+
+aux_links_new_tab: true
+
+# Color scheme - supports "light" (default), "dark", or custom
+color_scheme: auto
+
+# Enable dark mode toggle
+color_scheme_toggle: true
+
+# Footer content
+footer_content: "Fx.Land Cloud Services - Decentralized Storage Infrastructure"
+
+# Footer "Edit this page on GitHub" link
+gh_edit_link: true
+gh_edit_link_text: "Edit this page on GitHub"
+gh_edit_repository: "https://github.com/functionland/pinning-service"
+gh_edit_branch: "main"
+gh_edit_source: docs
+gh_edit_view_mode: "edit"
+
+# Search
+search_enabled: true
+search:
+  heading_level: 2
+  previews: 3
+  preview_words_before: 5
+  preview_words_after: 10
+  tokenizer_separator: /[\s/]+/
+  rel_url: true
+  button: true
+
+# Back to top link
+back_to_top: true
+back_to_top_text: "Back to top"
+
+# Heading anchor links
+heading_anchors: true
+
+# Callouts
+callouts_level: quiet
+callouts:
+  highlight:
+    color: yellow
+  important:
+    title: Important
+    color: blue
+  new:
+    title: New
+    color: green
+  note:
+    title: Note
+    color: purple
+  warning:
+    title: Warning
+    color: red
+
+# Mermaid diagrams
+mermaid:
+  version: "10.6.0"
+
+# Collections for nav structure
+collections_dir: .
+collections:
+  cloud-users:
+    output: true
+    permalink: /:collection/:path/
+  pinning-api:
+    output: true
+    permalink: /:collection/:path/
+  x402-developers:
+    output: true
+    permalink: /:collection/:path/
+
+# Just the Docs navigation
+nav_enabled: true
+nav_sort: case_insensitive
+nav_external_links:
+  - title: S3 API Docs
+    url: https://docs.fx.land/fula-api
+    hide_icon: false
 
 # Plugins
 plugins:
-  - jekyll-relative-links
   - jekyll-seo-tag
-  - jekyll-sitemap
+  - jekyll-relative-links
 
-# Kramdown settings
+# Kramdown
 kramdown:
-  input: GFM
-  syntax_highlighter: rouge
   syntax_highlighter_opts:
-    css_class: highlight
     block:
       line_numbers: false
 
-# Navigation
-header_pages:
-  - quickstart.md
-  - pinning-api/index.md
-  - webui/index.md
-  - x402/index.md
-
-# Defaults
-defaults:
-  - scope:
-      path: ""
-      type: "pages"
-    values:
-      layout: "default"
-
-# Exclude from build
+# Exclude
 exclude:
   - Gemfile
   - Gemfile.lock
@@ -50,3 +113,25 @@ exclude:
   - vendor
   - .sass-cache
   - .jekyll-cache
+
+# Defaults
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+  - scope:
+      path: "cloud-users"
+    values:
+      parent: Cloud Users
+      grand_parent: null
+  - scope:
+      path: "pinning-api"
+    values:
+      parent: Pinning API
+      grand_parent: null
+  - scope:
+      path: "x402-developers"
+    values:
+      parent: x402 Developers
+      grand_parent: null

@@ -1,10 +1,12 @@
 /**
  * Cleanup Cron Service
  *
- * Periodically cleans up expired ephemeral objects from S3.
+ * Periodically cleans up expired ephemeral objects by deleting users from S3.
+ * When a user's TTL expires, we delete the entire user via S3 admin API,
+ * which cascades and deletes all their CIDs automatically.
  */
 
-import { getExpiredObjects, markObjectDeleted } from '../database/repositories/ephemeralObjects.js';
+import { getExpiredObjects, markObjectDeleted, markAllUserObjectsDeleted } from '../database/repositories/ephemeralObjects.js';
 import { config } from '../config/index.js';
 
 // Cleanup interval (60 seconds)
@@ -48,7 +50,45 @@ export function stopCleanupCron(): void {
 }
 
 /**
+ * Delete user from S3 admin API
+ * This deletes the user AND all their CIDs automatically (cascading delete)
+ */
+async function deleteUserFromS3(wallet: string): Promise<boolean> {
+  // x402 users have email format: {wallet}@x402.gateway
+  const email = `${wallet.toLowerCase()}@x402.gateway`;
+
+  try {
+    const url = `${config.s3BackendUrl}/admin/users/${encodeURIComponent(email)}`;
+    console.log(`[cleanup] Deleting user: ${email}`);
+
+    const response = await fetch(url, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${config.s3AdminToken}`,
+      },
+    });
+
+    // 200/204 = deleted, 404 = already gone (success either way)
+    if (response.ok || response.status === 404) {
+      console.log(`[cleanup] User deleted successfully: ${email}`);
+      return true;
+    }
+
+    const errorText = await response.text();
+    console.error(`[cleanup] S3 admin delete failed: ${response.status} ${errorText}`);
+    return false;
+  } catch (error) {
+    console.error(`[cleanup] S3 delete user error for ${email}:`, error);
+    return false;
+  }
+}
+
+/**
  * Run a single cleanup cycle
+ *
+ * 1. Get wallets with expired objects
+ * 2. Delete each user via S3 admin API (cascades to all CIDs)
+ * 3. Mark all user's objects as deleted in database
  */
 async function runCleanup(): Promise<void> {
   if (isRunning) {
@@ -70,29 +110,25 @@ async function runCleanup(): Promise<void> {
       return;
     }
 
-    console.log(`[cleanup] Processing ${expiredObjects.length} expired objects`);
+    // Group by wallet to delete users (not individual objects)
+    const wallets = [...new Set(expiredObjects.map(obj => obj.wallet))];
+    console.log(`[cleanup] Processing ${wallets.length} users with ${expiredObjects.length} expired objects`);
 
-    for (const obj of expiredObjects) {
+    for (const wallet of wallets) {
       try {
-        // Delete from S3
-        // Note: For cleanup, we need admin credentials or a service account
-        // Since we're using pass-through proxy, we'll need to implement
-        // a separate delete mechanism or use the S3 admin API directly
-        const deleteSuccess = await deleteFromS3(obj.bucket, obj.object_key);
+        const success = await deleteUserFromS3(wallet);
 
-        if (deleteSuccess) {
-          markObjectDeleted(obj.id);
+        if (success) {
+          // Mark ALL objects for this wallet as deleted in our database
+          markAllUserObjectsDeleted(wallet);
           deleted++;
-          console.log(`[cleanup] Deleted: ${obj.bucket}/${obj.object_key}`);
+          console.log(`[cleanup] Cleaned up user: ${wallet}`);
         } else {
-          markObjectDeleted(obj.id, 'Delete failed');
           errors++;
         }
-
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-        console.error(`[cleanup] Error deleting ${obj.bucket}/${obj.object_key}:`, errorMsg);
-        markObjectDeleted(obj.id, errorMsg);
+        console.error(`[cleanup] Error cleaning up wallet ${wallet}:`, errorMsg);
         errors++;
       }
     }
@@ -105,39 +141,7 @@ async function runCleanup(): Promise<void> {
 
   const duration = Date.now() - startTime;
   if (deleted > 0 || errors > 0) {
-    console.log(`[cleanup] Completed in ${duration}ms: ${deleted} deleted, ${errors} errors`);
-  }
-}
-
-/**
- * Delete an object from S3 using admin credentials
- *
- * Note: This requires separate admin credentials since we can't use
- * the user's JWT for cleanup. The S3 backend should expose an admin
- * delete endpoint or we need direct MinIO access.
- */
-async function deleteFromS3(bucket: string, key: string): Promise<boolean> {
-  try {
-    // For now, we'll call the S3 backend directly
-    // In production, this should use admin credentials
-    const url = `${config.s3BackendUrl}/${bucket}/${key}`;
-
-    const response = await fetch(url, {
-      method: 'DELETE',
-      headers: {
-        // Note: Need to add admin auth here
-        // This is a placeholder - real implementation needs admin creds
-        'X-Cleanup-Service': 'x402-gateway',
-      },
-    });
-
-    // 204 No Content or 200 OK means success
-    // 404 Not Found also means "successfully deleted" (already gone)
-    return response.status === 204 || response.status === 200 || response.status === 404;
-
-  } catch (error) {
-    console.error(`[cleanup] S3 delete error for ${bucket}/${key}:`, error);
-    return false;
+    console.log(`[cleanup] Completed in ${duration}ms: ${deleted} users deleted, ${errors} errors`);
   }
 }
 
@@ -155,19 +159,19 @@ export async function triggerCleanup(): Promise<{
 
   const expiredObjects = getExpiredObjects(100);
 
-  for (const obj of expiredObjects) {
+  // Group by wallet
+  const wallets = [...new Set(expiredObjects.map(obj => obj.wallet))];
+
+  for (const wallet of wallets) {
     try {
-      const success = await deleteFromS3(obj.bucket, obj.object_key);
+      const success = await deleteUserFromS3(wallet);
       if (success) {
-        markObjectDeleted(obj.id);
+        markAllUserObjectsDeleted(wallet);
         deleted++;
       } else {
-        markObjectDeleted(obj.id, 'Delete failed');
         errors++;
       }
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      markObjectDeleted(obj.id, errorMsg);
       errors++;
     }
   }

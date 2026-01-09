@@ -33,6 +33,7 @@ const configSchema = z.object({
 
   // S3 Backend
   s3BackendUrl: z.string().url().default('http://127.0.0.1:9000'),
+  s3AdminToken: z.string().min(1, 'S3_ADMIN_TOKEN is required for cleanup'),
 
   // Pinning Service
   pinningWebuiUrl: z.string().url().default('http://127.0.0.1:3001'),
@@ -65,6 +66,7 @@ function loadConfig(): Config {
     paymentTokenAddress: process.env.PAYMENT_TOKEN_ADDRESS,
     paymentTokenName: process.env.PAYMENT_TOKEN_NAME,
     s3BackendUrl: process.env.S3_BACKEND_URL,
+    s3AdminToken: process.env.S3_ADMIN_TOKEN,
     pinningWebuiUrl: process.env.PINNING_WEBUI_URL,
     pinningSystemKey: process.env.PINNING_SYSTEM_KEY,
     databasePath: process.env.DATABASE_PATH,
@@ -100,6 +102,7 @@ export function logConfig(): void {
   console.log(`  networkChainId: ${config.networkChainId}`);
   console.log(`  paymentTokenAddress: ${config.paymentTokenAddress}`);
   console.log(`  s3BackendUrl: ${config.s3BackendUrl}`);
+  console.log(`  s3AdminToken: ${config.s3AdminToken ? '****' : '(not set)'}`);
   console.log(`  pinningWebuiUrl: ${config.pinningWebuiUrl}`);
   console.log(`  pinningSystemKey: ${config.pinningSystemKey ? '****' : '(not set)'}`);
   console.log(`  databasePath: ${config.databasePath}`);

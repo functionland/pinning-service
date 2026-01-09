@@ -65,6 +65,24 @@ export function markObjectDeleted(id: number, error?: string): void {
 }
 
 /**
+ * Mark all objects for a wallet as deleted
+ * Called after user is deleted from S3 (cascading delete)
+ */
+export function markAllUserObjectsDeleted(wallet: string): void {
+  const db = getDatabase();
+
+  const result = db.prepare(`
+    UPDATE x402_ephemeral_objects
+    SET deleted = 1, deleted_at = CURRENT_TIMESTAMP
+    WHERE wallet = ? AND deleted = 0
+  `).run(wallet.toLowerCase());
+
+  if (result.changes > 0) {
+    console.log(`[db] Marked ${result.changes} objects as deleted for wallet ${wallet}`);
+  }
+}
+
+/**
  * Get ephemeral object by bucket and key
  */
 export function getEphemeralObject(bucket: string, key: string): EphemeralObject | undefined {

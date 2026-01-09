@@ -118,6 +118,13 @@ collect_config() {
     read -p "Enter S3 backend URL [${DEFAULT_S3_BACKEND_URL}]: " S3_BACKEND_URL
     S3_BACKEND_URL=${S3_BACKEND_URL:-$DEFAULT_S3_BACKEND_URL}
 
+    # S3 admin token (for cleanup cron)
+    read -p "Enter S3 admin token (for cleanup to delete expired users): " S3_ADMIN_TOKEN
+    if [ -z "$S3_ADMIN_TOKEN" ]; then
+        print_error "S3 admin token is required for cleanup service"
+        exit 1
+    fi
+
     # Shared database path (pinning.db)
     read -p "Enter shared database path [${DATA_DIR}/pinning.db]: " DATABASE_PATH
     DATABASE_PATH=${DATABASE_PATH:-$DATA_DIR/pinning.db}
@@ -143,6 +150,7 @@ collect_config() {
     echo "  Facilitator:       $FACILITATOR_URL"
     echo "  Pinning WebUI:     $PINNING_WEBUI_URL"
     echo "  S3 Backend:        $S3_BACKEND_URL"
+    echo "  S3 Admin Token:    ****"
     echo "  Database:          $DATABASE_PATH"
     echo "  Port:              $PORT"
     echo ""
@@ -228,6 +236,7 @@ PAYMENT_TOKEN_NAME=$DEFAULT_PAYMENT_TOKEN_NAME
 
 # S3 Backend
 S3_BACKEND_URL=$S3_BACKEND_URL
+S3_ADMIN_TOKEN=$S3_ADMIN_TOKEN
 
 # Pinning Service
 PINNING_WEBUI_URL=$PINNING_WEBUI_URL

@@ -1,0 +1,52 @@
+# Site Settings
+title: Fx.Land Cloud Documentation
+description: Documentation for Fx.Land IPFS Pinning Service, WebUI, and x402 Gateway
+url: "https://functionland.github.io"
+baseurl: "/pinning-service"
+
+# Build Settings
+markdown: kramdown
+highlighter: rouge
+permalink: pretty
+
+# Theme - minimal theme for clean look
+remote_theme: pages-themes/minimal@v0.2.0
+
+# Plugins
+plugins:
+  - jekyll-relative-links
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+# Kramdown settings
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    css_class: highlight
+    block:
+      line_numbers: false
+
+# Navigation
+header_pages:
+  - quickstart.md
+  - pinning-api/index.md
+  - webui/index.md
+  - x402/index.md
+
+# Defaults
+defaults:
+  - scope:
+      path: ""
+      type: "pages"
+    values:
+      layout: "default"
+
+# Exclude from build
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - node_modules
+  - vendor
+  - .sass-cache
+  - .jekyll-cache

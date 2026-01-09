@@ -1,0 +1,49 @@
+main:
+  - title: Home
+    url: /
+  - title: Quick Start
+    url: /quickstart/
+  - title: Pinning API
+    url: /pinning-api/
+  - title: Web Interface
+    url: /webui/
+  - title: x402 Gateway
+    url: /x402/
+
+pinning_api:
+  - title: Overview
+    url: /pinning-api/
+  - title: Authentication
+    url: /pinning-api/authentication/
+  - title: Pins Endpoints
+    url: /pinning-api/pins/
+  - title: Error Handling
+    url: /pinning-api/errors/
+
+webui:
+  - title: Overview
+    url: /webui/
+  - title: Getting Started
+    url: /webui/getting-started/
+  - title: API Keys
+    url: /webui/api-keys/
+  - title: Credits & Billing
+    url: /webui/credits/
+  - title: Wallet Linking
+    url: /webui/wallets/
+
+x402:
+  - title: Overview
+    url: /x402/
+  - title: Payment Flow
+    url: /x402/payment-flow/
+  - title: Upload (PUT)
+    url: /x402/upload/
+  - title: Pricing
+    url: /x402/pricing/
+  - title: Error Handling
+    url: /x402/errors/
+
+reference:
+  - title: Status Codes
+    url: /reference/status-codes/

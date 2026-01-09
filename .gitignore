@@ -29,3 +29,4 @@ pinning-service
 ipfs-pinning
 /.claude
 /.claude
+/x402-skale/node_modules

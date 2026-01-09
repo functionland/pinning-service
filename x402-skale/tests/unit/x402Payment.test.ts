@@ -14,6 +14,8 @@ import {
   createMockPaymentHeader,
   createMockVerifyResponse,
   createMockSettleResponse,
+  createStandardVerifyResponse,
+  createStandardSettleResponse,
   DEFAULT_MOCK_PAYMENT,
   encodeBase64,
   decodeBase64,
@@ -559,6 +561,228 @@ describe('x402 Payment Middleware', () => {
 
       // GET should pass through without 402
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe('Standard x402 Format Compatibility', () => {
+    it('should handle standard verify response with isValid field', async () => {
+      global.fetch = vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('/verify')) {
+          // Standard x402 format uses isValid instead of valid
+          return new Response(JSON.stringify(createStandardVerifyResponse()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (url.includes('/settle')) {
+          return new Response(JSON.stringify(createStandardSettleResponse()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not Found', { status: 404 });
+      });
+
+      const app = createTestApp();
+      app.put('/test/:bucket/:key', x402PaymentMiddleware, (c) => {
+        const payment = getPaymentInfo(c);
+        return c.json({ success: true, payer: payment?.payer });
+      });
+
+      const res = await app.request('/test/mybucket/myfile.txt', {
+        method: 'PUT',
+        headers: {
+          'Content-Length': '1048576',
+          'Content-Type': 'application/octet-stream',
+          'X-PAYMENT': createMockPaymentHeader(),
+        },
+        body: 'test content',
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.success).toBe(true);
+    });
+
+    it('should handle standard verify failure with invalidReason field', async () => {
+      global.fetch = vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('/verify')) {
+          // Standard x402 format uses invalidReason instead of error
+          return new Response(JSON.stringify(createStandardVerifyResponse({
+            verifySuccess: false,
+            verifyError: 'Signature verification failed',
+          })), {
+            status: 200, // Standard may return 200 with isValid: false
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not Found', { status: 404 });
+      });
+
+      const app = createTestApp();
+      app.put('/test/:bucket/:key', x402PaymentMiddleware, (c) => c.json({ success: true }));
+
+      const res = await app.request('/test/mybucket/myfile.txt', {
+        method: 'PUT',
+        headers: {
+          'Content-Length': '1048576',
+          'Content-Type': 'application/octet-stream',
+          'X-PAYMENT': createMockPaymentHeader(),
+        },
+        body: 'test',
+      });
+
+      expect(res.status).toBe(402);
+      const body = await res.json();
+      expect(body.error).toContain('Signature verification failed');
+    });
+
+    it('should handle standard settle response with transaction field', async () => {
+      const expectedTxHash = '0xstandard1234567890abcdef1234567890abcdef1234567890abcdef12345678';
+
+      global.fetch = vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('/verify')) {
+          return new Response(JSON.stringify(createMockVerifyResponse()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (url.includes('/settle')) {
+          // Standard x402 format uses transaction instead of txHash
+          return new Response(JSON.stringify(createStandardSettleResponse({
+            txHash: expectedTxHash,
+          })), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not Found', { status: 404 });
+      });
+
+      const app = createTestApp();
+      app.put('/test/:bucket/:key', x402PaymentMiddleware, (c) => c.json({ success: true }));
+
+      const res = await app.request('/test/mybucket/myfile.txt', {
+        method: 'PUT',
+        headers: {
+          'Content-Length': '1048576',
+          'Content-Type': 'application/octet-stream',
+          'X-PAYMENT': createMockPaymentHeader(),
+        },
+        body: 'test',
+      });
+
+      expect(res.status).toBe(200);
+
+      // Check X-PAYMENT-RESPONSE header contains the transaction hash
+      const paymentResponseHeader = res.headers.get('X-PAYMENT-RESPONSE');
+      expect(paymentResponseHeader).not.toBeNull();
+
+      const paymentResponse = decodeBase64<{
+        success: boolean;
+        transaction: string;
+      }>(paymentResponseHeader!);
+
+      expect(paymentResponse.success).toBe(true);
+      expect(paymentResponse.transaction).toBe(expectedTxHash);
+    });
+
+    it('should send both standard and legacy format fields in verify request', async () => {
+      const verifyCalls: { url: string; body: Record<string, unknown> }[] = [];
+
+      global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url.includes('/verify')) {
+          verifyCalls.push({ url, body: JSON.parse(init?.body as string) });
+          return new Response(JSON.stringify(createMockVerifyResponse()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (url.includes('/settle')) {
+          return new Response(JSON.stringify(createMockSettleResponse()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not Found', { status: 404 });
+      });
+
+      const app = createTestApp();
+      app.put('/test/:bucket/:key', x402PaymentMiddleware, (c) => c.json({ success: true }));
+
+      await app.request('/test/mybucket/myfile.txt', {
+        method: 'PUT',
+        headers: {
+          'Content-Length': '1048576',
+          'Content-Type': 'application/octet-stream',
+          'X-PAYMENT': createMockPaymentHeader(),
+        },
+        body: 'test',
+      });
+
+      expect(verifyCalls).toHaveLength(1);
+
+      // Check standard format fields
+      expect(verifyCalls[0].body).toHaveProperty('paymentPayload');
+      expect(verifyCalls[0].body).toHaveProperty('paymentRequirements');
+
+      // Check legacy format fields (for backwards compatibility)
+      expect(verifyCalls[0].body).toHaveProperty('payload');
+      expect(verifyCalls[0].body).toHaveProperty('details');
+
+      // Verify paymentRequirements contains expected fields
+      const requirements = verifyCalls[0].body.paymentRequirements as Record<string, unknown>;
+      expect(requirements.scheme).toBe('exact');
+      expect(requirements.network).toBe('eip155:324705682');
+      expect(requirements.payTo).toBe('0xReceiverAddress1234567890123456789012');
+    });
+
+    it('should send paymentRequirements in settle request for standard format', async () => {
+      const settleCalls: { url: string; body: Record<string, unknown> }[] = [];
+
+      global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url.includes('/verify')) {
+          return new Response(JSON.stringify(createMockVerifyResponse()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (url.includes('/settle')) {
+          settleCalls.push({ url, body: JSON.parse(init?.body as string) });
+          return new Response(JSON.stringify(createMockSettleResponse()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not Found', { status: 404 });
+      });
+
+      const app = createTestApp();
+      app.put('/test/:bucket/:key', x402PaymentMiddleware, (c) => c.json({ success: true }));
+
+      await app.request('/test/mybucket/myfile.txt', {
+        method: 'PUT',
+        headers: {
+          'Content-Length': '1048576',
+          'Content-Type': 'application/octet-stream',
+          'X-PAYMENT': createMockPaymentHeader(),
+        },
+        body: 'test',
+      });
+
+      expect(settleCalls).toHaveLength(1);
+
+      // Check standard format fields
+      expect(settleCalls[0].body).toHaveProperty('paymentPayload');
+      expect(settleCalls[0].body).toHaveProperty('paymentRequirements');
+
+      // Check legacy format field
+      expect(settleCalls[0].body).toHaveProperty('payload');
+
+      // Verify paymentRequirements in settle contains expected fields
+      const requirements = settleCalls[0].body.paymentRequirements as Record<string, unknown>;
+      expect(requirements.scheme).toBe('exact');
+      expect(requirements.maxAmountRequired).toBeDefined();
     });
   });
 });

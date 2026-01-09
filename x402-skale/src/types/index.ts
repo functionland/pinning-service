@@ -16,6 +16,9 @@ export interface Env {
     // x402 payment header (raw header for settlement)
     x402PaymentHeader?: string;
 
+    // x402 expected amount (for settlement)
+    x402ExpectedAmount?: string;
+
     // JWT user info (set by JWT validator)
     jwtUser?: JwtUserInfo;
 
@@ -93,7 +96,9 @@ export interface FacilitatorSettleRequest {
 
 export interface FacilitatorSettleResponse {
   success: boolean;
-  txHash?: string;
+  txHash?: string;       // Legacy format
+  transaction?: string;  // Standard x402 format
+  network?: string;
   error?: string;
 }
 

@@ -189,34 +189,48 @@ function buildPaymentRequiredResponse(
 }
 
 /**
+ * Build payment requirements object (used for both verify and settle)
+ */
+function buildPaymentRequirements(expectedAmount: string) {
+  return {
+    scheme: 'exact' as const,
+    network: getNetworkIdentifier(),
+    maxAmountRequired: expectedAmount,
+    resource: '*', // Accept any resource
+    description: 'x402-skale storage payment',
+    mimeType: 'application/octet-stream',
+    payTo: config.receivingAddress,
+    maxTimeoutSeconds: PAYMENT_TIMEOUT_SECONDS,
+    asset: getAssetIdentifier(),
+    extra: {
+      name: config.paymentTokenName,
+      version: '1',
+    },
+  };
+}
+
+/**
  * Verify payment with facilitator
+ * Supports both standard x402 format (paymentPayload/isValid) and legacy format (payload/valid)
  */
 async function verifyWithFacilitator(
   paymentHeader: string,
   expectedAmount: string
 ): Promise<FacilitatorVerifyResponse> {
+  const paymentRequirements = buildPaymentRequirements(expectedAmount);
+
   const response = await fetch(`${config.facilitatorUrl}/verify`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
+      // Standard x402 format
+      paymentPayload: paymentHeader,
+      paymentRequirements,
+      // Legacy format (for backwards compatibility)
       payload: paymentHeader,
-      details: {
-        scheme: 'exact',
-        network: getNetworkIdentifier(),
-        maxAmountRequired: expectedAmount,
-        resource: '*', // Accept any resource
-        description: 'x402-skale storage payment',
-        mimeType: 'application/octet-stream',
-        payTo: config.receivingAddress,
-        maxTimeoutSeconds: PAYMENT_TIMEOUT_SECONDS,
-        asset: getAssetIdentifier(),
-        extra: {
-          name: config.paymentTokenName,
-          version: '1',
-        },
-      },
+      details: paymentRequirements,
     }),
   });
 
@@ -225,21 +239,43 @@ async function verifyWithFacilitator(
     throw new Error(`Facilitator verify failed: ${response.status} ${errorText}`);
   }
 
-  return response.json() as Promise<FacilitatorVerifyResponse>;
+  const result = await response.json() as Record<string, unknown>;
+
+  // Normalize response to support both standard and legacy formats
+  return {
+    // Standard uses isValid, legacy uses valid
+    valid: (result.isValid ?? result.valid) as boolean,
+    // Standard uses invalidReason, legacy uses error
+    error: (result.invalidReason ?? result.error) as string | undefined,
+    // These fields may not be present in standard format
+    paymentId: (result.paymentId ?? result.id ?? '') as string,
+    payer: (result.payer ?? result.from ?? '') as string,
+    amount: (result.amount ?? expectedAmount) as string,
+    asset: (result.asset ?? getAssetIdentifier()) as string,
+    network: (result.network ?? getNetworkIdentifier()) as string,
+  };
 }
 
 /**
  * Settle payment with facilitator
+ * Supports both standard x402 format (paymentPayload/paymentRequirements) and legacy format
  */
 async function settleWithFacilitator(
-  paymentHeader: string
+  paymentHeader: string,
+  expectedAmount: string
 ): Promise<FacilitatorSettleResponse> {
+  const paymentRequirements = buildPaymentRequirements(expectedAmount);
+
   const response = await fetch(`${config.facilitatorUrl}/settle`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
+      // Standard x402 format
+      paymentPayload: paymentHeader,
+      paymentRequirements,
+      // Legacy format (for backwards compatibility)
       payload: paymentHeader,
     }),
   });
@@ -249,7 +285,16 @@ async function settleWithFacilitator(
     throw new Error(`Facilitator settle failed: ${response.status} ${errorText}`);
   }
 
-  return response.json() as Promise<FacilitatorSettleResponse>;
+  const result = await response.json() as Record<string, unknown>;
+
+  // Normalize response to support both standard and legacy formats
+  return {
+    success: result.success as boolean,
+    // Standard uses transaction, legacy uses txHash
+    txHash: (result.transaction ?? result.txHash) as string | undefined,
+    network: result.network as string | undefined,
+    error: result.error as string | undefined,
+  };
 }
 
 /**
@@ -324,6 +369,7 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
     // Store payment info in context for downstream handlers
     c.set('x402Payment', paymentInfo);
     c.set('x402PaymentHeader', paymentHeader);
+    c.set('x402ExpectedAmount', requiredMicroUsdc.toString());
 
   } catch (error) {
     if (error instanceof HttpError) {
@@ -342,7 +388,8 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
     try {
       console.log(`[x402] Settling payment ${paymentInfo.paymentId}...`);
 
-      const settlement = await settleWithFacilitator(paymentHeader);
+      const expectedAmount = c.get('x402ExpectedAmount') || requiredMicroUsdc.toString();
+      const settlement = await settleWithFacilitator(paymentHeader, expectedAmount);
 
       if (settlement.success) {
         console.log(`[x402] Payment settled: ${paymentInfo.paymentId}, tx: ${settlement.txHash}`);

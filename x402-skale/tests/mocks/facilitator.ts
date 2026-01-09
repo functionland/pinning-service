@@ -39,7 +39,7 @@ export const DEFAULT_MOCK_PAYMENT: MockPayment = {
 };
 
 /**
- * Create a mock facilitator verify response
+ * Create a mock facilitator verify response (legacy format)
  */
 export function createMockVerifyResponse(options: MockFacilitatorOptions = {}) {
   const {
@@ -66,7 +66,29 @@ export function createMockVerifyResponse(options: MockFacilitatorOptions = {}) {
 }
 
 /**
- * Create a mock facilitator settle response
+ * Create a mock facilitator verify response (standard x402 format)
+ * Uses isValid instead of valid, invalidReason instead of error
+ */
+export function createStandardVerifyResponse(options: MockFacilitatorOptions = {}) {
+  const {
+    verifySuccess = true,
+    verifyError,
+  } = options;
+
+  if (verifySuccess) {
+    return {
+      isValid: true,
+    };
+  }
+
+  return {
+    isValid: false,
+    invalidReason: verifyError || 'Invalid payment signature',
+  };
+}
+
+/**
+ * Create a mock facilitator settle response (legacy format)
  */
 export function createMockSettleResponse(options: MockFacilitatorOptions = {}) {
   const {
@@ -79,6 +101,32 @@ export function createMockSettleResponse(options: MockFacilitatorOptions = {}) {
     return {
       success: true,
       txHash,
+    };
+  }
+
+  return {
+    success: false,
+    error: settleError || 'Settlement failed',
+  };
+}
+
+/**
+ * Create a mock facilitator settle response (standard x402 format)
+ * Uses transaction instead of txHash, includes network
+ */
+export function createStandardSettleResponse(options: MockFacilitatorOptions & { network?: string } = {}) {
+  const {
+    settleSuccess = true,
+    settleError,
+    txHash = '0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+    network = 'eip155:324705682',
+  } = options;
+
+  if (settleSuccess) {
+    return {
+      success: true,
+      transaction: txHash,
+      network,
     };
   }
 

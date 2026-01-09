@@ -12,7 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:local": "tsx scripts/local-test.ts",
-    "migrate": "tsx scripts/migrate.ts",
+    "migrate": "node node_modules/tsx/dist/cli.mjs scripts/migrate.ts",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"
   },
@@ -22,6 +22,7 @@
     "dotenv": "^16.4.7",
     "hono": "^4.6.14",
     "jose": "^5.9.6",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "uuid": "^11.0.3",
     "viem": "^2.21.54",
@@ -31,7 +32,6 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.2",
     "@types/uuid": "^10.0.0",
-    "tsx": "^4.19.2",
     "vitest": "^2.1.9"
   },
   "engines": {

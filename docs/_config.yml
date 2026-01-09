@@ -6,9 +6,6 @@ url: "https://functionland.github.io"
 # Theme
 remote_theme: just-the-docs/just-the-docs@v0.8.2
 
-# Logo (optional - can add later)
-# logo: "/assets/images/logo.svg"
-
 # Aux links (top right)
 aux_links:
   "GitHub":
@@ -18,9 +15,6 @@ aux_links_new_tab: true
 
 # Color scheme - "light" or "dark" (auto not supported by github-pages gem)
 color_scheme: light
-
-# Enable dark mode toggle
-color_scheme_toggle: true
 
 # Footer content
 footer_content: "Fx.Land Cloud Services - Decentralized Storage Infrastructure"
@@ -73,19 +67,6 @@ callouts:
 mermaid:
   version: "10.6.0"
 
-# Collections for nav structure
-collections_dir: .
-collections:
-  cloud-users:
-    output: true
-    permalink: /:collection/:path/
-  pinning-api:
-    output: true
-    permalink: /:collection/:path/
-  x402-developers:
-    output: true
-    permalink: /:collection/:path/
-
 # Just the Docs navigation
 nav_enabled: true
 nav_sort: case_insensitive
@@ -120,18 +101,3 @@ defaults:
       path: ""
     values:
       layout: default
-  - scope:
-      path: "cloud-users"
-    values:
-      parent: Cloud Users
-      grand_parent: null
-  - scope:
-      path: "pinning-api"
-    values:
-      parent: Pinning API
-      grand_parent: null
-  - scope:
-      path: "x402-developers"
-    values:
-      parent: x402 Developers
-      grand_parent: null

@@ -16,8 +16,8 @@ aux_links:
 
 aux_links_new_tab: true
 
-# Color scheme - supports "light" (default), "dark", or custom
-color_scheme: auto
+# Color scheme - "light" or "dark" (auto not supported by github-pages gem)
+color_scheme: light
 
 # Enable dark mode toggle
 color_scheme_toggle: true

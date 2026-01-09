@@ -81,16 +81,18 @@ export async function proxyToS3(
         cid = responseJson.cid || responseJson.CID || responseJson.Hash;
       } catch {
         // Response might contain CID directly
-        if (responseText.startsWith('Qm') || responseText.startsWith('bafy')) {
+        // CIDv1 starts with 'baf' (base32), CIDv0 starts with 'Qm' (base58)
+        if (responseText.startsWith('Qm') || responseText.startsWith('baf')) {
           cid = responseText.trim();
         }
       }
     }
 
     // Also check ETag header for CID
+    // fula-api returns CIDv1 with raw codec (bafk...) or dag-cbor (bafy...)
     if (!cid && responseHeaders['etag']) {
       const etag = responseHeaders['etag'].replace(/"/g, '');
-      if (etag.startsWith('Qm') || etag.startsWith('bafy')) {
+      if (etag.startsWith('Qm') || etag.startsWith('baf')) {
         cid = etag;
       }
     }

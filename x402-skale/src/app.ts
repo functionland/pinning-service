@@ -46,6 +46,7 @@ app.use('*', cors({
   ],
   exposeHeaders: [
     'X-Payment-Required',
+    'X-PAYMENT-RESPONSE',
     'Content-Length',
     'Content-Type',
     'ETag',

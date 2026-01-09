@@ -1,28 +1,29 @@
 /**
- * S3 Proxy Routes - x402 Standards Compliant
+ * S3 Proxy Routes - x402 Standards Compliant (Option C - Gift Model)
  *
  * Handles S3-compatible operations with x402 payment.
  *
- * AUTH MODEL:
- * - x402 payment header: Required for payment (proves payment was made)
- * - JWT Authorization header: Required for S3 access (passed through to S3 backend)
+ * AUTH MODEL (Option C):
+ * - JWT Authorization header: Identifies the user (email from sub claim)
+ * - x402 payment header: Provides payment (any wallet can pay for any user)
  *
- * This is x402-compliant because:
- * - x402 defines the payment protocol, not authentication
- * - Additional authentication requirements don't violate the standard
- * - The JWT is required by the S3 backend, not by x402
+ * Identity Model:
+ * - JWT email = user identity for storage + credits
+ * - Wallet = payment source only (no binding enforced)
+ * - Supports "gift" payments (anyone can pay for anyone's storage)
  *
  * Flow:
  * 1. Client sends request with both JWT and X-PAYMENT headers
- * 2. x402 middleware verifies payment, settles with facilitator
- * 3. JWT is passed through to S3 backend for authorization
- * 4. Optionally verify JWT wallet matches x402 payer wallet
+ * 2. JWT middleware extracts user email (identity)
+ * 3. x402 middleware verifies payment, settles with facilitator
+ * 4. Credits assigned to JWT email (not wallet)
+ * 5. JWT passed through to S3 backend for authorization
  */
 
 import { Hono } from 'hono';
 import type { Env, UploadResponse } from '../types/index.js';
 import { x402PaymentMiddleware, getPaymentInfo } from '../middleware/x402Payment.js';
-import { jwtValidatorMiddleware, walletAssertionMiddleware, getJwtUser } from '../middleware/jwtValidator.js';
+import { jwtValidatorMiddleware, getJwtUser } from '../middleware/jwtValidator.js';
 import { proxyToS3, buildGatewayUrl } from '../services/s3Proxy.js';
 import { adjustPinningCredits } from '../services/pinningIntegration.js';
 import { trackEphemeralObject } from '../database/repositories/ephemeralObjects.js';
@@ -46,9 +47,9 @@ export const s3ProxyRoutes = new Hono<Env>();
  */
 s3ProxyRoutes.put(
   '/:bucket/:key{.+}',
-  jwtValidatorMiddleware,      // First: Validate JWT and extract user info
-  x402PaymentMiddleware,       // Second: Verify x402 payment
-  walletAssertionMiddleware,   // Third: Optionally verify JWT wallet == x402 wallet
+  jwtValidatorMiddleware,      // First: Validate JWT and extract user email
+  x402PaymentMiddleware,       // Second: Verify x402 payment (any wallet)
+  // Option C: No wallet assertion - any wallet can pay for any user
   async (c) => {
     const bucket = c.req.param('bucket');
     const key = c.req.param('key');
@@ -102,22 +103,26 @@ s3ProxyRoutes.put(
     }
 
     // Track ephemeral object for cleanup
+    // Use JWT sub (user's email) as the user identity - this is what S3 knows
     const expiresAt = new Date(Date.now() + payment.ttlSeconds * 1000);
+    const userId = jwtUser?.sub || jwtUser?.email || payment.payer;
 
     trackEphemeralObject({
       bucket,
       key,
-      wallet: payment.payer,
+      wallet: userId,  // This is actually the user_id (email from JWT sub)
       sizeBytes: payment.sizeBytes,
       sizeMb: payment.sizeMb,
       paymentId: payment.paymentId,
       expiresAt,
     });
 
-    // Adjust pinning service credits
+    // Adjust pinning service credits (use JWT email, not wallet)
     const ttlHours = Math.ceil(payment.ttlSeconds / 3600);
+    const userEmail = jwtUser?.sub || jwtUser?.email || '';
     const creditResult = await adjustPinningCredits({
-      wallet: payment.payer,
+      userEmail,           // JWT email - real user identity
+      wallet: payment.payer,  // For logging only
       amountUsdc: payment.priceUsdc,
       paymentId: payment.paymentId,
       sizeMb: payment.sizeMb,
@@ -243,9 +248,9 @@ s3ProxyRoutes.on('HEAD', '/:bucket/:key{.+}', async (c) => {
  */
 s3ProxyRoutes.delete(
   '/:bucket/:key{.+}',
-  jwtValidatorMiddleware,      // First: Validate JWT
-  x402PaymentMiddleware,       // Second: Verify x402 payment
-  walletAssertionMiddleware,   // Third: Verify JWT wallet == x402 wallet
+  jwtValidatorMiddleware,      // First: Validate JWT and extract user email
+  x402PaymentMiddleware,       // Second: Verify x402 payment (any wallet)
+  // Option C: No wallet assertion - any wallet can pay for any user
   async (c) => {
     const bucket = c.req.param('bucket');
     const key = c.req.param('key');

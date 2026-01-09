@@ -452,12 +452,12 @@ describe('x402 Flow Integration Tests', () => {
       expect(res.status).toBe(402);
     });
 
-    it('should return 403 when JWT wallet does not match payment wallet', async () => {
+    it('should allow different wallet to pay for JWT user (Option C - Gift Model)', async () => {
       setupMockFetch();
 
       const app = createTestApp();
 
-      // JWT with different wallet
+      // JWT with different wallet - Option C allows any wallet to pay for any user
       const jwt = createMockJwt({
         wallet: '0xDifferentWallet12345678901234567890AB',
       });
@@ -468,12 +468,14 @@ describe('x402 Flow Integration Tests', () => {
           'Authorization': `Bearer ${jwt}`,
           'Content-Length': '1048576',
           'Content-Type': 'application/octet-stream',
-          'X-PAYMENT': createMockPaymentHeader(), // Uses DEFAULT_MOCK_PAYMENT.payer
+          'X-PAYMENT': createMockPaymentHeader(), // Uses different payer wallet
         },
         body: 'test',
       });
 
-      expect(res.status).toBe(403);
+      // Option C (Gift Model): Allow any wallet to pay for any user
+      // JWT email identifies the user, wallet just provides payment
+      expect(res.status).toBe(200);
     });
 
     it('should handle S3 backend errors', async () => {

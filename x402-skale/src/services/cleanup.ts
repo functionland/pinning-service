@@ -52,14 +52,15 @@ export function stopCleanupCron(): void {
 /**
  * Delete user from S3 admin API
  * This deletes the user AND all their CIDs automatically (cascading delete)
+ *
+ * @param userId - The user's identity (JWT sub claim, typically email like user@example.com)
  */
-async function deleteUserFromS3(wallet: string): Promise<boolean> {
-  // x402 users have email format: {wallet}@x402.gateway
-  const email = `${wallet.toLowerCase()}@x402.gateway`;
-
+async function deleteUserFromS3(userId: string): Promise<boolean> {
+  // userId is the JWT sub claim (e.g., ehsan6sha@gmail.com)
+  // URL encode it because @ becomes %40
   try {
-    const url = `${config.s3BackendUrl}/admin/users/${encodeURIComponent(email)}`;
-    console.log(`[cleanup] Deleting user: ${email}`);
+    const url = `${config.s3BackendUrl}/admin/users/${encodeURIComponent(userId)}`;
+    console.log(`[cleanup] Deleting user: ${userId}`);
 
     const response = await fetch(url, {
       method: 'DELETE',
@@ -70,7 +71,7 @@ async function deleteUserFromS3(wallet: string): Promise<boolean> {
 
     // 200/204 = deleted, 404 = already gone (success either way)
     if (response.ok || response.status === 404) {
-      console.log(`[cleanup] User deleted successfully: ${email}`);
+      console.log(`[cleanup] User deleted successfully: ${userId}`);
       return true;
     }
 
@@ -78,7 +79,7 @@ async function deleteUserFromS3(wallet: string): Promise<boolean> {
     console.error(`[cleanup] S3 admin delete failed: ${response.status} ${errorText}`);
     return false;
   } catch (error) {
-    console.error(`[cleanup] S3 delete user error for ${email}:`, error);
+    console.error(`[cleanup] S3 delete user error for ${userId}:`, error);
     return false;
   }
 }
@@ -110,25 +111,26 @@ async function runCleanup(): Promise<void> {
       return;
     }
 
-    // Group by wallet to delete users (not individual objects)
-    const wallets = [...new Set(expiredObjects.map(obj => obj.wallet))];
-    console.log(`[cleanup] Processing ${wallets.length} users with ${expiredObjects.length} expired objects`);
+    // Group by user ID to delete users (not individual objects)
+    // wallet field stores the user_id (JWT sub claim, e.g., email)
+    const userIds = [...new Set(expiredObjects.map(obj => obj.wallet))];
+    console.log(`[cleanup] Processing ${userIds.length} users with ${expiredObjects.length} expired objects`);
 
-    for (const wallet of wallets) {
+    for (const userId of userIds) {
       try {
-        const success = await deleteUserFromS3(wallet);
+        const success = await deleteUserFromS3(userId);
 
         if (success) {
-          // Mark ALL objects for this wallet as deleted in our database
-          markAllUserObjectsDeleted(wallet);
+          // Mark ALL objects for this user as deleted in our database
+          markAllUserObjectsDeleted(userId);
           deleted++;
-          console.log(`[cleanup] Cleaned up user: ${wallet}`);
+          console.log(`[cleanup] Cleaned up user: ${userId}`);
         } else {
           errors++;
         }
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-        console.error(`[cleanup] Error cleaning up wallet ${wallet}:`, errorMsg);
+        console.error(`[cleanup] Error cleaning up user ${userId}:`, errorMsg);
         errors++;
       }
     }
@@ -159,14 +161,14 @@ export async function triggerCleanup(): Promise<{
 
   const expiredObjects = getExpiredObjects(100);
 
-  // Group by wallet
-  const wallets = [...new Set(expiredObjects.map(obj => obj.wallet))];
+  // Group by user ID (stored in wallet field)
+  const userIds = [...new Set(expiredObjects.map(obj => obj.wallet))];
 
-  for (const wallet of wallets) {
+  for (const userId of userIds) {
     try {
-      const success = await deleteUserFromS3(wallet);
+      const success = await deleteUserFromS3(userId);
       if (success) {
-        markAllUserObjectsDeleted(wallet);
+        markAllUserObjectsDeleted(userId);
         deleted++;
       } else {
         errors++;

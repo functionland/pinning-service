@@ -13,27 +13,30 @@ import type { CreditAdjustmentRequest, CreditAdjustmentResponse } from '../types
  * Adjust credits in the pinning service
  *
  * Converts USDC payment to FULA credits and adds to user's account.
+ * Uses JWT email (real user identity) for credit assignment.
  *
- * @param wallet - User's wallet address
+ * @param userEmail - User's email from JWT sub claim (real identity)
+ * @param wallet - Payer's wallet address (for logging only)
  * @param amountUsdc - Payment amount in USDC
  * @param paymentId - x402 payment ID for audit
  * @param sizeMb - Storage size in MB
  * @param ttlHours - TTL in hours
  */
 export async function adjustPinningCredits(params: {
+  userEmail: string;
   wallet: string;
   amountUsdc: number;
   paymentId: string;
   sizeMb: number;
   ttlHours: number;
 }): Promise<CreditAdjustmentResponse> {
-  const { wallet, amountUsdc, paymentId, sizeMb, ttlHours } = params;
+  const { userEmail, wallet, amountUsdc, paymentId, sizeMb, ttlHours } = params;
 
   // Convert USDC to FULA credits
   const fulaAmount = usdcToFula(amountUsdc);
 
-  // Create email from wallet address (x402 gateway format)
-  const email = `${wallet.toLowerCase()}@x402.gateway`;
+  // Use JWT email directly (real user identity, not synthetic wallet email)
+  const email = userEmail;
 
   // Build reason string for audit
   const reason = `x402:${paymentId}:${sizeMb.toFixed(2)}MB×${ttlHours}h`;
@@ -45,7 +48,7 @@ export async function adjustPinningCredits(params: {
   };
 
   try {
-    console.log(`[pinning] Adjusting credits: ${email} +${fulaAmount} FULA (${reason})`);
+    console.log(`[pinning] Adjusting credits: ${email} +${fulaAmount} FULA (paid by ${wallet}) (${reason})`);
 
     const response = await fetch(`${config.pinningWebuiUrl}/api/admin/adjust`, {
       method: 'POST',

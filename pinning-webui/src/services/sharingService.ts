@@ -419,7 +419,9 @@ export async function fetchSharedContentV2(
   // Use server-side proxy to fetch encrypted content from internal S3
   // The proxy endpoint is: /api/share/v2/fetch/{bucket}/{storageKey}
   // fula_client builds URL as: {endpoint}/{bucket}/{storageKey}
-  const proxyEndpoint = '/api/share/v2/fetch';
+  // Note: fula_client needs an absolute URL, not a relative path
+  const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch`;
+  console.log('[fetchSharedContentV2] Using proxy endpoint:', proxyEndpoint);
 
   // Create client with link's private key, pointing to our proxy
   const client = await createShareClient(shareData.secretKey, proxyEndpoint);

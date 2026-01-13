@@ -72,6 +72,8 @@ export interface AppConfig {
   nodeEnv: string;
   pinningServiceUrl: string;
   systemKey?: string;  // For x402 gateway integration
+  s3AdminJwt?: string;  // For internal S3 fetch (share links)
+  s3InternalUrl?: string;  // Internal S3 endpoint (default: http://127.0.0.1:9000)
 }
 
 // Database operations type (async for PostgreSQL)
@@ -971,6 +973,60 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
     } catch (error) {
       console.error('[webui] Error fetching shared content:', error);
+      res.status(500).json({ error: 'Failed to fetch shared content' });
+    }
+  });
+
+  // V2 Share fetch - proxies to internal S3 for encrypted content
+  // Client decrypts using fula_client after receiving encrypted bytes
+  app.get('/api/share/v2/fetch/:bucket/:storageKey', async (req: Request, res: Response) => {
+    try {
+      const { bucket, storageKey } = req.params;
+
+      if (!bucket || !storageKey) {
+        return res.status(400).json({ error: 'Missing bucket or storageKey parameter' });
+      }
+
+      // Validate bucket and storageKey (alphanumeric, underscores, hyphens, dots)
+      const safePattern = /^[a-zA-Z0-9_\-\.]+$/;
+      if (!safePattern.test(bucket) || !safePattern.test(storageKey)) {
+        return res.status(400).json({ error: 'Invalid bucket or storageKey format' });
+      }
+
+      const s3Jwt = config.s3AdminJwt;
+      if (!s3Jwt) {
+        console.error('[webui] S3_ADMIN_JWT not configured');
+        return res.status(500).json({ error: 'Share fetch not configured' });
+      }
+
+      const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
+      const fetchUrl = `${s3BaseUrl}/admin/fetch/${bucket}/${storageKey}`;
+
+      console.log('[webui] V2 share fetch:', { bucket, storageKey, url: fetchUrl });
+
+      const s3Response = await fetch(fetchUrl, {
+        headers: {
+          'Authorization': `Bearer ${s3Jwt}`,
+        },
+      });
+
+      if (!s3Response.ok) {
+        console.error('[webui] S3 fetch failed:', s3Response.status, await s3Response.text());
+        return res.status(s3Response.status).json({
+          error: s3Response.status === 404 ? 'Content not found' : 'Failed to fetch content'
+        });
+      }
+
+      const buffer = Buffer.from(await s3Response.arrayBuffer());
+
+      // Pass through content type if available
+      const contentType = s3Response.headers.get('content-type') || 'application/octet-stream';
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Length', buffer.length);
+
+      return res.send(buffer);
+    } catch (error) {
+      console.error('[webui] Error in v2 share fetch:', error);
       res.status(500).json({ error: 'Failed to fetch shared content' });
     }
   });

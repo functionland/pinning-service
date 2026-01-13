@@ -404,6 +404,9 @@ export async function processSharePayloadV2(
 
 /**
  * Fetch and decrypt v2 shared content using fula_client
+ *
+ * Uses server-side proxy to fetch encrypted content from internal S3,
+ * then decrypts client-side using fula_client.
  */
 export async function fetchSharedContentV2(
   shareData: ProcessedShareDataV2
@@ -413,10 +416,16 @@ export async function fetchSharedContentV2(
     storageKey: shareData.storageKey,
   });
 
-  // Create client with link's private key
-  const client = await createShareClient(shareData.secretKey);
+  // Use server-side proxy to fetch encrypted content from internal S3
+  // The proxy endpoint is: /api/share/v2/fetch/{bucket}/{storageKey}
+  // fula_client builds URL as: {endpoint}/{bucket}/{storageKey}
+  const proxyEndpoint = '/api/share/v2/fetch';
+
+  // Create client with link's private key, pointing to our proxy
+  const client = await createShareClient(shareData.secretKey, proxyEndpoint);
 
   // Decrypt using fula_client's getWithToken
+  // fula_client fetches from our proxy, which fetches from internal S3
   const decryptedData = await decryptWithShareToken(
     client,
     shareData.bucket,

@@ -20,6 +20,8 @@ const config: AppConfig = {
   nodeEnv: process.env.NODE_ENV || 'development',
   pinningServiceUrl: process.env.PINNING_SERVICE_URL || 'http://localhost:8080',
   systemKey: process.env.PINNING_SYSTEM_KEY,  // For x402 gateway integration
+  s3AdminJwt: process.env.S3_ADMIN_JWT,  // For internal S3 fetch (share links)
+  s3InternalUrl: process.env.S3_INTERNAL_URL || 'http://127.0.0.1:9000',
 };
 
 // Debug .env loading

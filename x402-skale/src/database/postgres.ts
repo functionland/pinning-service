@@ -4,7 +4,7 @@
  * This module provides PostgreSQL connectivity for the x402 payment gateway.
  */
 
-import pg from 'pg';
+import pg, { QueryResultRow } from 'pg';
 const { Pool } = pg;
 
 // Pool instance
@@ -54,7 +54,7 @@ export function getPool(): pg.Pool {
 }
 
 // Execute a query
-export async function query<T = any>(text: string, params?: any[]): Promise<pg.QueryResult<T>> {
+export async function query<T extends QueryResultRow = any>(text: string, params?: any[]): Promise<pg.QueryResult<T>> {
   const p = getPool();
   return p.query<T>(text, params);
 }

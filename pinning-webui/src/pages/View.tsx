@@ -4,7 +4,10 @@ import { useLanguage } from '../context/LanguageContext';
 import {
   parseCurrentShareUrl,
   fetchSharedContent,
+  fetchSharedContentV2,
   processSharePayload,
+  processSharePayloadV2,
+  isV2Payload,
   getViewerType,
   createBlobUrl,
   revokeBlobUrl,
@@ -12,6 +15,7 @@ import {
   decryptPasswordProtectedPayload,
   type SharePayload,
   type ProcessedShareData,
+  type ProcessedShareDataV2,
   type ViewerType,
 } from '../services/sharingService';
 import { downloadBlob } from '../services/encryptionService';
@@ -36,6 +40,7 @@ interface ViewState {
   needsPassword: boolean;
   payload: SharePayload | null;
   shareData: ProcessedShareData | null;
+  shareDataV2: ProcessedShareDataV2 | null;
   expiresAt: string | null;
   content: {
     data: Uint8Array;
@@ -56,6 +61,7 @@ export default function View() {
     needsPassword: false,
     payload: null,
     shareData: null,
+    shareDataV2: null,
     expiresAt: null,
     content: null,
   });
@@ -104,31 +110,64 @@ export default function View() {
         }
 
         try {
-          // Process the payload and unwrap the DEK
-          const shareData = await processSharePayload(payload, shareId);
+          // Check if this is a v2 payload (fula_client format)
+          if (isV2Payload(payload)) {
+            console.log('[View] V2 payload detected, using fula_client');
+            const shareDataV2 = await processSharePayloadV2(payload, shareId);
 
-          setState(s => ({
-            ...s,
-            payload: payload,
-            shareData,
-            expiresAt: shareData.expiresAt || null,
-          }));
-
-          // Check if expired
-          if (shareData.expiresAt) {
-            const expiry = new Date(shareData.expiresAt).getTime();
-            if (expiry < Date.now()) {
-              setState(s => ({
-                ...s,
-                loading: false,
-                error: 'This share link has expired.',
-              }));
-              return;
+            // Check if expired (v2 uses Unix timestamp)
+            if (shareDataV2.expiresAt) {
+              const now = Math.floor(Date.now() / 1000);
+              if (shareDataV2.expiresAt < now) {
+                setState(s => ({
+                  ...s,
+                  loading: false,
+                  error: 'This share link has expired.',
+                  expiresAt: new Date(shareDataV2.expiresAt * 1000).toISOString(),
+                }));
+                return;
+              }
             }
-          }
 
-          // Fetch and decrypt the content
-          await loadContent(shareData);
+            setState(s => ({
+              ...s,
+              payload: payload,
+              shareDataV2,
+              expiresAt: shareDataV2.expiresAt
+                ? new Date(shareDataV2.expiresAt * 1000).toISOString()
+                : null,
+            }));
+
+            // Fetch and decrypt the content using fula_client
+            await loadContentV2(shareDataV2);
+          } else {
+            // V1 payload - use existing manual decryption
+            console.log('[View] V1 payload detected, using manual decryption');
+            const shareData = await processSharePayload(payload, shareId);
+
+            setState(s => ({
+              ...s,
+              payload: payload,
+              shareData,
+              expiresAt: shareData.expiresAt || null,
+            }));
+
+            // Check if expired
+            if (shareData.expiresAt) {
+              const expiry = new Date(shareData.expiresAt).getTime();
+              if (expiry < Date.now()) {
+                setState(s => ({
+                  ...s,
+                  loading: false,
+                  error: 'This share link has expired.',
+                }));
+                return;
+              }
+            }
+
+            // Fetch and decrypt the content
+            await loadContent(shareData);
+          }
         } catch (error) {
           console.error('[View] Decryption error:', error);
           setState(s => ({
@@ -150,7 +189,7 @@ export default function View() {
     parseUrl();
   }, [shareId]);
 
-  // Load and decrypt content
+  // Load and decrypt content (v1)
   const loadContent = useCallback(async (shareData: ProcessedShareData) => {
     setState(s => ({ ...s, loading: true, error: null }));
 
@@ -168,6 +207,34 @@ export default function View() {
       }));
     } catch (error) {
       console.error('[View] Load error:', error);
+      setState(s => ({
+        ...s,
+        loading: false,
+        error: error instanceof Error ? error.message : 'Failed to load shared content.',
+      }));
+    }
+  }, []);
+
+  // Load and decrypt content (v2 - using fula_client)
+  const loadContentV2 = useCallback(async (shareDataV2: ProcessedShareDataV2) => {
+    setState(s => ({ ...s, loading: true, error: null }));
+
+    try {
+      const { data, mimeType, filename } = await fetchSharedContentV2(shareDataV2);
+      const blobUrl = createBlobUrl(data, mimeType);
+
+      setState(s => ({
+        ...s,
+        loading: false,
+        needsPassword: false,
+        shareDataV2,
+        expiresAt: shareDataV2.expiresAt
+          ? new Date(shareDataV2.expiresAt * 1000).toISOString()
+          : null,
+        content: { data, mimeType, filename, blobUrl },
+      }));
+    } catch (error) {
+      console.error('[View] Load error (v2):', error);
       setState(s => ({
         ...s,
         loading: false,
@@ -196,34 +263,70 @@ export default function View() {
         throw new Error('Failed to parse share URL');
       }
 
-      // Now process the inner payload like a normal public link
-      const shareData = await processSharePayload(innerPayload, parsed.shareId);
+      // Check if inner payload is v2 or v1
+      if (isV2Payload(innerPayload)) {
+        console.log('[View] Password-protected v2 payload detected');
+        const shareDataV2 = await processSharePayloadV2(innerPayload, parsed.shareId);
 
-      // Check if expired
-      if (shareData.expiresAt) {
-        const expiry = new Date(shareData.expiresAt).getTime();
-        if (expiry < Date.now()) {
-          setState(s => ({
-            ...s,
-            loading: false,
-            needsPassword: false,
-            error: 'This share link has expired.',
-          }));
-          setDecrypting(false);
-          return;
+        // Check if expired (v2 uses Unix timestamp)
+        if (shareDataV2.expiresAt) {
+          const now = Math.floor(Date.now() / 1000);
+          if (shareDataV2.expiresAt < now) {
+            setState(s => ({
+              ...s,
+              loading: false,
+              needsPassword: false,
+              error: 'This share link has expired.',
+              expiresAt: new Date(shareDataV2.expiresAt * 1000).toISOString(),
+            }));
+            setDecrypting(false);
+            return;
+          }
         }
+
+        // Update state with decrypted payload
+        setState(s => ({
+          ...s,
+          payload: innerPayload,
+          shareDataV2,
+          expiresAt: shareDataV2.expiresAt
+            ? new Date(shareDataV2.expiresAt * 1000).toISOString()
+            : null,
+        }));
+
+        // Fetch and decrypt the content using fula_client
+        await loadContentV2(shareDataV2);
+      } else {
+        // V1 payload - use existing manual decryption
+        console.log('[View] Password-protected v1 payload detected');
+        const shareData = await processSharePayload(innerPayload, parsed.shareId);
+
+        // Check if expired
+        if (shareData.expiresAt) {
+          const expiry = new Date(shareData.expiresAt).getTime();
+          if (expiry < Date.now()) {
+            setState(s => ({
+              ...s,
+              loading: false,
+              needsPassword: false,
+              error: 'This share link has expired.',
+            }));
+            setDecrypting(false);
+            return;
+          }
+        }
+
+        // Update state with decrypted payload
+        setState(s => ({
+          ...s,
+          payload: innerPayload,
+          shareData,
+          expiresAt: shareData.expiresAt || null,
+        }));
+
+        // Fetch and decrypt the content
+        await loadContent(shareData);
       }
-
-      // Update state with decrypted payload
-      setState(s => ({
-        ...s,
-        payload: innerPayload,
-        shareData,
-        expiresAt: shareData.expiresAt || null,
-      }));
-
-      // Fetch and decrypt the content
-      await loadContent(shareData);
     } catch (error) {
       console.error('[View] Password decryption error:', error);
       setState(s => ({

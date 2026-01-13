@@ -10,6 +10,7 @@
  */
 
 import { decrypt, importKey, getExtensionFromMimeType, deriveSharedSecret, deriveWrapKey } from './encryptionService';
+import { createShareClient, decryptWithShareToken } from './fulaClientService';
 
 // Constants
 const PBKDF2_ITERATIONS = 100000;
@@ -18,31 +19,50 @@ const KEY_LENGTH_BITS = 256;
 /**
  * Share payload structure (in URL fragment)
  *
- * FxFiles format for PUBLIC links:
- * - v: version number
- * - t: token object with share metadata
- * - sk: secret key (base64) - for decryption
+ * V1 FxFiles format (deprecated):
+ * - v: 1
+ * - t: token object with share metadata (parsed object)
+ * - sk: secret key (base64) - link private key for decryption
  * - b: bucket name
  * - k: file key/path
  * - l: label/name
  *
- * FxFiles format for PASSWORD-PROTECTED links:
+ * V2 FxFiles format (fula_client):
+ * - v: 2
+ * - t: ShareToken JSON string from fula_client.createShareTokenWithMode()
+ * - sk: secret key (base64) - link private key for decryption
+ * - b: bucket name
+ * - k: file key/path
+ * - l: label/name
+ * - f: filename (optional)
+ *
+ * Password-protected format (both v1 and v2):
  * - v: version number
  * - p: true (password protected flag)
  * - s: base64 salt (16 bytes)
- * - e: base64 encrypted inner payload (contains the public link format above)
+ * - e: base64 encrypted inner payload (contains the public link format)
+ * - b: bucket name (in outer payload for display)
+ * - k: file key (in outer payload for display)
  */
 export interface SharePayload {
-  v: number;           // Version
-  t?: ShareTokenData;  // Token object (not JSON string) - for public links
-  sk?: string;         // Secret key (base64) - for decryption - for public links
-  b?: string;          // Bucket name - for public links
-  k?: string;          // File key/path - for public links
-  l?: string;          // Label/name - for public links
+  v: number;           // Version (1 = legacy, 2 = fula_client)
+  t?: ShareTokenData | string;  // Token: object for v1, JSON string for v2
+  sk?: string;         // Secret key (base64) - link private key
+  b?: string;          // Bucket name
+  k?: string;          // File key/path
+  l?: string;          // Label/name
+  f?: string;          // Filename (v2 only)
   // Password-protected fields
   p?: boolean;         // Password protected flag
   s?: string;          // Base64 salt (16 bytes)
   e?: string;          // Base64 encrypted inner payload
+}
+
+/**
+ * Check if payload is v2 format (fula_client)
+ */
+export function isV2Payload(payload: SharePayload): boolean {
+  return payload.v === 2 && typeof payload.t === 'string';
 }
 
 /**
@@ -84,7 +104,7 @@ export interface ShareTokenData {
 }
 
 /**
- * Processed share data for content fetching
+ * Processed share data for content fetching (v1 format)
  */
 export interface ProcessedShareData {
   shareId: string;     // Share ID for content fetching
@@ -94,6 +114,21 @@ export interface ProcessedShareData {
   name: string;
   dek: CryptoKey;      // Decrypted data encryption key
   expiresAt?: string;
+  contentType?: string;
+}
+
+/**
+ * Processed share data for v2 format (fula_client)
+ */
+export interface ProcessedShareDataV2 {
+  version: 2;
+  shareId: string;
+  storageKey: string;  // IPFS CID from snapshot_binding.storage_key
+  bucket: string;
+  name: string;
+  tokenJson: string;   // Original token JSON for fula_client
+  secretKey: Uint8Array; // Link private key
+  expiresAt?: number;  // Unix timestamp
   contentType?: string;
 }
 
@@ -293,7 +328,107 @@ export async function decryptPasswordProtectedPayload(
 }
 
 /**
- * Process share payload and unwrap the DEK
+ * Process v2 share payload using fula_client
+ *
+ * V2 format uses fula_client's ShareToken format:
+ * - t: JSON string from createShareTokenWithMode()
+ * - sk: link private key (used as secretKey for createShareClient)
+ * - storageKey from token.snapshot_binding.storage_key
+ *
+ * Decryption is handled by fula_client.getWithToken()
+ */
+export async function processSharePayloadV2(
+  payload: SharePayload,
+  shareId: string
+): Promise<ProcessedShareDataV2> {
+  console.log('[processSharePayloadV2] Processing v2 payload');
+
+  if (!payload.sk) {
+    throw new Error('Share payload missing secret key (sk)');
+  }
+
+  if (typeof payload.t !== 'string') {
+    throw new Error('V2 payload requires token (t) to be a JSON string');
+  }
+
+  const tokenJson = payload.t;
+
+  // Parse token to extract metadata
+  let token: any;
+  try {
+    token = JSON.parse(tokenJson);
+  } catch (e) {
+    throw new Error('Invalid ShareToken JSON');
+  }
+
+  console.log('[processSharePayloadV2] Token parsed:', {
+    id: token.id,
+    mode: token.mode,
+    hasSnapshotBinding: !!token.snapshot_binding,
+    expiresAt: token.expires_at,
+  });
+
+  // Get storage key from snapshot_binding
+  const storageKey = token.snapshot_binding?.storage_key;
+  if (!storageKey) {
+    throw new Error('V2 share token missing snapshot_binding.storage_key');
+  }
+
+  // Decode secret key
+  const secretKey = base64ToUint8Array(payload.sk);
+  if (secretKey.length !== 32) {
+    throw new Error(`Invalid secret key length: ${secretKey.length} (expected 32)`);
+  }
+
+  // Determine filename
+  const name = payload.f || payload.l || extractFilename(payload.k) || 'shared_file';
+
+  return {
+    version: 2,
+    shareId,
+    storageKey,
+    bucket: payload.b || '',
+    name,
+    tokenJson,
+    secretKey,
+    expiresAt: token.expires_at,
+    contentType: undefined, // V2 tokens don't include content type in the standard format
+  };
+}
+
+/**
+ * Fetch and decrypt v2 shared content using fula_client
+ */
+export async function fetchSharedContentV2(
+  shareData: ProcessedShareDataV2
+): Promise<{ data: Uint8Array; mimeType: string; filename: string }> {
+  console.log('[fetchSharedContentV2] Fetching with fula_client:', {
+    bucket: shareData.bucket,
+    storageKey: shareData.storageKey,
+  });
+
+  // Create client with link's private key
+  const client = await createShareClient(shareData.secretKey);
+
+  // Decrypt using fula_client's getWithToken
+  const decryptedData = await decryptWithShareToken(
+    client,
+    shareData.bucket,
+    shareData.storageKey,
+    shareData.tokenJson
+  );
+
+  console.log('[fetchSharedContentV2] Decrypted data length:', decryptedData.length);
+
+  // Detect MIME type from decrypted content
+  const mimeType = shareData.contentType || detectMimeType(decryptedData);
+  const filename = shareData.name || `shared_file${getExtensionFromMimeType(mimeType)}`;
+
+  return { data: decryptedData, mimeType, filename };
+}
+
+/**
+ * Process share payload and unwrap the DEK (v1 format - deprecated)
  *
  * FxFiles uses HPKE (X25519 ECDH + HKDF) for key exchange:
  * 1. sk (secret key) is the link's private key
@@ -306,35 +441,42 @@ export async function processSharePayload(
   payload: SharePayload,
   shareId: string
 ): Promise<ProcessedShareData> {
-  // Extract CID from snapshotBinding if available (for snapshot mode)
-  const cid = payload.t?.snapshotBinding?.storageKey;
+  // V1 format expects t to be an object, not a string
+  if (typeof payload.t === 'string') {
+    throw new Error('V1 processSharePayload received string token - use processSharePayloadV2 for v2 format');
+  }
 
-  console.log('[processSharePayload] Payload:', {
+  const tokenData = payload.t as ShareTokenData | undefined;
+
+  // Extract CID from snapshotBinding if available (for snapshot mode)
+  const cid = tokenData?.snapshotBinding?.storageKey;
+
+  console.log('[processSharePayload] Payload (v1):', {
     v: payload.v,
     hasSk: !!payload.sk,
     skLength: payload.sk?.length,
     bucket: payload.b,
     path: payload.k,
     label: payload.l,
-    tokenId: payload.t?.id,
-    shareMode: payload.t?.shareMode,
-    hasSnapshotBinding: !!payload.t?.snapshotBinding,
+    tokenId: tokenData?.id,
+    shareMode: tokenData?.shareMode,
+    hasSnapshotBinding: !!tokenData?.snapshotBinding,
     cid: cid,
-    hasWrappedDek: !!payload.t?.wrappedDek,
-    hasEphemeralPublicKey: !!payload.t?.ephemeralPublicKey,
-    fileName: payload.t?.fileName,
-    contentType: payload.t?.contentType,
+    hasWrappedDek: !!tokenData?.wrappedDek,
+    hasEphemeralPublicKey: !!tokenData?.ephemeralPublicKey,
+    fileName: tokenData?.fileName,
+    contentType: tokenData?.contentType,
   });
 
   if (!payload.sk) {
     throw new Error('Share payload missing secret key (sk)');
   }
 
-  if (!payload.t?.wrappedDek) {
+  if (!tokenData?.wrappedDek) {
     throw new Error('Share payload missing wrapped DEK');
   }
 
-  if (!payload.t?.ephemeralPublicKey) {
+  if (!tokenData?.ephemeralPublicKey) {
     throw new Error('Share payload missing ephemeral public key');
   }
 
@@ -345,7 +487,7 @@ export async function processSharePayload(
 
   // Decode the ephemeral public key
   console.log('[processSharePayload] Decoding ephemeral public key...');
-  const ephemeralPublicKeyBytes = base64ToUint8Array(payload.t.ephemeralPublicKey);
+  const ephemeralPublicKeyBytes = base64ToUint8Array(tokenData.ephemeralPublicKey);
   console.log('[processSharePayload] Ephemeral public key length:', ephemeralPublicKeyBytes.length, 'bytes');
 
   // Derive shared secret using X25519 ECDH
@@ -363,7 +505,7 @@ export async function processSharePayload(
 
   // Decrypt the wrapped DEK
   console.log('[processSharePayload] Decrypting wrapped DEK...');
-  const wrappedDekBytes = base64ToUint8Array(payload.t.wrappedDek);
+  const wrappedDekBytes = base64ToUint8Array(tokenData.wrappedDek);
   console.log('[processSharePayload] Wrapped DEK length:', wrappedDekBytes.length, 'bytes');
 
   const dekBytes = await decrypt(wrappedDekBytes, wrapKey);
@@ -375,12 +517,12 @@ export async function processSharePayload(
   return {
     shareId,
     cid,
-    bucket: payload.b,
-    path: payload.k,
-    name: payload.t.fileName || payload.l || extractFilename(payload.k) || 'shared_file',
+    bucket: payload.b || '',
+    path: payload.k || '',
+    name: tokenData.fileName || payload.l || extractFilename(payload.k) || 'shared_file',
     dek,
-    expiresAt: payload.t.expiresAt,
-    contentType: payload.t.contentType,
+    expiresAt: tokenData.expiresAt,
+    contentType: tokenData.contentType,
   };
 }
 

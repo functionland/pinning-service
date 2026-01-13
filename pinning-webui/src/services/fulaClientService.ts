@@ -8,9 +8,14 @@
 import init, {
   createEncryptedClient,
   getDecrypted,
+  getWithToken,
+  acceptShare,
+  isShareValid,
   listBuckets,
   listDecrypted,
   listDirectory,
+  type EncryptedClient,
+  type AcceptedShare,
 } from '@functionland/fula-client';
 
 // Default gateway endpoint
@@ -139,6 +144,77 @@ export function clearFulaClient(): void {
   cachedClient = null;
   cachedSecretKey = null;
   cachedAccessToken = null;
+}
+
+// ============================================================================
+// Share Token Functions (for v2 share links)
+// ============================================================================
+
+/**
+ * Create a Fula client for share link decryption (no access token needed)
+ *
+ * For public share links, the secretKey is the link's private key (sk from URL)
+ *
+ * @param secretKey - 32-byte link private key
+ * @param endpoint - Gateway endpoint (default: https://ipfs.cloud.fx.land)
+ * @returns Encrypted client handle
+ */
+export async function createShareClient(
+  secretKey: Uint8Array,
+  endpoint: string = 'https://ipfs.cloud.fx.land'
+): Promise<EncryptedClient> {
+  await ensureWasmInitialized();
+
+  // Create client without access token (uses IPFS gateway directly)
+  const client = await createEncryptedClient(
+    { endpoint },
+    { secretKey }
+  );
+
+  return client;
+}
+
+/**
+ * Decrypt shared content using a share token
+ *
+ * @param client - Fula encrypted client (created with link's private key)
+ * @param bucket - Bucket name
+ * @param storageKey - Storage key (CID) of the encrypted file
+ * @param tokenJson - ShareToken JSON string from fula_client
+ * @returns Decrypted data as Uint8Array
+ */
+export async function decryptWithShareToken(
+  client: EncryptedClient,
+  bucket: string,
+  storageKey: string,
+  tokenJson: string
+): Promise<Uint8Array> {
+  const decrypted = await getWithToken(client, bucket, storageKey, tokenJson);
+  return new Uint8Array(decrypted);
+}
+
+/**
+ * Accept a share token and get an AcceptedShare handle
+ *
+ * @param client - Fula encrypted client
+ * @param tokenJson - ShareToken JSON string
+ * @returns AcceptedShare handle for use with getWithShare
+ */
+export async function acceptShareToken(
+  client: EncryptedClient,
+  tokenJson: string
+): Promise<AcceptedShare> {
+  return acceptShare(client, tokenJson);
+}
+
+/**
+ * Check if an accepted share is still valid (not expired)
+ *
+ * @param share - AcceptedShare handle
+ * @returns true if share is valid, false if expired
+ */
+export function isShareTokenValid(share: AcceptedShare): boolean {
+  return isShareValid(share);
 }
 
 /**

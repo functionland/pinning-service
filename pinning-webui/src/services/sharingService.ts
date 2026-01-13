@@ -124,7 +124,8 @@ export interface ProcessedShareData {
 export interface ProcessedShareDataV2 {
   version: 2;
   shareId: string;
-  storageKey: string;  // IPFS CID from snapshot_binding.storage_key
+  storageKey: string;  // IPFS CID from payload.cid or snapshot_binding.storage_key
+  originalPath: string; // Original file path (payload.k) - used for fula_client scope validation
   bucket: string;
   name: string;
   tokenJson: string;   // Original token JSON for fula_client
@@ -395,10 +396,18 @@ export async function processSharePayloadV2(
   // Determine filename
   const name = payload.f || payload.l || extractFilename(payload.k) || 'shared_file';
 
+  // Original path for fula_client scope validation (must match token.path_scope)
+  const originalPath = payload.k || token.path_scope;
+  if (!originalPath) {
+    throw new Error('V2 share: no original path found in payload.k or token.path_scope');
+  }
+  console.log('[processSharePayloadV2] Original path:', originalPath);
+
   return {
     version: 2,
     shareId,
     storageKey,
+    originalPath,
     bucket: payload.b || '',
     name,
     tokenJson,
@@ -416,7 +425,13 @@ export async function processSharePayloadV2(
  *
  * Two-step approach (as FxFiles does):
  * 1. acceptShare(client, tokenJson) → AcceptedShare handle
- * 2. getWithShare(client, bucket, storageKey, share) → decrypted data
+ * 2. getWithShare(client, bucket, originalPath, share) → decrypted data
+ *
+ * URL structure for proxy:
+ * - Endpoint: /api/share/v2/fetch/{cid}
+ * - fula_client builds: {endpoint}/{bucket}/{originalPath}
+ * - Final URL: /api/share/v2/fetch/{cid}/{bucket}/{originalPath}
+ * - Server uses {cid} to fetch from S3, ignores {originalPath}
  */
 export async function fetchSharedContentV2(
   shareData: ProcessedShareDataV2
@@ -424,13 +439,14 @@ export async function fetchSharedContentV2(
   console.log('[fetchSharedContentV2] Fetching with fula_client:', {
     bucket: shareData.bucket,
     storageKey: shareData.storageKey,
+    originalPath: shareData.originalPath,
   });
 
   // Use server-side proxy to fetch encrypted content from internal S3
-  // The proxy endpoint is: /api/share/v2/fetch/{bucket}/{storageKey}
-  // fula_client builds URL as: {endpoint}/{bucket}/{storageKey}
-  // Note: fula_client needs an absolute URL, not a relative path
-  const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch`;
+  // Include the CID in the endpoint URL so server knows what to fetch
+  // fula_client builds URL as: {endpoint}/{bucket}/{path}
+  // So final URL: /api/share/v2/fetch/{cid}/{bucket}/{originalPath}
+  const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch/${shareData.storageKey}`;
   console.log('[fetchSharedContentV2] Using proxy endpoint:', proxyEndpoint);
 
   // Create client with link's private key, pointing to our proxy
@@ -442,11 +458,13 @@ export async function fetchSharedContentV2(
   console.log('[fetchSharedContentV2] Share accepted successfully');
 
   // Step 2: Fetch and decrypt using the accepted share
+  // Pass originalPath (not storageKey) - fula_client validates path matches token.path_scope
   console.log('[fetchSharedContentV2] Step 2: Fetching with accepted share...');
+  console.log('[fetchSharedContentV2] Calling getWithShare with path:', shareData.originalPath);
   const decryptedData = await decryptWithAcceptedShare(
     client,
     shareData.bucket,
-    shareData.storageKey,
+    shareData.originalPath,  // Use original path for scope validation, not CID
     acceptedShare
   );
 

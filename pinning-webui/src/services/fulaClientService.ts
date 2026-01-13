@@ -9,6 +9,7 @@ import init, {
   createEncryptedClient,
   getDecrypted,
   getWithToken,
+  getWithShare,
   acceptShare,
   isShareValid,
   listBuckets,
@@ -215,6 +216,25 @@ export async function acceptShareToken(
  */
 export function isShareTokenValid(share: AcceptedShare): boolean {
   return isShareValid(share);
+}
+
+/**
+ * Decrypt shared content using an AcceptedShare handle (two-step approach)
+ *
+ * @param client - Fula encrypted client
+ * @param bucket - Bucket name
+ * @param storageKey - Storage key (CID) of the encrypted file
+ * @param share - AcceptedShare handle from acceptShareToken
+ * @returns Decrypted data as Uint8Array
+ */
+export async function decryptWithAcceptedShare(
+  client: EncryptedClient,
+  bucket: string,
+  storageKey: string,
+  share: AcceptedShare
+): Promise<Uint8Array> {
+  const decrypted = await getWithShare(client, bucket, storageKey, share);
+  return new Uint8Array(decrypted);
 }
 
 /**

@@ -10,7 +10,7 @@
  */
 
 import { decrypt, importKey, getExtensionFromMimeType, deriveSharedSecret, deriveWrapKey } from './encryptionService';
-import { createShareClient, decryptWithShareToken } from './fulaClientService';
+import { createShareClient, decryptWithShareToken, acceptShareToken, decryptWithAcceptedShare } from './fulaClientService';
 
 // Constants
 const PBKDF2_ITERATIONS = 100000;
@@ -407,6 +407,10 @@ export async function processSharePayloadV2(
  *
  * Uses server-side proxy to fetch encrypted content from internal S3,
  * then decrypts client-side using fula_client.
+ *
+ * Two-step approach (as FxFiles does):
+ * 1. acceptShare(client, tokenJson) → AcceptedShare handle
+ * 2. getWithShare(client, bucket, storageKey, share) → decrypted data
  */
 export async function fetchSharedContentV2(
   shareData: ProcessedShareDataV2
@@ -426,19 +430,35 @@ export async function fetchSharedContentV2(
   // Create client with link's private key, pointing to our proxy
   const client = await createShareClient(shareData.secretKey, proxyEndpoint);
 
-  // Decrypt using fula_client's getWithToken
-  // fula_client fetches from our proxy, which fetches from internal S3
-  const decryptedData = await decryptWithShareToken(
+  // Step 1: Accept the share token to get an AcceptedShare handle
+  console.log('[fetchSharedContentV2] Step 1: Accepting share token...');
+  const acceptedShare = await acceptShareToken(client, shareData.tokenJson);
+  console.log('[fetchSharedContentV2] Share accepted successfully');
+
+  // Step 2: Fetch and decrypt using the accepted share
+  console.log('[fetchSharedContentV2] Step 2: Fetching with accepted share...');
+  const decryptedData = await decryptWithAcceptedShare(
     client,
     shareData.bucket,
     shareData.storageKey,
-    shareData.tokenJson
+    acceptedShare
   );
 
   console.log('[fetchSharedContentV2] Decrypted data length:', decryptedData.length);
 
+  // Debug: Log first 20 bytes to verify decryption
+  const firstBytes = Array.from(decryptedData.slice(0, 20))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join(' ');
+  console.log('[fetchSharedContentV2] First 20 bytes (hex):', firstBytes);
+  // PNG magic: 89 50 4e 47 0d 0a 1a 0a
+  // JPEG magic: ff d8 ff
+  // GIF magic: 47 49 46 38
+
   // Detect MIME type from decrypted content
   const mimeType = shareData.contentType || detectMimeType(decryptedData);
+  console.log('[fetchSharedContentV2] Detected MIME type:', mimeType);
+
   const filename = shareData.name || `shared_file${getExtensionFromMimeType(mimeType)}`;
 
   return { data: decryptedData, mimeType, filename };

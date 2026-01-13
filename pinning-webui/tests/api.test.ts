@@ -1,13 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import type { Express } from 'express';
-import Database from 'better-sqlite3';
-import { createApp, initializeTestDatabase, createDbOps, type AppConfig } from '../server/app.js';
+import { createApp, createDbOps, type AppConfig, type DbOps } from '../server/app.js';
+import { createPostgresPool, closePool, query } from '../server/database/postgres.js';
 
-// Test configuration
+// Test configuration - uses PostgreSQL via environment variables
+// Set: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
 const testConfig: AppConfig = {
   port: 3099,
-  databasePath: ':memory:',
   googleClientId: 'test-google-client-id',
   sessionSecret: 'test-session-secret-for-testing-only',
   jwtSecret: 'test-jwt-secret-for-testing-only',
@@ -23,29 +23,40 @@ const testUser = {
   picture: 'https://example.com/avatar.jpg',
 };
 
+// Helper to clear all test data
+async function clearTestData(): Promise<void> {
+  // Clear in correct order to respect foreign key constraints
+  await query('DELETE FROM credit_history');
+  await query('DELETE FROM referrals');
+  await query('DELETE FROM referral_codes');
+  await query('DELETE FROM user_credits');
+  await query('DELETE FROM api_keys');
+  await query('DELETE FROM sessions');
+  await query('DELETE FROM pins');
+  await query('DELETE FROM users');
+  await query('DELETE FROM webui_users');
+}
+
 describe('API Endpoints', () => {
   let app: Express;
-  let db: Database.Database;
   let agent: request.Agent;
 
-  beforeAll(() => {
-    // Create test database and app
-    db = initializeTestDatabase();
-    const result = createApp(testConfig, db, { skipRateLimit: true });
+  beforeAll(async () => {
+    // Initialize PostgreSQL connection pool
+    createPostgresPool();
+
+    // Create test app
+    const result = createApp(testConfig, { skipRateLimit: true });
     app = result.app;
   });
 
-  afterAll(() => {
-    db.close();
+  afterAll(async () => {
+    await closePool();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // Clear tables before each test
-    db.exec('DELETE FROM api_keys');
-    db.exec('DELETE FROM webui_users');
-    db.exec('DELETE FROM users');
-    db.exec('DELETE FROM sessions');
-    db.exec('DELETE FROM pins');
+    await clearTestData();
 
     // Create fresh agent for session handling
     agent = request.agent(app);
@@ -54,8 +65,8 @@ describe('API Endpoints', () => {
   // Helper to create authenticated session
   async function createAuthenticatedSession() {
     // Manually create user and session in database
-    const dbOps = createDbOps(db, testConfig.jwtSecret);
-    dbOps.getOrCreateUser(testUser.email, testUser.name, testUser.picture);
+    const dbOps = createDbOps(testConfig.jwtSecret);
+    await dbOps.getOrCreateUser(testUser.email, testUser.name, testUser.picture);
 
     // Set session via direct manipulation (since we can't use Google OAuth in tests)
     // We'll use a custom test endpoint approach - inject session
@@ -88,7 +99,7 @@ describe('API Endpoints', () => {
 
     it('should return correct pin counts', async () => {
       // Add some test pins
-      db.exec(`
+      await query(`
         INSERT INTO pins (requestid, username, cid, name, status, size)
         VALUES ('req1', 'user1@test.com', 'Qm123', 'test1', 'pinned', 1000),
                ('req2', 'user1@test.com', 'Qm456', 'test2', 'pinned', 2000),
@@ -104,7 +115,7 @@ describe('API Endpoints', () => {
     });
 
     it('should exclude deleted pins from stats', async () => {
-      db.exec(`
+      await query(`
         INSERT INTO pins (requestid, username, cid, name, status, size)
         VALUES ('req1', 'user1@test.com', 'Qm123', 'test1', 'pinned', 1000),
                ('req2', 'user1@test.com', 'Qm456', 'test2', 'deleted', 2000)
@@ -205,136 +216,132 @@ describe('API Endpoints', () => {
 });
 
 describe('Database Operations', () => {
-  let db: Database.Database;
-  let dbOps: ReturnType<typeof createDbOps>;
+  let dbOps: DbOps;
 
-  beforeAll(() => {
-    db = initializeTestDatabase();
-    dbOps = createDbOps(db, testConfig.jwtSecret);
+  beforeAll(async () => {
+    // Initialize PostgreSQL connection pool
+    createPostgresPool();
+    dbOps = createDbOps(testConfig.jwtSecret);
   });
 
-  afterAll(() => {
-    db.close();
+  afterAll(async () => {
+    await closePool();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // Clear tables before each test
-    db.exec('DELETE FROM api_keys');
-    db.exec('DELETE FROM webui_users');
-    db.exec('DELETE FROM users');
-    db.exec('DELETE FROM sessions');
-    db.exec('DELETE FROM pins');
+    await clearTestData();
   });
 
   describe('User Operations', () => {
-    it('should create new user with API key', () => {
-      const result = dbOps.getOrCreateUser('new@test.com', 'New User', 'https://pic.com/avatar.jpg');
+    it('should create new user with API key', async () => {
+      const result = await dbOps.getOrCreateUser('new@test.com', 'New User', 'https://pic.com/avatar.jpg');
 
       expect(result.isNew).toBe(true);
       expect(result.email).toBe('new@test.com');
 
       // Verify user exists
-      const user = dbOps.getUserByEmail('new@test.com');
+      const user = await dbOps.getUserByEmail('new@test.com');
       expect(user).toBeDefined();
       expect(user.name).toBe('New User');
 
       // Verify API key was created
-      const keys = dbOps.getApiKeys('new@test.com');
+      const keys = await dbOps.getApiKeys('new@test.com');
       expect(keys.length).toBe(1);
     });
 
-    it('should return existing user without creating new', () => {
+    it('should return existing user without creating new', async () => {
       // First call creates user
-      dbOps.getOrCreateUser('existing@test.com', 'Existing User', 'https://pic.com/avatar.jpg');
+      await dbOps.getOrCreateUser('existing@test.com', 'Existing User', 'https://pic.com/avatar.jpg');
 
       // Second call returns existing
-      const result = dbOps.getOrCreateUser('existing@test.com', 'Updated Name', 'https://pic.com/new.jpg');
+      const result = await dbOps.getOrCreateUser('existing@test.com', 'Updated Name', 'https://pic.com/new.jpg');
 
       expect(result.isNew).toBe(false);
 
       // Should still have only one API key
-      const keys = dbOps.getApiKeys('existing@test.com');
+      const keys = await dbOps.getApiKeys('existing@test.com');
       expect(keys.length).toBe(1);
     });
 
-    it('should get user by email', () => {
-      dbOps.getOrCreateUser('findme@test.com', 'Find Me', 'https://pic.com/avatar.jpg');
+    it('should get user by email', async () => {
+      await dbOps.getOrCreateUser('findme@test.com', 'Find Me', 'https://pic.com/avatar.jpg');
 
-      const user = dbOps.getUserByEmail('findme@test.com');
+      const user = await dbOps.getUserByEmail('findme@test.com');
 
       expect(user).toBeDefined();
       expect(user.email).toBe('findme@test.com');
       expect(user.name).toBe('Find Me');
     });
 
-    it('should return undefined for non-existent user', () => {
-      const user = dbOps.getUserByEmail('nonexistent@test.com');
+    it('should return undefined for non-existent user', async () => {
+      const user = await dbOps.getUserByEmail('nonexistent@test.com');
 
       expect(user).toBeUndefined();
     });
   });
 
   describe('API Key Operations', () => {
-    beforeEach(() => {
-      dbOps.getOrCreateUser('keytest@test.com', 'Key Test', 'https://pic.com/avatar.jpg');
+    beforeEach(async () => {
+      await dbOps.getOrCreateUser('keytest@test.com', 'Key Test', 'https://pic.com/avatar.jpg');
     });
 
-    it('should create API key', () => {
-      const keyId = dbOps.createApiKey('keytest@test.com');
+    it('should create API key', async () => {
+      const keyId = await dbOps.createApiKey('keytest@test.com');
 
       expect(keyId).toBeDefined();
       expect(typeof keyId).toBe('string');
       expect(keyId.length).toBeGreaterThan(50); // JWT is long
 
       // Verify key exists
-      const keys = dbOps.getApiKeys('keytest@test.com');
+      const keys = await dbOps.getApiKeys('keytest@test.com');
       expect(keys.some(k => k.key_id === keyId)).toBe(true);
     });
 
-    it('should get all active API keys for user', () => {
+    it('should get all active API keys for user', async () => {
       // User already has one key from creation
-      dbOps.createApiKey('keytest@test.com');
-      dbOps.createApiKey('keytest@test.com');
+      await dbOps.createApiKey('keytest@test.com');
+      await dbOps.createApiKey('keytest@test.com');
 
-      const keys = dbOps.getApiKeys('keytest@test.com');
+      const keys = await dbOps.getApiKeys('keytest@test.com');
 
       expect(keys.length).toBe(3); // 1 from user creation + 2 new
     });
 
-    it('should delete API key', () => {
-      const keys = dbOps.getApiKeys('keytest@test.com');
+    it('should delete API key', async () => {
+      const keys = await dbOps.getApiKeys('keytest@test.com');
       const keyToDelete = keys[0].key_id;
 
-      const success = dbOps.deleteApiKey('keytest@test.com', keyToDelete);
+      const success = await dbOps.deleteApiKey('keytest@test.com', keyToDelete);
 
       expect(success).toBe(true);
 
       // Verify key is no longer returned
-      const remainingKeys = dbOps.getApiKeys('keytest@test.com');
+      const remainingKeys = await dbOps.getApiKeys('keytest@test.com');
       expect(remainingKeys.some(k => k.key_id === keyToDelete)).toBe(false);
     });
 
-    it('should return false when deleting non-existent key', () => {
-      const success = dbOps.deleteApiKey('keytest@test.com', 'non-existent-key');
+    it('should return false when deleting non-existent key', async () => {
+      const success = await dbOps.deleteApiKey('keytest@test.com', 'non-existent-key');
 
       expect(success).toBe(false);
     });
 
-    it('should return false when deleting key for wrong user', () => {
-      const keys = dbOps.getApiKeys('keytest@test.com');
+    it('should return false when deleting key for wrong user', async () => {
+      const keys = await dbOps.getApiKeys('keytest@test.com');
       const keyId = keys[0].key_id;
 
-      const success = dbOps.deleteApiKey('otheruser@test.com', keyId);
+      const success = await dbOps.deleteApiKey('otheruser@test.com', keyId);
 
       expect(success).toBe(false);
     });
 
-    it('should return multiple keys when created', () => {
+    it('should return multiple keys when created', async () => {
       // Create additional keys
-      const key1 = dbOps.createApiKey('keytest@test.com');
-      const key2 = dbOps.createApiKey('keytest@test.com');
+      const key1 = await dbOps.createApiKey('keytest@test.com');
+      const key2 = await dbOps.createApiKey('keytest@test.com');
 
-      const keys = dbOps.getApiKeys('keytest@test.com');
+      const keys = await dbOps.getApiKeys('keytest@test.com');
 
       // Should have 3 keys total (1 from user creation + 2 new)
       expect(keys.length).toBe(3);
@@ -345,78 +352,78 @@ describe('Database Operations', () => {
   });
 
   describe('Pin Operations', () => {
-    beforeEach(() => {
-      dbOps.getOrCreateUser('pintest@test.com', 'Pin Test', 'https://pic.com/avatar.jpg');
+    beforeEach(async () => {
+      await dbOps.getOrCreateUser('pintest@test.com', 'Pin Test', 'https://pic.com/avatar.jpg');
     });
 
-    it('should add pin', () => {
-      const requestId = dbOps.addPin('pintest@test.com', 'QmTestCid123', 'My Test Pin');
+    it('should add pin', async () => {
+      const requestId = await dbOps.addPin('pintest@test.com', 'QmTestCid123', 'My Test Pin');
 
       expect(requestId).toBeDefined();
       expect(typeof requestId).toBe('string');
 
       // Verify pin exists
-      const { pins } = dbOps.getUserPins('pintest@test.com', 1, 10);
+      const { pins } = await dbOps.getUserPins('pintest@test.com', 1, 10);
       expect(pins.length).toBe(1);
       expect(pins[0].cid).toBe('QmTestCid123');
       expect(pins[0].name).toBe('My Test Pin');
     });
 
-    it('should get user pins with pagination', () => {
+    it('should get user pins with pagination', async () => {
       // Add 25 pins
       for (let i = 0; i < 25; i++) {
-        dbOps.addPin('pintest@test.com', `QmCid${i}`, `Pin ${i}`);
+        await dbOps.addPin('pintest@test.com', `QmCid${i}`, `Pin ${i}`);
       }
 
       // Get first page
-      const page1 = dbOps.getUserPins('pintest@test.com', 1, 10);
+      const page1 = await dbOps.getUserPins('pintest@test.com', 1, 10);
       expect(page1.pins.length).toBe(10);
       expect(page1.total).toBe(25);
 
       // Get second page
-      const page2 = dbOps.getUserPins('pintest@test.com', 2, 10);
+      const page2 = await dbOps.getUserPins('pintest@test.com', 2, 10);
       expect(page2.pins.length).toBe(10);
 
       // Get third page
-      const page3 = dbOps.getUserPins('pintest@test.com', 3, 10);
+      const page3 = await dbOps.getUserPins('pintest@test.com', 3, 10);
       expect(page3.pins.length).toBe(5);
     });
 
-    it('should search pins by CID', () => {
-      dbOps.addPin('pintest@test.com', 'QmSearchable123', 'Pin A');
-      dbOps.addPin('pintest@test.com', 'QmOther456', 'Pin B');
+    it('should search pins by CID', async () => {
+      await dbOps.addPin('pintest@test.com', 'QmSearchable123', 'Pin A');
+      await dbOps.addPin('pintest@test.com', 'QmOther456', 'Pin B');
 
-      const { pins, total } = dbOps.getUserPins('pintest@test.com', 1, 10, 'Searchable');
+      const { pins, total } = await dbOps.getUserPins('pintest@test.com', 1, 10, 'Searchable');
 
       expect(total).toBe(1);
       expect(pins[0].cid).toBe('QmSearchable123');
     });
 
-    it('should not return deleted pins', () => {
-      dbOps.addPin('pintest@test.com', 'QmActive', 'Active Pin');
+    it('should not return deleted pins', async () => {
+      await dbOps.addPin('pintest@test.com', 'QmActive', 'Active Pin');
 
       // Manually mark a pin as deleted
-      db.exec(`
+      await query(`
         INSERT INTO pins (requestid, username, cid, name, status)
         VALUES ('deleted-req', 'pintest@test.com', 'QmDeleted', 'Deleted Pin', 'deleted')
       `);
 
-      const { pins, total } = dbOps.getUserPins('pintest@test.com', 1, 10);
+      const { pins, total } = await dbOps.getUserPins('pintest@test.com', 1, 10);
 
       expect(total).toBe(1);
       expect(pins[0].cid).toBe('QmActive');
     });
 
-    it('should only return pins for the specific user', () => {
-      dbOps.addPin('pintest@test.com', 'QmUserA', 'User A Pin');
+    it('should only return pins for the specific user', async () => {
+      await dbOps.addPin('pintest@test.com', 'QmUserA', 'User A Pin');
 
       // Add pin for different user
-      db.exec(`
+      await query(`
         INSERT INTO pins (requestid, username, cid, name, status)
         VALUES ('other-req', 'other@test.com', 'QmOther', 'Other Pin', 'pinned')
       `);
 
-      const { pins, total } = dbOps.getUserPins('pintest@test.com', 1, 10);
+      const { pins, total } = await dbOps.getUserPins('pintest@test.com', 1, 10);
 
       expect(total).toBe(1);
       expect(pins[0].cid).toBe('QmUserA');
@@ -424,41 +431,41 @@ describe('Database Operations', () => {
   });
 
   describe('Stats Operations', () => {
-    beforeEach(() => {
-      dbOps.getOrCreateUser('stats@test.com', 'Stats Test', 'https://pic.com/avatar.jpg');
+    beforeEach(async () => {
+      await dbOps.getOrCreateUser('stats@test.com', 'Stats Test', 'https://pic.com/avatar.jpg');
     });
 
-    it('should return correct stats for user', () => {
+    it('should return correct stats for user', async () => {
       // Add some pins with sizes
-      db.exec(`
+      await query(`
         INSERT INTO pins (requestid, username, cid, name, status, size)
         VALUES ('req1', 'stats@test.com', 'Qm1', 'Pin 1', 'pinned', 1000),
                ('req2', 'stats@test.com', 'Qm2', 'Pin 2', 'pinned', 2000),
                ('req3', 'stats@test.com', 'Qm3', 'Pin 3', 'queued', 500)
       `);
 
-      const stats = dbOps.getUserStats('stats@test.com');
+      const stats = await dbOps.getUserStats('stats@test.com');
 
       expect(stats.totalPins).toBe(3);
       expect(stats.totalSize).toBe(3500);
       expect(stats.memberSince).toBeDefined();
     });
 
-    it('should exclude deleted pins from stats', () => {
-      db.exec(`
+    it('should exclude deleted pins from stats', async () => {
+      await query(`
         INSERT INTO pins (requestid, username, cid, name, status, size)
         VALUES ('req1', 'stats@test.com', 'Qm1', 'Pin 1', 'pinned', 1000),
                ('req2', 'stats@test.com', 'Qm2', 'Pin 2', 'deleted', 2000)
       `);
 
-      const stats = dbOps.getUserStats('stats@test.com');
+      const stats = await dbOps.getUserStats('stats@test.com');
 
       expect(stats.totalPins).toBe(1);
       expect(stats.totalSize).toBe(1000);
     });
 
-    it('should return zero for user with no pins', () => {
-      const stats = dbOps.getUserStats('stats@test.com');
+    it('should return zero for user with no pins', async () => {
+      const stats = await dbOps.getUserStats('stats@test.com');
 
       expect(stats.totalPins).toBe(0);
       expect(stats.totalSize).toBe(0);
@@ -466,24 +473,24 @@ describe('Database Operations', () => {
   });
 
   describe('Profile Deletion', () => {
-    it('should delete all user data', () => {
+    it('should delete all user data', async () => {
       // Create user with data
-      dbOps.getOrCreateUser('delete@test.com', 'Delete Me', 'https://pic.com/avatar.jpg');
-      dbOps.createApiKey('delete@test.com');
-      dbOps.addPin('delete@test.com', 'QmToDelete', 'Pin to delete');
+      await dbOps.getOrCreateUser('delete@test.com', 'Delete Me', 'https://pic.com/avatar.jpg');
+      await dbOps.createApiKey('delete@test.com');
+      await dbOps.addPin('delete@test.com', 'QmToDelete', 'Pin to delete');
 
       // Verify data exists
-      expect(dbOps.getUserByEmail('delete@test.com')).toBeDefined();
-      expect(dbOps.getApiKeys('delete@test.com').length).toBeGreaterThan(0);
-      expect(dbOps.getUserPins('delete@test.com', 1, 10).total).toBeGreaterThan(0);
+      expect(await dbOps.getUserByEmail('delete@test.com')).toBeDefined();
+      expect((await dbOps.getApiKeys('delete@test.com')).length).toBeGreaterThan(0);
+      expect((await dbOps.getUserPins('delete@test.com', 1, 10)).total).toBeGreaterThan(0);
 
       // Delete profile
-      dbOps.deleteUserProfile('delete@test.com');
+      await dbOps.deleteUserProfile('delete@test.com');
 
       // Verify all data is gone
-      expect(dbOps.getUserByEmail('delete@test.com')).toBeUndefined();
-      expect(dbOps.getApiKeys('delete@test.com').length).toBe(0);
-      expect(dbOps.getUserPins('delete@test.com', 1, 10).total).toBe(0);
+      expect(await dbOps.getUserByEmail('delete@test.com')).toBeUndefined();
+      expect((await dbOps.getApiKeys('delete@test.com')).length).toBe(0);
+      expect((await dbOps.getUserPins('delete@test.com', 1, 10)).total).toBe(0);
     });
   });
 });
@@ -527,16 +534,15 @@ describe('JWT API Key Generation', () => {
 
 describe('Input Validation', () => {
   let app: Express;
-  let db: Database.Database;
 
-  beforeAll(() => {
-    db = initializeTestDatabase();
-    const result = createApp(testConfig, db, { skipRateLimit: true });
+  beforeAll(async () => {
+    createPostgresPool();
+    const result = createApp(testConfig, { skipRateLimit: true });
     app = result.app;
   });
 
-  afterAll(() => {
-    db.close();
+  afterAll(async () => {
+    await closePool();
   });
 
   describe('PIN CID Validation', () => {

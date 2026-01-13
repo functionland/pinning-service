@@ -4,9 +4,10 @@
  * Scans blockchain explorers for FULA token transfers to the vault address.
  * Auto-credits users whose linked wallets sent payments.
  * Runs every 10 minutes.
+ * Uses PostgreSQL for database operations.
  */
 
-import Database from 'better-sqlite3';
+import { query, getClient } from '../database/postgres.js';
 
 // Chain configuration
 interface ChainConfig {
@@ -90,7 +91,7 @@ async function fetchTokenTransfers(chainId: number, tokenAddress: string, vaultA
 }
 
 // Process a single token transfer
-function processTransfer(db: Database.Database, chainId: number, transfer: TokenTransfer): boolean {
+async function processTransfer(chainId: number, transfer: TokenTransfer): Promise<boolean> {
   const amountFula = toFula(transfer.value);
 
   // Skip tiny amounts (dust)
@@ -99,45 +100,49 @@ function processTransfer(db: Database.Database, chainId: number, transfer: Token
   }
 
   try {
-    // Insert transaction (ON CONFLICT IGNORE to handle duplicates)
-    const insertTx = db.prepare(`
-      INSERT OR IGNORE INTO token_transactions
-        (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, ingestion_source)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'cron')
-    `);
-
-    const result = insertTx.run(
-      transfer.hash,
-      chainId,
-      transfer.from.toLowerCase(),
-      transfer.to.toLowerCase(),
-      transfer.value,
-      amountFula,
-      parseInt(transfer.blockNumber),
-      parseInt(transfer.timeStamp)
+    // Insert transaction (ON CONFLICT DO NOTHING to handle duplicates)
+    const result = await query(
+      `INSERT INTO token_transactions
+         (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, ingestion_source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'cron')
+       ON CONFLICT (tx_hash, chain_id) DO NOTHING`,
+      [
+        transfer.hash,
+        chainId,
+        transfer.from.toLowerCase(),
+        transfer.to.toLowerCase(),
+        transfer.value,
+        amountFula,
+        parseInt(transfer.blockNumber),
+        parseInt(transfer.timeStamp)
+      ]
     );
 
-    if (result.changes === 0) {
+    if ((result.rowCount || 0) === 0) {
       // Transaction already exists
       return false;
     }
 
     // Check if sender has a linked wallet
-    const wallet = db.prepare(`
-      SELECT user_email FROM user_wallets
-      WHERE wallet_address = ? AND is_verified = 1
-    `).get(transfer.from.toLowerCase()) as { user_email: string } | undefined;
+    const walletResult = await query<{ user_email: string }>(
+      `SELECT user_email FROM user_wallets
+       WHERE wallet_address = $1 AND is_verified = 1`,
+      [transfer.from.toLowerCase()]
+    );
+
+    const wallet = walletResult.rows[0];
 
     if (wallet) {
       // Auto-credit the user
-      creditUser(db, wallet.user_email, amountFula, transfer.hash, chainId);
+      await creditUser(wallet.user_email, amountFula, transfer.hash, chainId);
 
       // Update transaction with user email
-      db.prepare(`
-        UPDATE token_transactions
-        SET user_email = ?, claimed_at = CURRENT_TIMESTAMP
-        WHERE tx_hash = ? AND chain_id = ?
-      `).run(wallet.user_email, transfer.hash, chainId);
+      await query(
+        `UPDATE token_transactions
+         SET user_email = $1, claimed_at = NOW()
+         WHERE tx_hash = $2 AND chain_id = $3`,
+        [wallet.user_email, transfer.hash, chainId]
+      );
 
       console.log(`[blockScanner] Auto-credited ${amountFula} FULA to ${wallet.user_email} from tx ${transfer.hash}`);
     }
@@ -150,59 +155,91 @@ function processTransfer(db: Database.Database, chainId: number, transfer: Token
 }
 
 // Credit FULA to a user's account
-function creditUser(db: Database.Database, userEmail: string, amount: number, txHash: string, chainId: number): void {
-  const transaction = db.transaction(() => {
+async function creditUser(userEmail: string, amount: number, txHash: string, chainId: number): Promise<void> {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
     // Get or create user credits record
-    const existing = db.prepare('SELECT balance_fula FROM user_credits WHERE user_email = ?').get(userEmail) as { balance_fula: number } | undefined;
+    const existingResult = await client.query<{ balance_fula: number }>(
+      'SELECT balance_fula FROM user_credits WHERE user_email = $1',
+      [userEmail]
+    );
+    const existing = existingResult.rows[0];
 
     let newBalance: number;
     if (existing) {
       newBalance = existing.balance_fula + amount;
-      db.prepare(`
-        UPDATE user_credits
-        SET balance_fula = ?, total_deposited_fula = total_deposited_fula + ?,
-            is_suspended = 0, updated_at = CURRENT_TIMESTAMP
-        WHERE user_email = ?
-      `).run(newBalance, amount, userEmail);
+      await client.query(
+        `UPDATE user_credits
+         SET balance_fula = $1, total_deposited_fula = total_deposited_fula + $2,
+             is_suspended = 0, updated_at = NOW()
+         WHERE user_email = $3`,
+        [newBalance, amount, userEmail]
+      );
     } else {
       newBalance = amount;
-      db.prepare(`
-        INSERT INTO user_credits (user_email, balance_fula, total_deposited_fula)
-        VALUES (?, ?, ?)
-      `).run(userEmail, amount, amount);
+      await client.query(
+        `INSERT INTO user_credits (user_email, balance_fula, total_deposited_fula)
+         VALUES ($1, $2, $3)`,
+        [userEmail, amount, amount]
+      );
     }
 
     // Log the deposit in credit history
-    db.prepare(`
-      INSERT INTO credit_history (user_email, tx_type, amount_fula, balance_after, reference_id)
-      VALUES (?, 'deposit', ?, ?, ?)
-    `).run(userEmail, amount, newBalance, `${chainId}:${txHash}`);
-  });
+    await client.query(
+      `INSERT INTO credit_history (user_email, tx_type, amount_fula, balance_after, reference_id)
+       VALUES ($1, 'deposit', $2, $3, $4)`,
+      [userEmail, amount, newBalance, `${chainId}:${txHash}`]
+    );
 
-  transaction();
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // Update the last scanned block for a chain
-function updateLastScannedBlock(db: Database.Database, chainId: number, blockNumber: number): void {
-  db.prepare(`
-    UPDATE chain_sync_state
-    SET last_scanned_block = ?, last_scan_at = CURRENT_TIMESTAMP
-    WHERE chain_id = ?
-  `).run(blockNumber, chainId);
+async function updateLastScannedBlock(chainId: number, blockNumber: number): Promise<void> {
+  await query(
+    `UPDATE chain_sync_state
+     SET last_scanned_block = $1, last_scan_at = NOW()
+     WHERE chain_id = $2`,
+    [blockNumber, chainId]
+  );
 }
 
 // Get enabled chains from database
-function getEnabledChains(db: Database.Database): ChainConfig[] {
-  return db.prepare(`
-    SELECT chain_id as chainId, chain_name as chainName, token_address as tokenAddress,
-           vault_address as vaultAddress, last_scanned_block as lastScannedBlock, is_enabled as isEnabled
+async function getEnabledChains(): Promise<ChainConfig[]> {
+  const result = await query<{
+    chainid: number;
+    chainname: string;
+    tokenaddress: string;
+    vaultaddress: string;
+    lastscannedblock: number;
+    isenabled: number;
+  }>(`
+    SELECT chain_id as chainid, chain_name as chainname, token_address as tokenaddress,
+           vault_address as vaultaddress, last_scanned_block as lastscannedblock, is_enabled as isenabled
     FROM chain_sync_state
     WHERE is_enabled = 1
-  `).all() as ChainConfig[];
+  `);
+
+  return result.rows.map(row => ({
+    chainId: row.chainid,
+    chainName: row.chainname,
+    tokenAddress: row.tokenaddress,
+    vaultAddress: row.vaultaddress,
+    lastScannedBlock: row.lastscannedblock,
+    isEnabled: row.isenabled === 1,
+  }));
 }
 
 // Scan a single chain
-async function scanChain(db: Database.Database, chain: ChainConfig): Promise<{ processed: number; newTxs: number }> {
+async function scanChain(chain: ChainConfig): Promise<{ processed: number; newTxs: number }> {
   console.log(`[blockScanner] Scanning ${chain.chainName} (${chain.chainId}) from block ${chain.lastScannedBlock}`);
 
   const transfers = await fetchTokenTransfers(
@@ -220,7 +257,7 @@ async function scanChain(db: Database.Database, chain: ChainConfig): Promise<{ p
   let maxBlock = chain.lastScannedBlock;
 
   for (const transfer of transfers) {
-    const isNew = processTransfer(db, chain.chainId, transfer);
+    const isNew = await processTransfer(chain.chainId, transfer);
     if (isNew) newTxs++;
 
     const blockNum = parseInt(transfer.blockNumber);
@@ -231,17 +268,17 @@ async function scanChain(db: Database.Database, chain: ChainConfig): Promise<{ p
 
   // Update last scanned block
   if (maxBlock > chain.lastScannedBlock) {
-    updateLastScannedBlock(db, chain.chainId, maxBlock);
+    await updateLastScannedBlock(chain.chainId, maxBlock);
   }
 
   return { processed: transfers.length, newTxs };
 }
 
 // Main scanner function
-export async function runBlockScanner(db: Database.Database): Promise<void> {
+export async function runBlockScanner(): Promise<void> {
   console.log('[blockScanner] Starting block scan...');
 
-  const chains = getEnabledChains(db);
+  const chains = await getEnabledChains();
 
   if (chains.length === 0) {
     console.log('[blockScanner] No enabled chains found');
@@ -260,7 +297,7 @@ export async function runBlockScanner(db: Database.Database): Promise<void> {
 
   for (const chain of chains) {
     try {
-      const { processed, newTxs } = await scanChain(db, chain);
+      const { processed, newTxs } = await scanChain(chain);
       totalProcessed += processed;
       totalNew += newTxs;
 
@@ -274,30 +311,30 @@ export async function runBlockScanner(db: Database.Database): Promise<void> {
   console.log(`[blockScanner] Scan complete. Processed: ${totalProcessed}, New: ${totalNew}`);
 }
 
-// Start the cron job
-let scannerInterval: NodeJS.Timeout | null = null;
+// Cron runner
+let scanInterval: NodeJS.Timeout | null = null;
 
-export function startBlockScanner(db: Database.Database, intervalMs: number = 10 * 60 * 1000): void {
-  if (scannerInterval) {
-    console.log('[blockScanner] Scanner already running');
+export function startBlockScanner(intervalMs: number = 10 * 60 * 1000): void {
+  if (scanInterval) {
+    console.warn('[blockScanner] Scanner already running');
     return;
   }
 
-  console.log(`[blockScanner] Starting scanner with ${intervalMs / 1000}s interval`);
-
   // Run immediately on start
-  runBlockScanner(db).catch(err => console.error('[blockScanner] Initial scan error:', err));
+  runBlockScanner().catch(err => console.error('[blockScanner] Error:', err));
 
-  // Then run on interval
-  scannerInterval = setInterval(() => {
-    runBlockScanner(db).catch(err => console.error('[blockScanner] Scan error:', err));
+  // Then run at interval
+  scanInterval = setInterval(() => {
+    runBlockScanner().catch(err => console.error('[blockScanner] Error:', err));
   }, intervalMs);
+
+  console.log(`[blockScanner] Started with interval: ${intervalMs}ms`);
 }
 
 export function stopBlockScanner(): void {
-  if (scannerInterval) {
-    clearInterval(scannerInterval);
-    scannerInterval = null;
-    console.log('[blockScanner] Scanner stopped');
+  if (scanInterval) {
+    clearInterval(scanInterval);
+    scanInterval = null;
+    console.log('[blockScanner] Stopped');
   }
 }

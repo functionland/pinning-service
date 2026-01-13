@@ -103,8 +103,8 @@ async function runCleanup(): Promise<void> {
   let errors = 0;
 
   try {
-    // Get expired objects
-    const expiredObjects = getExpiredObjects(CLEANUP_BATCH_SIZE);
+    // Get expired objects (async)
+    const expiredObjects = await getExpiredObjects(CLEANUP_BATCH_SIZE);
 
     if (expiredObjects.length === 0) {
       isRunning = false;
@@ -122,7 +122,7 @@ async function runCleanup(): Promise<void> {
 
         if (success) {
           // Mark ALL objects for this user as deleted in our database
-          markAllUserObjectsDeleted(userId);
+          await markAllUserObjectsDeleted(userId);
           deleted++;
           console.log(`[cleanup] Cleaned up user: ${userId}`);
         } else {
@@ -159,7 +159,7 @@ export async function triggerCleanup(): Promise<{
   let deleted = 0;
   let errors = 0;
 
-  const expiredObjects = getExpiredObjects(100);
+  const expiredObjects = await getExpiredObjects(100);
 
   // Group by user ID (stored in wallet field)
   const userIds = [...new Set(expiredObjects.map(obj => obj.wallet))];
@@ -168,7 +168,7 @@ export async function triggerCleanup(): Promise<{
     try {
       const success = await deleteUserFromS3(userId);
       if (success) {
-        markAllUserObjectsDeleted(userId);
+        await markAllUserObjectsDeleted(userId);
         deleted++;
       } else {
         errors++;

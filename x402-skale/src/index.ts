@@ -24,9 +24,9 @@ async function main() {
   // Log configuration
   logConfig();
 
-  // Initialize database
+  // Initialize database (async)
   console.log('\n[startup] Initializing database...');
-  initializeDatabase();
+  await initializeDatabase();
 
   // Start cleanup cron
   console.log('[startup] Starting cleanup cron...');
@@ -70,8 +70,8 @@ async function main() {
       console.log('[shutdown] HTTP server closed');
     });
 
-    // Close database
-    closeDatabase();
+    // Close database (async)
+    await closeDatabase();
 
     console.log('[shutdown] Goodbye!');
     process.exit(0);

@@ -1,59 +1,41 @@
 /**
  * Database Connection Manager
  *
- * Initializes SQLite database with schema and provides connection.
+ * PostgreSQL database connection using connection pool.
  */
 
-import Database from 'better-sqlite3';
-import { schema } from './schema.js';
-import { config } from '../config/index.js';
-
-let db: Database.Database | null = null;
+import {
+  createPostgresPool,
+  getPool,
+  query,
+  closePool,
+  isPostgresConfigured,
+  verifyConnection,
+} from './postgres.js';
 
 /**
- * Initialize the database connection and create schema
+ * Initialize the database connection pool
  */
-export function initializeDatabase(): Database.Database {
-  if (db) {
-    return db;
+export async function initializeDatabase(): Promise<void> {
+  console.log('[database] Initializing PostgreSQL connection pool...');
+  createPostgresPool();
+
+  // Verify connection
+  const connected = await verifyConnection();
+  if (!connected) {
+    throw new Error('Failed to connect to PostgreSQL database');
   }
 
-  console.log(`[database] Initializing SQLite at ${config.databasePath}`);
-
-  db = new Database(config.databasePath);
-
-  // Enable WAL mode for better concurrency
-  db.pragma('journal_mode = WAL');
-  db.pragma('busy_timeout = 5000');
-  db.pragma('foreign_keys = ON');
-
-  // Create schema
-  db.exec(schema);
-
-  console.log('[database] Schema initialized successfully');
-
-  return db;
+  console.log('[database] PostgreSQL connected successfully');
 }
 
 /**
- * Get the database connection (must call initializeDatabase first)
+ * Close the database connection pool
  */
-export function getDatabase(): Database.Database {
-  if (!db) {
-    throw new Error('Database not initialized. Call initializeDatabase() first.');
-  }
-  return db;
+export async function closeDatabase(): Promise<void> {
+  await closePool();
+  console.log('[database] Connection pool closed');
 }
 
-/**
- * Close the database connection
- */
-export function closeDatabase(): void {
-  if (db) {
-    db.close();
-    db = null;
-    console.log('[database] Connection closed');
-  }
-}
-
-export { Database };
+// Re-export for use in repositories
+export { query, getPool, isPostgresConfigured };

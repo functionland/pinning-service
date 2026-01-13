@@ -1,12 +1,12 @@
 {
   "name": "ipfs-gateway",
   "version": "2.0.0",
-  "description": "IPFS Gateway and Upload Server with SQLite authentication",
+  "description": "IPFS Gateway and Upload Server with PostgreSQL authentication",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "build": "npm run build:bundle && npm run build:binary",
-    "build:bundle": "esbuild server.js --bundle --platform=node --format=cjs --target=node18 --outfile=dist/bundle.cjs --external:better-sqlite3",
+    "build:bundle": "esbuild server.js --bundle --platform=node --format=cjs --target=node18 --outfile=dist/bundle.cjs --external:pg --external:pg-native",
     "build:binary": "pkg ./dist/bundle.cjs --target node18-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode",
     "dev": "node --watch server.js",
     "test": "node --test test/server.test.js",
@@ -23,11 +23,11 @@
     "outputPath": "dist"
   },
   "dependencies": {
-    "better-sqlite3": "^11.6.0",
     "express": "^4.21.2",
     "file-type": "^19.6.0",
     "kubo-rpc-client": "^5.0.2",
-    "multer": "^1.4.5-lts.1"
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.11.3"
   },
   "devDependencies": {
     "esbuild": "^0.24.0",

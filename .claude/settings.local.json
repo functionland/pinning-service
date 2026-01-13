@@ -9,7 +9,15 @@
       "Bash(npx tsc:*)",
       "Bash(npm run build:client:*)",
       "Bash(npm run typecheck:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(npm run build:server:*)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebSearch",
+      "WebFetch(domain:docs.fx.land)",
+      "Bash(npm search:*)",
+      "Bash(npm pack:*)",
+      "Bash(npm view:*)"
     ]
   }
 }

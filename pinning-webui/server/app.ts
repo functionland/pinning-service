@@ -4,9 +4,7 @@ import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import cookieParser from 'cookie-parser';
-import path from 'path';
 import http from 'http';
-import Database from 'better-sqlite3';
 import { OAuth2Client } from 'google-auth-library';
 import { v4 as uuidv4 } from 'uuid';
 import jwt from 'jsonwebtoken';
@@ -25,6 +23,21 @@ import {
   FULA_PER_GB_MONTH,
   rawToFula,
 } from './services/creditService.js';
+import {
+  createPostgresPool,
+  query,
+  closePool,
+  getOrCreateWebuiUser,
+  getWebuiUserByEmail,
+  getApiKeys,
+  createApiKey,
+  deleteApiKey,
+  getUserPins,
+  getUserStats,
+  deleteUserProfile,
+  addPin,
+  verifyApiKey,
+} from './database/postgres.js';
 
 // Session user type
 export interface SessionUser {
@@ -53,7 +66,6 @@ declare global {
 // App configuration type
 export interface AppConfig {
   port: number;
-  databasePath: string;
   googleClientId: string;
   sessionSecret: string;
   jwtSecret: string;
@@ -62,326 +74,51 @@ export interface AppConfig {
   systemKey?: string;  // For x402 gateway integration
 }
 
-// Database operations type
+// Database operations type (async for PostgreSQL)
 export interface DbOps {
-  getOrCreateUser(email: string, name: string, picture: string, referralCode?: string): any;
-  getUserByEmail(email: string): any;
-  getApiKeys(email: string): any[];
-  createApiKey(email: string): string;
-  deleteApiKey(email: string, keyId: string): boolean;
-  getUserPins(email: string, page: number, limit: number, search?: string): { pins: any[]; total: number };
-  getUserStats(email: string): any;
-  deleteUserProfile(email: string): void;
-  addPin(email: string, cid: string, name?: string): string;
+  getOrCreateUser(email: string, name: string, picture: string, referralCode?: string): Promise<any>;
+  getUserByEmail(email: string): Promise<any>;
+  getApiKeys(email: string): Promise<any[]>;
+  createApiKey(email: string): Promise<string>;
+  deleteApiKey(email: string, keyId: string): Promise<boolean>;
+  getUserPins(email: string, page: number, limit: number, search?: string): Promise<{ pins: any[]; total: number }>;
+  getUserStats(email: string): Promise<any>;
+  deleteUserProfile(email: string): Promise<void>;
+  addPin(email: string, cid: string, name?: string): Promise<string>;
 }
 
-// Initialize database schema
-export function initializeDatabase(dbPath: string): Database.Database {
-  const database = new Database(dbPath);
-  database.pragma('journal_mode = WAL');
-  database.pragma('busy_timeout = 5000');
+// Initialize PostgreSQL database connection pool
+// Schema is managed via migrations (migrations/postgres/*.sql)
+export async function initializeDatabase(): Promise<void> {
+  console.log('[webui] Initializing PostgreSQL connection pool...');
+  createPostgresPool();
 
-  // Extend schema for webui-specific tables
-  database.exec(`
-    -- API Keys table (extends existing sessions concept)
-    CREATE TABLE IF NOT EXISTS api_keys (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      key_id TEXT NOT NULL UNIQUE,
-      user_email TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_used_at DATETIME,
-      is_deleted INTEGER DEFAULT 0,
-      deleted_at DATETIME,
-      FOREIGN KEY (user_email) REFERENCES webui_users(email)
-    );
-
-    -- WebUI Users table
-    CREATE TABLE IF NOT EXISTS webui_users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      email TEXT NOT NULL UNIQUE,
-      name TEXT,
-      picture TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_login_at DATETIME,
-      total_upload_size INTEGER DEFAULT 0
-    );
-
-    -- Create indexes
-    CREATE INDEX IF NOT EXISTS idx_api_keys_user_email ON api_keys(user_email);
-    CREATE INDEX IF NOT EXISTS idx_api_keys_key_id ON api_keys(key_id);
-
-    -- ============================================
-    -- Web3 Payment Integration Tables
-    -- ============================================
-
-    -- User wallets (linked blockchain addresses)
-    CREATE TABLE IF NOT EXISTS user_wallets (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_email TEXT NOT NULL,
-      wallet_address TEXT NOT NULL,
-      chain_id INTEGER NOT NULL,
-      is_verified INTEGER DEFAULT 0,
-      connected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(user_email, wallet_address, chain_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_user_wallets_email ON user_wallets(user_email);
-    CREATE INDEX IF NOT EXISTS idx_user_wallets_address ON user_wallets(wallet_address);
-
-    -- Token transactions (FULA payments to vault)
-    CREATE TABLE IF NOT EXISTS token_transactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      tx_hash TEXT NOT NULL,
-      chain_id INTEGER NOT NULL,
-      from_address TEXT NOT NULL,
-      to_address TEXT NOT NULL,
-      amount_raw TEXT NOT NULL,
-      amount_fula REAL NOT NULL,
-      block_number INTEGER NOT NULL,
-      block_timestamp INTEGER NOT NULL,
-      user_email TEXT,
-      claimed_at DATETIME,
-      ingestion_source TEXT CHECK(ingestion_source IN ('cron', 'manual')),
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(tx_hash, chain_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_token_tx_from ON token_transactions(from_address);
-    CREATE INDEX IF NOT EXISTS idx_token_tx_user ON token_transactions(user_email);
-    CREATE INDEX IF NOT EXISTS idx_token_tx_hash ON token_transactions(tx_hash);
-
-    -- Chain sync state (for block scanner cron)
-    CREATE TABLE IF NOT EXISTS chain_sync_state (
-      chain_id INTEGER PRIMARY KEY,
-      chain_name TEXT NOT NULL,
-      last_scanned_block INTEGER DEFAULT 0,
-      last_scan_at DATETIME,
-      is_enabled INTEGER DEFAULT 1,
-      token_address TEXT NOT NULL,
-      vault_address TEXT NOT NULL
-    );
-
-    -- User credits (FULA balance for storage)
-    CREATE TABLE IF NOT EXISTS user_credits (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_email TEXT NOT NULL UNIQUE,
-      balance_fula REAL DEFAULT 0,
-      total_deposited_fula REAL DEFAULT 0,
-      total_deducted_fula REAL DEFAULT 0,
-      last_deduction_at DATETIME,
-      is_suspended INTEGER DEFAULT 0,
-      suspended_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE INDEX IF NOT EXISTS idx_user_credits_email ON user_credits(user_email);
-    CREATE INDEX IF NOT EXISTS idx_user_credits_suspended ON user_credits(is_suspended);
-
-    -- Credit history (audit log)
-    CREATE TABLE IF NOT EXISTS credit_history (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_email TEXT NOT NULL,
-      tx_type TEXT CHECK(tx_type IN ('deposit', 'hourly_deduction', 'adjustment')),
-      amount_fula REAL NOT NULL,
-      balance_after REAL NOT NULL,
-      reference_id TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE INDEX IF NOT EXISTS idx_credit_history_email ON credit_history(user_email);
-    CREATE INDEX IF NOT EXISTS idx_credit_history_type ON credit_history(tx_type);
-
-    -- ============================================
-    -- Referral System Tables
-    -- ============================================
-
-    -- Referral codes table (one unique code per user)
-    CREATE TABLE IF NOT EXISTS referral_codes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_email TEXT NOT NULL UNIQUE,
-      code TEXT NOT NULL UNIQUE,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_email) REFERENCES webui_users(email)
-    );
-    CREATE INDEX IF NOT EXISTS idx_referral_codes_code ON referral_codes(code);
-    CREATE INDEX IF NOT EXISTS idx_referral_codes_email ON referral_codes(user_email);
-
-    -- Referrals tracking table (who referred whom)
-    CREATE TABLE IF NOT EXISTS referrals (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      referrer_email TEXT NOT NULL,
-      referred_email TEXT NOT NULL UNIQUE,
-      referral_code TEXT NOT NULL,
-      referred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (referrer_email) REFERENCES webui_users(email),
-      FOREIGN KEY (referred_email) REFERENCES webui_users(email),
-      FOREIGN KEY (referral_code) REFERENCES referral_codes(code)
-    );
-    CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_email);
-    CREATE INDEX IF NOT EXISTS idx_referrals_referred ON referrals(referred_email);
-  `);
-
-  // Add app_downloaded column to webui_users if it doesn't exist (for tracking download clicks)
+  // Verify connection
   try {
-    database.exec(`ALTER TABLE webui_users ADD COLUMN app_downloaded INTEGER DEFAULT 0`);
-  } catch {
-    // Column already exists, ignore
+    await query('SELECT 1');
+    console.log('[webui] PostgreSQL connection established');
+  } catch (error) {
+    console.error('[webui] Failed to connect to PostgreSQL:', error);
+    throw error;
   }
-  try {
-    database.exec(`ALTER TABLE webui_users ADD COLUMN app_downloaded_at DATETIME`);
-  } catch {
-    // Column already exists, ignore
-  }
+}
 
-  // Seed chain_sync_state with supported chains (if empty)
-  const chainCount = database.prepare('SELECT COUNT(*) as count FROM chain_sync_state').get() as { count: number };
-  if (chainCount.count === 0) {
+// Seed chain_sync_state with supported chains (if empty)
+export async function seedChainSyncState(): Promise<void> {
+  const chainCount = await query<{ count: string }>('SELECT COUNT(*) as count FROM chain_sync_state');
+  if (parseInt(chainCount.rows[0]?.count || '0', 10) === 0) {
     const vaultAddress = process.env.VAULT_ADDRESS || '0x0000000000000000000000000000000000000000';
     // Starting blocks set to recent blocks to avoid scanning from genesis
-    database.prepare(`
+    await query(`
       INSERT INTO chain_sync_state (chain_id, chain_name, token_address, vault_address, is_enabled, last_scanned_block)
       VALUES
-        (1, 'Ethereum', '0x92217cCaEDBdbc54C76c15feA18823db1558fDc9', ?, 1, 24179670),
-        (8453, 'Base', '0x9e12735d77c72c5C3670636D428f2F3815d8A4cB', ?, 1, 40480508),
-        (2046399126, 'Skale Europa', '0x9e12735d77c72c5C3670636D428f2F3815d8A4cB', ?, 1, 22856425)
-    `).run(vaultAddress, vaultAddress, vaultAddress);
-  } else {
-    // Migration: Update chains that are still at block 0 to proper starting blocks
-    database.prepare(`
-      UPDATE chain_sync_state SET last_scanned_block = 24179670 WHERE chain_id = 1 AND last_scanned_block = 0
-    `).run();
-    database.prepare(`
-      UPDATE chain_sync_state SET last_scanned_block = 40480508 WHERE chain_id = 8453 AND last_scanned_block = 0
-    `).run();
-    database.prepare(`
-      UPDATE chain_sync_state SET last_scanned_block = 22856425 WHERE chain_id = 2046399126 AND last_scanned_block = 0
-    `).run();
+        (1, 'Ethereum', '0x92217cCaEDBdbc54C76c15feA18823db1558fDc9', $1, 1, 24179670),
+        (8453, 'Base', '0x9e12735d77c72c5C3670636D428f2F3815d8A4cB', $2, 1, 40480508),
+        (2046399126, 'Skale Europa', '0x9e12735d77c72c5C3670636D428f2F3815d8A4cB', $3, 1, 22856425)
+      ON CONFLICT (chain_id) DO NOTHING
+    `, [vaultAddress, vaultAddress, vaultAddress]);
+    console.log('[webui] Seeded chain_sync_state with supported chains');
   }
-
-  return database;
-}
-
-// Initialize test database with additional tables needed for testing
-export function initializeTestDatabase(): Database.Database {
-  const database = new Database(':memory:');
-  database.pragma('journal_mode = WAL');
-
-  database.exec(`
-    -- Users table (main pinning service table)
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      pool_id INTEGER DEFAULT 1
-    );
-
-    -- Sessions table (main pinning service table)
-    CREATE TABLE IF NOT EXISTS sessions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_token TEXT NOT NULL UNIQUE,
-      username TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-
-    -- Pins table (main pinning service table)
-    CREATE TABLE IF NOT EXISTS pins (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      requestid TEXT NOT NULL UNIQUE,
-      username TEXT NOT NULL,
-      cid TEXT NOT NULL,
-      name TEXT,
-      name_lowercase TEXT,
-      status TEXT DEFAULT 'queued',
-      size INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-
-    -- API Keys table
-    CREATE TABLE IF NOT EXISTS api_keys (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      key_id TEXT NOT NULL UNIQUE,
-      user_email TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_used_at DATETIME,
-      is_deleted INTEGER DEFAULT 0,
-      deleted_at DATETIME
-    );
-
-    -- WebUI Users table
-    CREATE TABLE IF NOT EXISTS webui_users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      email TEXT NOT NULL UNIQUE,
-      name TEXT,
-      picture TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_login_at DATETIME,
-      total_upload_size INTEGER DEFAULT 0
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_api_keys_user_email ON api_keys(user_email);
-    CREATE INDEX IF NOT EXISTS idx_api_keys_key_id ON api_keys(key_id);
-
-    -- Web3 Payment Tables (same as production)
-    CREATE TABLE IF NOT EXISTS user_wallets (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_email TEXT NOT NULL,
-      wallet_address TEXT NOT NULL,
-      chain_id INTEGER NOT NULL,
-      is_verified INTEGER DEFAULT 0,
-      connected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(user_email, wallet_address, chain_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS token_transactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      tx_hash TEXT NOT NULL,
-      chain_id INTEGER NOT NULL,
-      from_address TEXT NOT NULL,
-      to_address TEXT NOT NULL,
-      amount_raw TEXT NOT NULL,
-      amount_fula REAL NOT NULL,
-      block_number INTEGER NOT NULL,
-      block_timestamp INTEGER NOT NULL,
-      user_email TEXT,
-      claimed_at DATETIME,
-      ingestion_source TEXT CHECK(ingestion_source IN ('cron', 'manual')),
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(tx_hash, chain_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS chain_sync_state (
-      chain_id INTEGER PRIMARY KEY,
-      chain_name TEXT NOT NULL,
-      last_scanned_block INTEGER DEFAULT 0,
-      last_scan_at DATETIME,
-      is_enabled INTEGER DEFAULT 1,
-      token_address TEXT NOT NULL,
-      vault_address TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS user_credits (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_email TEXT NOT NULL UNIQUE,
-      balance_fula REAL DEFAULT 0,
-      total_deposited_fula REAL DEFAULT 0,
-      total_deducted_fula REAL DEFAULT 0,
-      last_deduction_at DATETIME,
-      is_suspended INTEGER DEFAULT 0,
-      suspended_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS credit_history (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_email TEXT NOT NULL,
-      tx_type TEXT CHECK(tx_type IN ('deposit', 'hourly_deduction', 'adjustment')),
-      amount_fula REAL NOT NULL,
-      balance_after REAL NOT NULL,
-      reference_id TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  return database;
 }
 
 // Generate JWT API key
@@ -419,158 +156,44 @@ function maskEmail(email: string): string {
   return `${start}${masked}${end}@${domain}`;
 }
 
-// Create database operations
-export function createDbOps(db: Database.Database, jwtSecret: string): DbOps {
+// Create database operations using PostgreSQL
+// These functions wrap the postgres.ts module functions
+export function createDbOps(jwtSecret: string): DbOps {
   return {
-    getOrCreateUser(email: string, name: string, picture: string, referralCode?: string) {
-      const existing = db.prepare('SELECT * FROM webui_users WHERE email = ?').get(email) as any;
-
-      if (existing) {
-        db.prepare('UPDATE webui_users SET last_login_at = CURRENT_TIMESTAMP, name = ?, picture = ? WHERE email = ?')
-          .run(name, picture, email);
-        return { ...existing, isNew: false };
-      }
-
-      db.prepare('INSERT INTO webui_users (email, name, picture, last_login_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)')
-        .run(email, name, picture);
-
-      // Create first API key automatically
-      const keyId = generateJwtApiKey(email, jwtSecret);
-      db.prepare('INSERT INTO api_keys (key_id, user_email) VALUES (?, ?)').run(keyId, email);
-
-      // Also create entry in main users/sessions tables for pinning service compatibility
-      const existingMainUser = db.prepare('SELECT * FROM users WHERE username = ?').get(email);
-      if (!existingMainUser) {
-        db.prepare('INSERT INTO users (username, password_hash, pool_id) VALUES (?, ?, 1)')
-          .run(email, 'google-oauth-user-' + uuidv4());
-      }
-
-      // Create session token that matches the API key
-      db.prepare('INSERT OR REPLACE INTO sessions (session_token, username, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)')
-        .run(keyId, email);
-
-      // Generate referral code for this new user
-      let newReferralCode = generateReferralCode();
-      // Ensure uniqueness with retry loop
-      while (db.prepare('SELECT 1 FROM referral_codes WHERE code = ?').get(newReferralCode)) {
-        newReferralCode = generateReferralCode();
-      }
-      db.prepare('INSERT INTO referral_codes (user_email, code) VALUES (?, ?)').run(email, newReferralCode);
-
-      // If referred by someone, create referral record
-      if (referralCode) {
-        const referrer = db.prepare('SELECT user_email FROM referral_codes WHERE code = ?').get(referralCode) as { user_email: string } | undefined;
-        // Prevent self-referral and only link if referrer exists
-        if (referrer && referrer.user_email !== email) {
-          db.prepare('INSERT OR IGNORE INTO referrals (referrer_email, referred_email, referral_code) VALUES (?, ?, ?)')
-            .run(referrer.user_email, email, referralCode);
-        }
-      }
-
-      return { email, name, picture, isNew: true };
+    async getOrCreateUser(email: string, name: string, picture: string, referralCode?: string) {
+      return getOrCreateWebuiUser(email, name, picture, jwtSecret, generateJwtApiKey, referralCode);
     },
 
-    getUserByEmail(email: string) {
-      return db.prepare('SELECT * FROM webui_users WHERE email = ?').get(email) as any;
+    async getUserByEmail(email: string) {
+      return getWebuiUserByEmail(email);
     },
 
-    getApiKeys(email: string) {
-      return db.prepare(
-        'SELECT key_id, created_at, last_used_at FROM api_keys WHERE user_email = ? AND is_deleted = 0 ORDER BY created_at DESC'
-      ).all(email) as any[];
+    async getApiKeys(email: string) {
+      return getApiKeys(email);
     },
 
-    createApiKey(email: string): string {
-      const keyId = generateJwtApiKey(email, jwtSecret);
-      db.prepare('INSERT INTO api_keys (key_id, user_email) VALUES (?, ?)').run(keyId, email);
-
-      // Also create corresponding session for pinning service
-      db.prepare('INSERT OR REPLACE INTO sessions (session_token, username, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)')
-        .run(keyId, email);
-
-      return keyId;
+    async createApiKey(email: string): Promise<string> {
+      return createApiKey(email, jwtSecret, generateJwtApiKey);
     },
 
-    deleteApiKey(email: string, keyId: string): boolean {
-      const result = db.prepare(
-        'UPDATE api_keys SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP WHERE user_email = ? AND key_id = ? AND is_deleted = 0'
-      ).run(email, keyId);
-
-      // Remove from sessions table
-      db.prepare('DELETE FROM sessions WHERE session_token = ? AND username = ?').run(keyId, email);
-
-      return result.changes > 0;
+    async deleteApiKey(email: string, keyId: string): Promise<boolean> {
+      return deleteApiKey(email, keyId);
     },
 
-    getUserPins(email: string, page: number, limit: number, search?: string) {
-      const offset = (page - 1) * limit;
-
-      let whereClause = 'WHERE username = ? AND status != \'deleted\'';
-      const params: any[] = [email];
-
-      if (search && search.trim()) {
-        whereClause += ' AND (cid LIKE ? OR requestid LIKE ?)';
-        const searchPattern = `%${search.trim()}%`;
-        params.push(searchPattern, searchPattern);
-      }
-
-      const pins = db.prepare(`
-        SELECT requestid as request_id, cid, name, created_at, status, size
-        FROM pins
-        ${whereClause}
-        ORDER BY created_at DESC
-        LIMIT ? OFFSET ?
-      `).all(...params, limit, offset) as any[];
-
-      const countResult = db.prepare(`
-        SELECT COUNT(*) as total
-        FROM pins
-        ${whereClause}
-      `).get(...params) as any;
-
-      return { pins, total: countResult?.total || 0 };
+    async getUserPins(email: string, page: number, limit: number, search?: string) {
+      return getUserPins(email, page, limit, search);
     },
 
-    getUserStats(email: string) {
-      const stats = db.prepare(`
-        SELECT
-          COUNT(*) as total_pins,
-          COALESCE(SUM(size), 0) as total_size
-        FROM pins
-        WHERE username = ? AND status != 'deleted'
-      `).get(email) as any;
-
-      const user = db.prepare('SELECT last_login_at, created_at FROM webui_users WHERE email = ?').get(email) as any;
-
-      return {
-        totalPins: stats?.total_pins || 0,
-        totalSize: stats?.total_size || 0,
-        lastLogin: user?.last_login_at,
-        memberSince: user?.created_at,
-      };
+    async getUserStats(email: string) {
+      return getUserStats(email);
     },
 
-    deleteUserProfile(email: string) {
-      const transaction = db.transaction(() => {
-        db.prepare('DELETE FROM pins WHERE username = ?').run(email);
-        db.prepare('DELETE FROM users WHERE username = ?').run(email);
-        db.prepare('DELETE FROM sessions WHERE username = ?').run(email);
-        db.prepare('DELETE FROM api_keys WHERE user_email = ?').run(email);
-        db.prepare('DELETE FROM webui_users WHERE email = ?').run(email);
-      });
-
-      transaction();
+    async deleteUserProfile(email: string) {
+      return deleteUserProfile(email);
     },
 
-    addPin(email: string, cid: string, name?: string) {
-      const requestId = uuidv4();
-      const nameLower = (name || '').toLowerCase();
-      db.prepare(`
-        INSERT INTO pins (requestid, username, cid, name, name_lowercase, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `).run(requestId, email, cid, name || '', nameLower);
-
-      return requestId;
+    async addPin(email: string, cid: string, name?: string) {
+      return addPin(email, cid, name);
     },
   };
 }
@@ -653,8 +276,8 @@ export function httpDelete(url: string, headers: Record<string, string>): Promis
 }
 
 // Create Express app
-export function createApp(config: AppConfig, db: Database.Database, options?: { skipRateLimit?: boolean }) {
-  const dbOps = createDbOps(db, config.jwtSecret);
+export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean }) {
+  const dbOps = createDbOps(config.jwtSecret);
   const googleClient = new OAuth2Client(config.googleClientId);
 
   const app = express();
@@ -766,7 +389,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
 
   // API token auth middleware (Bearer token for external apps)
   // Looks up token in api_keys table - same approach as Go pinning service
-  function requireApiAuth(req: Request, res: Response, next: NextFunction) {
+  async function requireApiAuth(req: Request, res: Response, next: NextFunction) {
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -776,16 +399,19 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     const token = authHeader.substring(7);
 
     // Lookup token in api_keys table (same token stored when user creates API key)
-    const apiKey = db.prepare(
-      'SELECT user_email FROM api_keys WHERE key_id = ? AND is_deleted = 0'
-    ).get(token) as { user_email: string } | undefined;
+    try {
+      const userEmail = await verifyApiKey(token);
 
-    if (!apiKey) {
+      if (!userEmail) {
+        return res.status(401).json({ error: 'Invalid or revoked API key' });
+      }
+
+      req.apiUser = { email: userEmail };
+      next();
+    } catch (error) {
+      console.error('[webui] API key verification error:', error);
       return res.status(401).json({ error: 'Invalid or revoked API key' });
     }
-
-    req.apiUser = { email: apiKey.user_email };
-    next();
   }
 
   // Auth routes
@@ -812,7 +438,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'Invalid token: missing user ID' });
       }
 
-      const user = dbOps.getOrCreateUser(email, name || '', picture || '', referralCode || undefined);
+      const user = await dbOps.getOrCreateUser(email, name || '', picture || '', referralCode || undefined);
 
       req.session.user = {
         id: sub,
@@ -851,9 +477,9 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // API routes
-  app.get('/api/keys', requireAuth, (req: Request, res: Response) => {
+  app.get('/api/keys', requireAuth, async (req: Request, res: Response) => {
     try {
-      const keys = dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.email);
       res.json({ keys });
     } catch (error) {
       console.error('[webui] Error fetching API keys:', error);
@@ -861,9 +487,9 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
-  app.post('/api/keys', requireAuth, (req: Request, res: Response) => {
+  app.post('/api/keys', requireAuth, async (req: Request, res: Response) => {
     try {
-      const keyId = dbOps.createApiKey(req.session.user!.email);
+      const keyId = await dbOps.createApiKey(req.session.user!.email);
       res.json({ keyId });
     } catch (error) {
       console.error('[webui] Error creating API key:', error);
@@ -871,10 +497,10 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
-  app.delete('/api/keys/:keyId', requireAuth, (req: Request, res: Response) => {
+  app.delete('/api/keys/:keyId', requireAuth, async (req: Request, res: Response) => {
     try {
       const { keyId } = req.params;
-      const success = dbOps.deleteApiKey(req.session.user!.email, keyId);
+      const success = await dbOps.deleteApiKey(req.session.user!.email, keyId);
 
       if (!success) {
         return res.status(404).json({ error: 'API key not found' });
@@ -887,13 +513,13 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
-  app.get('/api/keys/active', requireAuth, (req: Request, res: Response) => {
+  app.get('/api/keys/active', requireAuth, async (req: Request, res: Response) => {
     try {
       const email = req.session.user!.email;
-      let keys = dbOps.getApiKeys(email);
+      let keys = await dbOps.getApiKeys(email);
 
       if (!keys || keys.length === 0) {
-        const newKeyId = dbOps.createApiKey(email);
+        const newKeyId = await dbOps.createApiKey(email);
         keys = [{ key_id: newKeyId, created_at: new Date().toISOString(), last_used_at: null }];
       }
 
@@ -904,13 +530,13 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
-  app.get('/api/pins', requireAuth, (req: Request, res: Response) => {
+  app.get('/api/pins', requireAuth, async (req: Request, res: Response) => {
     try {
       const page = parseInt(req.query.page as string) || 1;
       const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
       const search = req.query.search as string | undefined;
 
-      const { pins, total } = dbOps.getUserPins(req.session.user!.email, page, limit, search);
+      const { pins, total } = await dbOps.getUserPins(req.session.user!.email, page, limit, search);
       res.json({ pins, total, page, limit, totalPages: Math.ceil(total / limit) });
     } catch (error) {
       console.error('[webui] Error fetching pins:', error);
@@ -930,7 +556,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'Invalid CID format' });
       }
 
-      const keys = dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.email);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
       }
@@ -968,7 +594,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'requestIds array is required' });
       }
 
-      const keys = dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.email);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
       }
@@ -1014,7 +640,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     try {
       const { requestId } = req.params;
 
-      const keys = dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.email);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
       }
@@ -1051,7 +677,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     try {
       const { requestId } = req.params;
 
-      const keys = dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.email);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
       }
@@ -1077,9 +703,9 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
-  app.get('/api/stats', requireAuth, (req: Request, res: Response) => {
+  app.get('/api/stats', requireAuth, async (req: Request, res: Response) => {
     try {
-      const stats = dbOps.getUserStats(req.session.user!.email);
+      const stats = await dbOps.getUserStats(req.session.user!.email);
       res.json(stats);
     } catch (error) {
       console.error('[webui] Error fetching stats:', error);
@@ -1087,7 +713,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
     }
   });
 
-  app.delete('/api/profile', requireAuth, (req: Request, res: Response) => {
+  app.delete('/api/profile', requireAuth, async (req: Request, res: Response) => {
     try {
       const { confirmation } = req.body;
 
@@ -1095,7 +721,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'Please type "delete" to confirm' });
       }
 
-      dbOps.deleteUserProfile(req.session.user!.email);
+      await dbOps.deleteUserProfile(req.session.user!.email);
 
       req.session.destroy((err) => {
         if (err) {
@@ -1204,7 +830,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   app.get('/api/playlists/:playlistId', requireAuth, async (req: Request, res: Response) => {
     try {
       const { playlistId } = req.params;
-      const keys = dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.email);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found' });
       }
@@ -1238,7 +864,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   app.delete('/api/shares/:shareId', requireAuth, async (req: Request, res: Response) => {
     try {
       const { shareId } = req.params;
-      const keys = dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.email);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found' });
       }
@@ -1290,25 +916,28 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       // Try Fula API first to get share info
       try {
         const shareInfoUrl = `http://127.0.0.1:6000/shares/${shareId}`;
-        const shareInfoResponse = await httpGet(shareInfoUrl);
+        const shareInfoResponse = await httpGet(shareInfoUrl, {});
 
-        if (shareInfoResponse.status === 200 && shareInfoResponse.data?.cid) {
-          const cid = shareInfoResponse.data.cid;
-          console.log('[webui] Found CID from share metadata:', cid);
+        if (shareInfoResponse.status === 200) {
+          const shareData = typeof shareInfoResponse.data === 'string' ? JSON.parse(shareInfoResponse.data) : shareInfoResponse.data;
+          if (shareData?.cid) {
+            const cid = shareData.cid;
+            console.log('[webui] Found CID from share metadata:', cid);
 
-          // Fetch content by CID from IPFS gateway
-          const gatewayUrl = `https://ipfs.cloud.fx.land/gateway/${cid}`;
-          console.log('[webui] Fetching from gateway:', gatewayUrl);
+            // Fetch content by CID from IPFS gateway
+            const gatewayUrl = `https://ipfs.cloud.fx.land/gateway/${cid}`;
+            console.log('[webui] Fetching from gateway:', gatewayUrl);
 
-          const contentResponse = await fetch(gatewayUrl);
+            const contentResponse = await fetch(gatewayUrl);
 
-          if (contentResponse.ok) {
-            const buffer = Buffer.from(await contentResponse.arrayBuffer());
-            res.setHeader('Content-Type', 'application/octet-stream');
-            return res.send(buffer);
-          } else {
-            console.error('[webui] Gateway fetch failed:', contentResponse.status);
-            return res.status(contentResponse.status).json({ error: 'Content not found on gateway' });
+            if (contentResponse.ok) {
+              const buffer = Buffer.from(await contentResponse.arrayBuffer());
+              res.setHeader('Content-Type', 'application/octet-stream');
+              return res.send(buffer);
+            } else {
+              console.error('[webui] Gateway fetch failed:', contentResponse.status);
+              return res.status(contentResponse.status).json({ error: 'Content not found on gateway' });
+            }
           }
         } else if (shareInfoResponse.status === 404) {
           return res.status(404).json({ error: 'Share not found' });
@@ -1352,21 +981,22 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Public stats (no auth required)
-  app.get('/api/public/stats', (_req: Request, res: Response) => {
+  app.get('/api/public/stats', async (_req: Request, res: Response) => {
     try {
-      const stats = db.prepare(`
+      const result = await query(`
         SELECT
           COUNT(*) as total_pins,
           COALESCE(SUM(size), 0) as total_size,
           COUNT(DISTINCT username) as total_users
         FROM pins
         WHERE status != 'deleted'
-      `).get() as any;
+      `);
+      const stats = result.rows[0];
 
       res.json({
-        totalPins: stats?.total_pins || 0,
-        totalSize: stats?.total_size || 0,
-        totalUsers: stats?.total_users || 0,
+        totalPins: parseInt(stats?.total_pins || '0', 10),
+        totalSize: parseInt(stats?.total_size || '0', 10),
+        totalUsers: parseInt(stats?.total_users || '0', 10),
       });
     } catch (error) {
       console.error('[webui] Error fetching public stats:', error);
@@ -1377,9 +1007,9 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   // ============ Web3 Payment / Credits API Endpoints ============
 
   // Get credit status (balance, usage, can upload)
-  app.get('/api/credits', requireAuth, (req: Request, res: Response) => {
+  app.get('/api/credits', requireAuth, async (req: Request, res: Response) => {
     try {
-      const status = getUserCreditStatus(db, req.session.user!.email);
+      const status = await getUserCreditStatus(req.session.user!.email);
       res.json(status);
     } catch (error) {
       console.error('[webui] Error getting credit status:', error);
@@ -1388,10 +1018,10 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Get credit history
-  app.get('/api/credits/history', requireAuth, (req: Request, res: Response) => {
+  app.get('/api/credits/history', requireAuth, async (req: Request, res: Response) => {
     try {
       const limit = parseInt(req.query.limit as string) || 50;
-      const history = getCreditHistory(db, req.session.user!.email, Math.min(limit, 100));
+      const history = await getCreditHistory(req.session.user!.email, Math.min(limit, 100));
       res.json({ history });
     } catch (error) {
       console.error('[webui] Error getting credit history:', error);
@@ -1414,20 +1044,24 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       }
 
       // Check if already claimed
-      const existing = db.prepare(`
-        SELECT user_email, claimed_at FROM token_transactions
-        WHERE tx_hash = ? AND chain_id = ?
-      `).get(txHash.toLowerCase(), chainId) as { user_email: string | null; claimed_at: string | null } | undefined;
+      const existingResult = await query<{ user_email: string | null; claimed_at: string | null }>(
+        `SELECT user_email, claimed_at FROM token_transactions
+         WHERE tx_hash = $1 AND chain_id = $2`,
+        [txHash.toLowerCase(), chainId]
+      );
+      const existing = existingResult.rows[0];
 
       if (existing?.claimed_at) {
         return res.status(400).json({ error: 'This transaction has already been credited' });
       }
 
       // Get chain config
-      const chain = db.prepare(`
-        SELECT token_address, vault_address FROM chain_sync_state
-        WHERE chain_id = ? AND is_enabled = 1
-      `).get(chainId) as { token_address: string; vault_address: string } | undefined;
+      const chainResult = await query<{ token_address: string; vault_address: string }>(
+        `SELECT token_address, vault_address FROM chain_sync_state
+         WHERE chain_id = $1 AND is_enabled = 1`,
+        [chainId]
+      );
+      const chain = chainResult.rows[0];
 
       if (!chain) {
         return res.status(400).json({ error: 'Unsupported or disabled chain' });
@@ -1522,12 +1156,13 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
 
       // Check if user has this wallet linked
       const userEmail = req.session.user!.email;
-      const wallet = db.prepare(`
-        SELECT 1 FROM user_wallets
-        WHERE user_email = ? AND wallet_address = ? AND is_verified = 1
-      `).get(userEmail, fromAddress) as { 1: number } | undefined;
+      const walletResult = await query<{ count: string }>(
+        `SELECT 1 FROM user_wallets
+         WHERE user_email = $1 AND wallet_address = $2 AND is_verified = 1`,
+        [userEmail, fromAddress]
+      );
 
-      if (!wallet) {
+      if (!walletResult.rows[0]) {
         return res.status(400).json({
           error: 'Wallet not linked to your account',
           message: `Please link wallet ${fromAddress} to your account first`,
@@ -1537,39 +1172,42 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       // Insert or update transaction
       if (existing) {
         // Transaction exists but unclaimed - claim it
-        db.prepare(`
-          UPDATE token_transactions
-          SET user_email = ?, claimed_at = CURRENT_TIMESTAMP, ingestion_source = 'manual'
-          WHERE tx_hash = ? AND chain_id = ?
-        `).run(userEmail, txHash.toLowerCase(), chainId);
+        await query(
+          `UPDATE token_transactions
+           SET user_email = $1, claimed_at = NOW(), ingestion_source = 'manual'
+           WHERE tx_hash = $2 AND chain_id = $3`,
+          [userEmail, txHash.toLowerCase(), chainId]
+        );
       } else {
         // Insert new transaction
-        db.prepare(`
-          INSERT INTO token_transactions
-            (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_email, claimed_at, ingestion_source)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'manual')
-        `).run(
-          txHash.toLowerCase(),
-          chainId,
-          fromAddress,
-          vaultAddressLower,
-          amountRaw,
-          amountFula,
-          parseInt(receipt.blockNumber, 16),
-          Math.floor(Date.now() / 1000),
-          userEmail
+        await query(
+          `INSERT INTO token_transactions
+             (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_email, claimed_at, ingestion_source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), 'manual')`,
+          [
+            txHash.toLowerCase(),
+            chainId,
+            fromAddress,
+            vaultAddressLower,
+            amountRaw,
+            amountFula,
+            parseInt(receipt.blockNumber, 16),
+            Math.floor(Date.now() / 1000),
+            userEmail
+          ]
         );
       }
 
       // Credit the user
-      creditUser(db, userEmail, amountFula, `${chainId}:${txHash}`);
+      await creditUser(userEmail, amountFula, `${chainId}:${txHash}`);
 
       console.log(`[webui] Manual claim: credited ${amountFula} FULA to ${userEmail} from tx ${txHash}`);
 
+      const newStatus = await getUserCreditStatus(userEmail);
       res.json({
         success: true,
         amountFula,
-        newBalance: getUserCreditStatus(db, userEmail).balanceFula,
+        newBalance: newStatus.balanceFula,
       });
     } catch (error) {
       console.error('[webui] Error claiming transaction:', error);
@@ -1578,10 +1216,10 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Get user's linked wallets
-  app.get('/api/wallets', requireAuth, (req: Request, res: Response) => {
+  app.get('/api/wallets', requireAuth, async (req: Request, res: Response) => {
     try {
-      const wallets = getUserWallets(db, req.session.user!.email);
-      const chains = getSupportedChains(db);
+      const wallets = await getUserWallets(req.session.user!.email);
+      const chains = await getSupportedChains();
       res.json({ wallets, supportedChains: chains });
     } catch (error) {
       console.error('[webui] Error getting wallets:', error);
@@ -1635,10 +1273,11 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       }
 
       // Check if this wallet is already linked to a DIFFERENT user
-      const existingLink = db.prepare(`
-        SELECT user_email FROM user_wallets
-        WHERE wallet_address = ? AND is_verified = 1
-      `).get(normalizedAddress) as { user_email: string } | undefined;
+      const existingLinkResult = await query<{ user_email: string }>(
+        `SELECT user_email FROM user_wallets WHERE wallet_address = $1 AND is_verified = 1`,
+        [normalizedAddress]
+      );
+      const existingLink = existingLinkResult.rows[0];
 
       if (existingLink && existingLink.user_email !== userEmail) {
         return res.status(400).json({
@@ -1648,13 +1287,13 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       }
 
       // Check if chain is supported
-      const chain = db.prepare('SELECT 1 FROM chain_sync_state WHERE chain_id = ? AND is_enabled = 1').get(chainId);
-      if (!chain) {
+      const chainResult = await query('SELECT 1 FROM chain_sync_state WHERE chain_id = $1 AND is_enabled = 1', [chainId]);
+      if (chainResult.rows.length === 0) {
         return res.status(400).json({ error: 'Unsupported or disabled chain' });
       }
 
       // Link the wallet (verified)
-      linkWallet(db, userEmail, normalizedAddress, chainId, true);
+      await linkWallet(userEmail, normalizedAddress, chainId, true);
 
       console.log(`[webui] Wallet ${normalizedAddress} linked to ${userEmail} on chain ${chainId} (signature verified)`);
 
@@ -1666,7 +1305,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Disconnect/unlink a wallet
-  app.delete('/api/wallets/:address', requireAuth, (req: Request, res: Response) => {
+  app.delete('/api/wallets/:address', requireAuth, async (req: Request, res: Response) => {
     try {
       const { address } = req.params;
 
@@ -1674,7 +1313,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'Wallet address is required' });
       }
 
-      const success = unlinkWallet(db, req.session.user!.email, address);
+      const success = await unlinkWallet(req.session.user!.email, address);
 
       if (!success) {
         return res.status(404).json({ error: 'Wallet not found' });
@@ -1690,40 +1329,51 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Get pricing info (public)
-  app.get('/api/credits/pricing', (_req: Request, res: Response) => {
+  app.get('/api/credits/pricing', async (_req: Request, res: Response) => {
+    const chains = await getSupportedChains();
     res.json({
       freeTierBytes: FREE_TIER_BYTES,
       freeTierMB: Math.round(FREE_TIER_BYTES / (1024 * 1024)),
       fulaPerGBMonth: FULA_PER_GB_MONTH,
-      chains: getSupportedChains(db).filter(c => c.isEnabled),
+      chains: chains.filter(c => c.isEnabled),
     });
   });
 
   // ============ Referral Endpoints ============
 
   // Get user's referral info (code + stats)
-  app.get('/api/referral', requireAuth, (req: Request, res: Response) => {
+  app.get('/api/referral', requireAuth, async (req: Request, res: Response) => {
     try {
       const email = req.session.user!.email;
 
       // Get or create referral code
-      let codeRow = db.prepare('SELECT code, created_at FROM referral_codes WHERE user_email = ?').get(email) as { code: string; created_at: string } | undefined;
+      const codeResult = await query<{ code: string; created_at: string }>(
+        'SELECT code, created_at FROM referral_codes WHERE user_email = $1',
+        [email]
+      );
+      let codeRow = codeResult.rows[0];
 
       if (!codeRow) {
         // Generate code for existing users who don't have one
         let code = generateReferralCode();
-        while (db.prepare('SELECT 1 FROM referral_codes WHERE code = ?').get(code)) {
-          code = generateReferralCode();
+        let exists = true;
+        while (exists) {
+          const checkResult = await query('SELECT 1 FROM referral_codes WHERE code = $1', [code]);
+          if (checkResult.rows.length === 0) {
+            exists = false;
+          } else {
+            code = generateReferralCode();
+          }
         }
-        db.prepare('INSERT INTO referral_codes (user_email, code) VALUES (?, ?)').run(email, code);
+        await query('INSERT INTO referral_codes (user_email, code) VALUES ($1, $2)', [email, code]);
         codeRow = { code, created_at: new Date().toISOString() };
       }
 
       // Get referral stats with 3-level breakdown using recursive CTE
-      const levelStats = db.prepare(`
+      const levelStatsResult = await query<{ level: number; count: string; credits: string }>(`
         WITH RECURSIVE referral_chain AS (
           SELECT referred_email, 1 as level
-          FROM referrals WHERE referrer_email = ?
+          FROM referrals WHERE referrer_email = $1
           UNION ALL
           SELECT r.referred_email, rc.level + 1
           FROM referrals r
@@ -1732,13 +1382,14 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         )
         SELECT
           rc.level,
-          COUNT(*) as count,
-          COALESCE(SUM(uc.total_deposited_fula), 0) as credits
+          COUNT(*)::text as count,
+          COALESCE(SUM(uc.total_deposited_fula), 0)::text as credits
         FROM referral_chain rc
         LEFT JOIN user_credits uc ON rc.referred_email = uc.user_email
         GROUP BY rc.level
         ORDER BY rc.level
-      `).all(email) as Array<{ level: number; count: number; credits: number }>;
+      `, [email]);
+      const levelStats = levelStatsResult.rows;
 
       // Build stats object with level breakdown
       const stats = {
@@ -1749,15 +1400,17 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       };
 
       for (const row of levelStats) {
+        const count = parseInt(row.count, 10);
+        const credits = parseFloat(row.credits);
         if (row.level === 1) {
-          stats.level1 = { count: row.count, credits: row.credits };
+          stats.level1 = { count, credits };
         } else if (row.level === 2) {
-          stats.level2 = { count: row.count, credits: row.credits };
+          stats.level2 = { count, credits };
         } else if (row.level === 3) {
-          stats.level3 = { count: row.count, credits: row.credits };
+          stats.level3 = { count, credits };
         }
-        stats.total.count += row.count;
-        stats.total.credits += row.credits;
+        stats.total.count += count;
+        stats.total.credits += credits;
       }
 
       res.json({
@@ -1775,14 +1428,20 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Get list of users referred by current user (paginated)
-  app.get('/api/referral/referred', requireAuth, (req: Request, res: Response) => {
+  app.get('/api/referral/referred', requireAuth, async (req: Request, res: Response) => {
     try {
       const email = req.session.user!.email;
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
 
-      const referred = db.prepare(`
+      const referredResult = await query<{
+        referred_email: string;
+        joined_at: string;
+        total_credits_purchased: number;
+        app_downloaded: number;
+        app_downloaded_at: string | null;
+      }>(`
         SELECT
           r.referred_email,
           wu.created_at as joined_at,
@@ -1792,19 +1451,14 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         FROM referrals r
         JOIN webui_users wu ON r.referred_email = wu.email
         LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
-        WHERE r.referrer_email = ?
+        WHERE r.referrer_email = $1
         ORDER BY r.referred_at DESC
-        LIMIT ? OFFSET ?
-      `).all(email, limit, offset) as Array<{
-        referred_email: string;
-        joined_at: string;
-        total_credits_purchased: number;
-        app_downloaded: number;
-        app_downloaded_at: string | null;
-      }>;
+        LIMIT $2 OFFSET $3
+      `, [email, limit, offset]);
+      const referred = referredResult.rows;
 
-      const countResult = db.prepare('SELECT COUNT(*) as total FROM referrals WHERE referrer_email = ?').get(email) as { total: number };
-      const total = countResult?.total || 0;
+      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_email = $1', [email]);
+      const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       res.json({
         items: referred.map(r => ({
@@ -1826,16 +1480,16 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Mark app as downloaded (called when user clicks download link)
-  app.post('/api/user/app-downloaded', requireAuth, (req: Request, res: Response) => {
+  app.post('/api/user/app-downloaded', requireAuth, async (req: Request, res: Response) => {
     try {
       const email = req.session.user!.email;
 
       // Update the user's app_downloaded status
-      db.prepare(`
+      await query(`
         UPDATE webui_users
-        SET app_downloaded = 1, app_downloaded_at = CURRENT_TIMESTAMP
-        WHERE email = ? AND app_downloaded = 0
-      `).run(email);
+        SET app_downloaded = 1, app_downloaded_at = NOW()
+        WHERE email = $1 AND app_downloaded = 0
+      `, [email]);
 
       res.json({ success: true });
     } catch (error) {
@@ -1846,7 +1500,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
 
   // Get referrals for a specific user (for multi-level lazy loading)
   // User can only view their own referral chain
-  app.get('/api/referral/chain/:email', requireAuth, (req: Request, res: Response) => {
+  app.get('/api/referral/chain/:email', requireAuth, async (req: Request, res: Response) => {
     try {
       const currentUserEmail = req.session.user!.email;
       const targetEmail = decodeURIComponent(req.params.email);
@@ -1855,50 +1509,51 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       const offset = (page - 1) * limit;
 
       // Verify the target email is in the current user's referral chain (up to 3 levels)
-      const isInChain = db.prepare(`
+      const isInChainResult = await query(`
         WITH RECURSIVE referral_chain AS (
           SELECT referred_email, 1 as level
-          FROM referrals WHERE referrer_email = ?
+          FROM referrals WHERE referrer_email = $1
           UNION ALL
           SELECT r.referred_email, rc.level + 1
           FROM referrals r
           JOIN referral_chain rc ON r.referrer_email = rc.referred_email
           WHERE rc.level < 3
         )
-        SELECT 1 FROM referral_chain WHERE referred_email = ?
+        SELECT 1 FROM referral_chain WHERE referred_email = $2
         UNION
-        SELECT 1 WHERE ? = ?
-      `).get(currentUserEmail, targetEmail, currentUserEmail, targetEmail);
+        SELECT 1 WHERE $3 = $4
+      `, [currentUserEmail, targetEmail, currentUserEmail, targetEmail]);
 
-      if (!isInChain) {
+      if (isInChainResult.rows.length === 0) {
         return res.status(403).json({ error: 'Access denied' });
       }
 
-      const referred = db.prepare(`
+      const referredResult = await query<{
+        referred_email: string;
+        joined_at: string;
+        total_credits_purchased: number;
+        app_downloaded: number;
+        app_downloaded_at: string | null;
+        referral_count: string;
+      }>(`
         SELECT
           r.referred_email,
           wu.created_at as joined_at,
           COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased,
           COALESCE(wu.app_downloaded, 0) as app_downloaded,
           wu.app_downloaded_at,
-          (SELECT COUNT(*) FROM referrals WHERE referrer_email = r.referred_email) as referral_count
+          (SELECT COUNT(*)::text FROM referrals WHERE referrer_email = r.referred_email) as referral_count
         FROM referrals r
         JOIN webui_users wu ON r.referred_email = wu.email
         LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
-        WHERE r.referrer_email = ?
+        WHERE r.referrer_email = $1
         ORDER BY r.referred_at DESC
-        LIMIT ? OFFSET ?
-      `).all(targetEmail, limit, offset) as Array<{
-        referred_email: string;
-        joined_at: string;
-        total_credits_purchased: number;
-        app_downloaded: number;
-        app_downloaded_at: string | null;
-        referral_count: number;
-      }>;
+        LIMIT $2 OFFSET $3
+      `, [targetEmail, limit, offset]);
+      const referred = referredResult.rows;
 
-      const countResult = db.prepare('SELECT COUNT(*) as total FROM referrals WHERE referrer_email = ?').get(targetEmail) as { total: number };
-      const total = countResult?.total || 0;
+      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_email = $1', [targetEmail]);
+      const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       res.json({
         items: referred.map(r => ({
@@ -1908,7 +1563,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
           totalCreditsPurchased: r.total_credits_purchased,
           appDownloaded: r.app_downloaded === 1,
           appDownloadedAt: r.app_downloaded_at,
-          referralCount: r.referral_count,
+          referralCount: parseInt(r.referral_count, 10),
         })),
         total,
         page,
@@ -1955,9 +1610,9 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   }
 
   // Get suspended users (admin only)
-  app.get('/api/admin/suspended', requireAdmin, (_req: Request, res: Response) => {
+  app.get('/api/admin/suspended', requireAdmin, async (_req: Request, res: Response) => {
     try {
-      const users = getSuspendedUsers(db);
+      const users = await getSuspendedUsers();
       res.json({ users });
     } catch (error) {
       console.error('[webui] Error getting suspended users:', error);
@@ -1966,7 +1621,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Unsuspend a user (admin only)
-  app.post('/api/admin/unsuspend', requireAdmin, (req: Request, res: Response) => {
+  app.post('/api/admin/unsuspend', requireAdmin, async (req: Request, res: Response) => {
     try {
       const { email } = req.body;
 
@@ -1974,7 +1629,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         return res.status(400).json({ error: 'Email is required' });
       }
 
-      const success = unsuspendUser(db, email);
+      const success = await unsuspendUser(email);
 
       if (!success) {
         return res.status(404).json({ error: 'User not found or not suspended' });
@@ -1990,7 +1645,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Manual credit adjustment (admin or system key for x402 gateway)
-  app.post('/api/admin/adjust', requireAdminOrSystemKey, (req: Request, res: Response) => {
+  app.post('/api/admin/adjust', requireAdminOrSystemKey, async (req: Request, res: Response) => {
     try {
       const { email, amount, reason } = req.body;
 
@@ -2007,11 +1662,11 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       const isSystemCall = (req as any).isSystemCall;
       const caller = isSystemCall ? 'system:x402' : `admin:${req.session.user!.email}`;
 
-      creditUser(db, email, numAmount, `${caller}:${reason}`, 'adjustment');
+      await creditUser(email, numAmount, `${caller}:${reason}`, 'adjustment');
 
       console.log(`[webui] ${caller} adjusted ${email} by ${numAmount} FULA: ${reason}`);
 
-      const newStatus = getUserCreditStatus(db, email);
+      const newStatus = await getUserCreditStatus(email);
 
       res.json({
         success: true,
@@ -2034,7 +1689,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Get all referrers with stats (admin only, paginated)
-  app.get('/api/admin/referrals', requireAdmin, (req: Request, res: Response) => {
+  app.get('/api/admin/referrals', requireAdmin, async (req: Request, res: Response) => {
     try {
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
@@ -2042,45 +1697,53 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       const includeZero = req.query.includeZero === 'true';
 
       // Get referrers with stats
-      const referrers = db.prepare(`
+      const referrersResult = await query<{
+        email: string;
+        code: string;
+        codecreatedat: string;
+        totalreferred: string;
+        totalcreditsfromreferrals: string;
+      }>(`
         SELECT
           rc.user_email as email,
           rc.code,
           rc.created_at as codeCreatedAt,
-          COUNT(r.id) as totalReferred,
-          COALESCE(SUM(uc.total_deposited_fula), 0) as totalCreditsFromReferrals
+          COUNT(r.id)::text as totalReferred,
+          COALESCE(SUM(uc.total_deposited_fula), 0)::text as totalCreditsFromReferrals
         FROM referral_codes rc
         LEFT JOIN referrals r ON rc.user_email = r.referrer_email
         LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
         GROUP BY rc.user_email, rc.code, rc.created_at
         ${includeZero ? '' : 'HAVING COUNT(r.id) > 0'}
-        ORDER BY totalReferred DESC, rc.created_at DESC
-        LIMIT ? OFFSET ?
-      `).all(limit, offset) as Array<{
-        email: string;
-        code: string;
-        codeCreatedAt: string;
-        totalReferred: number;
-        totalCreditsFromReferrals: number;
-      }>;
+        ORDER BY COUNT(r.id) DESC, rc.created_at DESC
+        LIMIT $1 OFFSET $2
+      `, [limit, offset]);
+      const referrers = referrersResult.rows.map(r => ({
+        email: r.email,
+        code: r.code,
+        codeCreatedAt: r.codecreatedat,
+        totalReferred: parseInt(r.totalreferred, 10),
+        totalCreditsFromReferrals: parseFloat(r.totalcreditsfromreferrals),
+      }));
 
       // Get total count
-      const countResult = db.prepare(`
-        SELECT COUNT(*) as total FROM (
+      const countResult = await query<{ total: string }>(`
+        SELECT COUNT(*)::text as total FROM (
           SELECT rc.user_email
           FROM referral_codes rc
           LEFT JOIN referrals r ON rc.user_email = r.referrer_email
           GROUP BY rc.user_email
           ${includeZero ? '' : 'HAVING COUNT(r.id) > 0'}
-        )
-      `).get() as { total: number };
+        ) subq
+      `);
+      const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       res.json({
         items: referrers,
-        total: countResult?.total || 0,
+        total,
         page,
         limit,
-        totalPages: Math.ceil((countResult?.total || 0) / limit),
+        totalPages: Math.ceil(total / limit),
       });
     } catch (error) {
       console.error('[webui] Error getting admin referrals:', error);
@@ -2089,9 +1752,16 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Export all referral data as CSV (admin only) - MUST be before :email route
-  app.get('/api/admin/referrals/export/csv', requireAdmin, (_req: Request, res: Response) => {
+  app.get('/api/admin/referrals/export/csv', requireAdmin, async (_req: Request, res: Response) => {
     try {
-      const data = db.prepare(`
+      const dataResult = await query<{
+        referrer_email: string;
+        referral_code: string;
+        referred_email: string | null;
+        referred_user_joined_at: string | null;
+        referred_at: string | null;
+        credits_purchased: number;
+      }>(`
         SELECT
           rc.user_email as referrer_email,
           rc.code as referral_code,
@@ -2104,14 +1774,8 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         LEFT JOIN webui_users wu ON r.referred_email = wu.email
         LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
         ORDER BY rc.user_email, r.referred_at
-      `).all() as Array<{
-        referrer_email: string;
-        referral_code: string;
-        referred_email: string | null;
-        referred_user_joined_at: string | null;
-        referred_at: string | null;
-        credits_purchased: number;
-      }>;
+      `);
+      const data = dataResult.rows;
 
       // Generate CSV
       const headers = ['Referrer Email', 'Referral Code', 'Referred Email', 'Referred User Joined At', 'Referred At', 'Credits Purchased'];
@@ -2139,14 +1803,22 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
 
   // Get referral chain for a specific user (admin only, for multi-level viewing)
   // MUST be before the :email route to avoid matching "chain" as an email
-  app.get('/api/admin/referrals/chain/:email', requireAdmin, (req: Request, res: Response) => {
+  app.get('/api/admin/referrals/chain/:email', requireAdmin, async (req: Request, res: Response) => {
     try {
       const targetEmail = decodeURIComponent(req.params.email);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
 
-      const referred = db.prepare(`
+      const referredResult = await query<{
+        referred_email: string;
+        joined_at: string;
+        referred_at: string;
+        total_credits_purchased: number;
+        app_downloaded: number;
+        app_downloaded_at: string | null;
+        referral_count: string;
+      }>(`
         SELECT
           r.referred_email,
           wu.created_at as joined_at,
@@ -2154,25 +1826,18 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
           COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased,
           COALESCE(wu.app_downloaded, 0) as app_downloaded,
           wu.app_downloaded_at,
-          (SELECT COUNT(*) FROM referrals WHERE referrer_email = r.referred_email) as referral_count
+          (SELECT COUNT(*)::text FROM referrals WHERE referrer_email = r.referred_email) as referral_count
         FROM referrals r
         JOIN webui_users wu ON r.referred_email = wu.email
         LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
-        WHERE r.referrer_email = ?
+        WHERE r.referrer_email = $1
         ORDER BY r.referred_at DESC
-        LIMIT ? OFFSET ?
-      `).all(targetEmail, limit, offset) as Array<{
-        referred_email: string;
-        joined_at: string;
-        referred_at: string;
-        total_credits_purchased: number;
-        app_downloaded: number;
-        app_downloaded_at: string | null;
-        referral_count: number;
-      }>;
+        LIMIT $2 OFFSET $3
+      `, [targetEmail, limit, offset]);
+      const referred = referredResult.rows;
 
-      const countResult = db.prepare('SELECT COUNT(*) as total FROM referrals WHERE referrer_email = ?').get(targetEmail) as { total: number };
-      const total = countResult?.total || 0;
+      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_email = $1', [targetEmail]);
+      const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       res.json({
         items: referred.map(r => ({
@@ -2182,7 +1847,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
           totalCreditsPurchased: r.total_credits_purchased,
           appDownloaded: r.app_downloaded === 1,
           appDownloadedAt: r.app_downloaded_at,
-          referralCount: r.referral_count,
+          referralCount: parseInt(r.referral_count, 10),
         })),
         total,
         page,
@@ -2196,14 +1861,21 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // Get referred users for a specific referrer (admin only, paginated)
-  app.get('/api/admin/referrals/:email', requireAdmin, (req: Request, res: Response) => {
+  app.get('/api/admin/referrals/:email', requireAdmin, async (req: Request, res: Response) => {
     try {
       const referrerEmail = decodeURIComponent(req.params.email);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
 
-      const referred = db.prepare(`
+      const referredResult = await query<{
+        email: string;
+        joinedat: string;
+        referredat: string;
+        totalcreditspurchased: number;
+        appdownloaded: number;
+        appdownloadedat: string | null;
+      }>(`
         SELECT
           r.referred_email as email,
           wu.created_at as joinedAt,
@@ -2214,34 +1886,34 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
         FROM referrals r
         JOIN webui_users wu ON r.referred_email = wu.email
         LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
-        WHERE r.referrer_email = ?
+        WHERE r.referrer_email = $1
         ORDER BY r.referred_at DESC
-        LIMIT ? OFFSET ?
-      `).all(referrerEmail, limit, offset) as Array<{
-        email: string;
-        joinedAt: string;
-        referredAt: string;
-        totalCreditsPurchased: number;
-        appDownloaded: number;
-        appDownloadedAt: string | null;
-      }>;
+        LIMIT $2 OFFSET $3
+      `, [referrerEmail, limit, offset]);
+      const referred = referredResult.rows;
 
-      const countResult = db.prepare('SELECT COUNT(*) as total FROM referrals WHERE referrer_email = ?').get(referrerEmail) as { total: number };
+      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_email = $1', [referrerEmail]);
+      const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       // Get referrer info
-      const referrerInfo = db.prepare('SELECT code FROM referral_codes WHERE user_email = ?').get(referrerEmail) as { code: string } | undefined;
+      const referrerInfoResult = await query<{ code: string }>('SELECT code FROM referral_codes WHERE user_email = $1', [referrerEmail]);
+      const referrerInfo = referrerInfoResult.rows[0];
 
       res.json({
         referrer: referrerEmail,
         referrerCode: referrerInfo?.code || null,
         items: referred.map(r => ({
-          ...r,
-          appDownloaded: r.appDownloaded === 1,
+          email: r.email,
+          joinedAt: r.joinedat,
+          referredAt: r.referredat,
+          totalCreditsPurchased: r.totalcreditspurchased,
+          appDownloaded: r.appdownloaded === 1,
+          appDownloadedAt: r.appdownloadedat,
         })),
-        total: countResult?.total || 0,
+        total,
         page,
         limit,
-        totalPages: Math.ceil((countResult?.total || 0) / limit),
+        totalPages: Math.ceil(total / limit),
       });
     } catch (error) {
       console.error('[webui] Error getting admin referrer details:', error);
@@ -2254,9 +1926,9 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   // Existing /api/* endpoints remain unchanged for web UI compatibility
 
   // GET /api/v1/storage - Storage usage and credit info
-  app.get('/api/v1/storage', requireApiAuth, (req: Request, res: Response) => {
+  app.get('/api/v1/storage', requireApiAuth, async (req: Request, res: Response) => {
     try {
-      const status = getUserCreditStatus(db, req.apiUser!.email);
+      const status = await getUserCreditStatus(req.apiUser!.email);
 
       // Calculate paid storage from FULA balance
       const paidStorageBytes = Math.floor((status.balanceFula / FULA_PER_GB_MONTH) * 1024 * 1024 * 1024);
@@ -2286,10 +1958,10 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // GET /api/v1/wallets - User's linked wallets
-  app.get('/api/v1/wallets', requireApiAuth, (req: Request, res: Response) => {
+  app.get('/api/v1/wallets', requireApiAuth, async (req: Request, res: Response) => {
     try {
-      const wallets = getUserWallets(db, req.apiUser!.email);
-      const chains = getSupportedChains(db);
+      const wallets = await getUserWallets(req.apiUser!.email);
+      const chains = await getSupportedChains();
       res.json({
         wallets: wallets.map(w => ({
           address: w.address,
@@ -2355,10 +2027,11 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       }
 
       // Check if this wallet is already linked to a DIFFERENT user
-      const existingLink = db.prepare(`
-        SELECT user_email FROM user_wallets
-        WHERE wallet_address = ? AND is_verified = 1
-      `).get(normalizedAddress) as { user_email: string } | undefined;
+      const existingLinkResult = await query<{ user_email: string }>(
+        `SELECT user_email FROM user_wallets WHERE wallet_address = $1 AND is_verified = 1`,
+        [normalizedAddress]
+      );
+      const existingLink = existingLinkResult.rows[0];
 
       if (existingLink && existingLink.user_email !== userEmail) {
         return res.status(400).json({
@@ -2367,13 +2040,13 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       }
 
       // Check if chain is supported
-      const chain = db.prepare('SELECT 1 FROM chain_sync_state WHERE chain_id = ? AND is_enabled = 1').get(chainId);
-      if (!chain) {
+      const chainCheckResult = await query('SELECT 1 FROM chain_sync_state WHERE chain_id = $1 AND is_enabled = 1', [chainId]);
+      if (chainCheckResult.rows.length === 0) {
         return res.status(400).json({ error: 'Unsupported or disabled chain' });
       }
 
       // Link the wallet (verified)
-      linkWallet(db, userEmail, normalizedAddress, chainId, true);
+      await linkWallet(userEmail, normalizedAddress, chainId, true);
 
       console.log(`[api/v1] Wallet ${normalizedAddress} linked to ${userEmail} on chain ${chainId}`);
 
@@ -2399,20 +2072,22 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       }
 
       // Check if already claimed
-      const existing = db.prepare(`
-        SELECT user_email, claimed_at FROM token_transactions
-        WHERE tx_hash = ? AND chain_id = ?
-      `).get(txHash.toLowerCase(), chainId) as { user_email: string | null; claimed_at: string | null } | undefined;
+      const existingResult = await query<{ user_email: string | null; claimed_at: string | null }>(
+        `SELECT user_email, claimed_at FROM token_transactions WHERE tx_hash = $1 AND chain_id = $2`,
+        [txHash.toLowerCase(), chainId]
+      );
+      const existing = existingResult.rows[0];
 
       if (existing?.claimed_at) {
         return res.status(400).json({ error: 'This transaction has already been credited' });
       }
 
       // Get chain config
-      const chain = db.prepare(`
-        SELECT token_address, vault_address FROM chain_sync_state
-        WHERE chain_id = ? AND is_enabled = 1
-      `).get(chainId) as { token_address: string; vault_address: string } | undefined;
+      const chainResult = await query<{ token_address: string; vault_address: string }>(
+        `SELECT token_address, vault_address FROM chain_sync_state WHERE chain_id = $1 AND is_enabled = 1`,
+        [chainId]
+      );
+      const chain = chainResult.rows[0];
 
       if (!chain) {
         return res.status(400).json({ error: 'Unsupported or disabled chain' });
@@ -2490,12 +2165,12 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
 
       // Check if user has this wallet linked
       const userEmail = req.apiUser!.email;
-      const wallet = db.prepare(`
-        SELECT 1 FROM user_wallets
-        WHERE user_email = ? AND wallet_address = ? AND is_verified = 1
-      `).get(userEmail, fromAddress) as { 1: number } | undefined;
+      const walletResult = await query(
+        `SELECT 1 FROM user_wallets WHERE user_email = $1 AND wallet_address = $2 AND is_verified = 1`,
+        [userEmail, fromAddress]
+      );
 
-      if (!wallet) {
+      if (walletResult.rows.length === 0) {
         return res.status(400).json({
           error: 'Wallet not linked to your account',
           walletAddress: fromAddress,
@@ -2504,38 +2179,41 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
 
       // Insert or update transaction
       if (existing) {
-        db.prepare(`
-          UPDATE token_transactions
-          SET user_email = ?, claimed_at = CURRENT_TIMESTAMP, ingestion_source = 'manual'
-          WHERE tx_hash = ? AND chain_id = ?
-        `).run(userEmail, txHash.toLowerCase(), chainId);
+        await query(
+          `UPDATE token_transactions
+           SET user_email = $1, claimed_at = NOW(), ingestion_source = 'manual'
+           WHERE tx_hash = $2 AND chain_id = $3`,
+          [userEmail, txHash.toLowerCase(), chainId]
+        );
       } else {
-        db.prepare(`
-          INSERT INTO token_transactions
+        await query(
+          `INSERT INTO token_transactions
             (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_email, claimed_at, ingestion_source)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'manual')
-        `).run(
-          txHash.toLowerCase(),
-          chainId,
-          fromAddress,
-          vaultAddressLower,
-          amountRaw,
-          amountFula,
-          parseInt(receipt.blockNumber, 16),
-          Math.floor(Date.now() / 1000),
-          userEmail
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), 'manual')`,
+          [
+            txHash.toLowerCase(),
+            chainId,
+            fromAddress,
+            vaultAddressLower,
+            amountRaw,
+            amountFula,
+            parseInt(receipt.blockNumber, 16),
+            Math.floor(Date.now() / 1000),
+            userEmail
+          ]
         );
       }
 
       // Credit the user
-      creditUser(db, userEmail, amountFula, `${chainId}:${txHash}`);
+      await creditUser(userEmail, amountFula, `${chainId}:${txHash}`);
 
       console.log(`[api/v1] Claim: credited ${amountFula} FULA to ${userEmail} from tx ${txHash}`);
 
+      const newStatus = await getUserCreditStatus(userEmail);
       res.json({
         success: true,
         amountFula,
-        newBalance: getUserCreditStatus(db, userEmail).balanceFula,
+        newBalance: newStatus.balanceFula,
       });
     } catch (error) {
       console.error('[api/v1] Error claiming transaction:', error);
@@ -2544,7 +2222,7 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
   });
 
   // GET /api/v1/credits/history - Paginated credit history
-  app.get('/api/v1/credits/history', requireApiAuth, (req: Request, res: Response) => {
+  app.get('/api/v1/credits/history', requireApiAuth, async (req: Request, res: Response) => {
     try {
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
@@ -2553,28 +2231,36 @@ export function createApp(config: AppConfig, db: Database.Database, options?: { 
       const userEmail = req.apiUser!.email;
 
       // Get total count
-      const countResult = db.prepare(`
-        SELECT COUNT(*) as total FROM credit_history WHERE user_email = ?
-      `).get(userEmail) as { total: number };
+      const countResult = await query<{ total: string }>(
+        `SELECT COUNT(*)::text as total FROM credit_history WHERE user_email = $1`,
+        [userEmail]
+      );
 
-      const total = countResult?.total || 0;
+      const total = parseInt(countResult.rows[0]?.total || '0', 10);
       const totalPages = Math.ceil(total / limit);
 
       // Get paginated history
-      const history = db.prepare(`
+      const historyResult = await query<{
+        txtype: string;
+        amountfula: number;
+        balanceafter: number;
+        referenceid: string | null;
+        createdat: string;
+      }>(`
         SELECT tx_type as txType, amount_fula as amountFula, balance_after as balanceAfter,
                reference_id as referenceId, created_at as createdAt
         FROM credit_history
-        WHERE user_email = ?
+        WHERE user_email = $1
         ORDER BY created_at DESC
-        LIMIT ? OFFSET ?
-      `).all(userEmail, limit, offset) as Array<{
-        txType: string;
-        amountFula: number;
-        balanceAfter: number;
-        referenceId: string | null;
-        createdAt: string;
-      }>;
+        LIMIT $2 OFFSET $3
+      `, [userEmail, limit, offset]);
+      const history = historyResult.rows.map(r => ({
+        txType: r.txtype,
+        amountFula: r.amountfula,
+        balanceAfter: r.balanceafter,
+        referenceId: r.referenceid,
+        createdAt: r.createdat,
+      }));
 
       res.json({
         history,

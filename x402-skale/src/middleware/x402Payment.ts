@@ -360,11 +360,11 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
       priceUsdc: microUsdcToUsdc(requiredMicroUsdc),
     };
 
-    // Log payment to database
+    // Log payment to database (async)
     const bucket = c.req.param('bucket');
     const key = c.req.param('key');
-    createPaymentLog(paymentInfo, bucket, key);
-    markPaymentVerified(paymentInfo.paymentId);
+    await createPaymentLog(paymentInfo, bucket, key);
+    await markPaymentVerified(paymentInfo.paymentId);
 
     // Store payment info in context for downstream handlers
     c.set('x402Payment', paymentInfo);
@@ -393,7 +393,7 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
 
       if (settlement.success) {
         console.log(`[x402] Payment settled: ${paymentInfo.paymentId}, tx: ${settlement.txHash}`);
-        markPaymentSettled(paymentInfo.paymentId, settlement.txHash);
+        await markPaymentSettled(paymentInfo.paymentId, settlement.txHash);
         paymentInfo.txHash = settlement.txHash;
         c.set('x402Payment', paymentInfo);
 
@@ -416,16 +416,16 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
         });
       } else {
         console.error('[x402] Settlement failed:', settlement.error);
-        markPaymentFailed(paymentInfo.paymentId, settlement.error || 'Settlement failed');
+        await markPaymentFailed(paymentInfo.paymentId, settlement.error || 'Settlement failed');
       }
     } catch (error) {
       console.error('[x402] Settlement error:', error);
       const message = error instanceof Error ? error.message : 'Unknown error';
-      markPaymentFailed(paymentInfo.paymentId, message);
+      await markPaymentFailed(paymentInfo.paymentId, message);
     }
   } else {
     // Request failed, mark payment as failed
-    markPaymentFailed(paymentInfo.paymentId, `Request failed with status ${c.res.status}`);
+    await markPaymentFailed(paymentInfo.paymentId, `Request failed with status ${c.res.status}`);
   }
 });
 

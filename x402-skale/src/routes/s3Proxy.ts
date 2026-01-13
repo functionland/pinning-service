@@ -107,7 +107,7 @@ s3ProxyRoutes.put(
     const expiresAt = new Date(Date.now() + payment.ttlSeconds * 1000);
     const userId = jwtUser?.sub || jwtUser?.email || payment.payer;
 
-    trackEphemeralObject({
+    await trackEphemeralObject({
       bucket,
       key,
       wallet: userId,  // This is actually the user_id (email from JWT sub)

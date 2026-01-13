@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-const Database = require('better-sqlite3');
+const { createPostgresPool, validateSession: pgValidateSession, getUserPoolId: pgGetUserPoolId, closePool } = require('./database/postgres.js');
 
 let create, fileTypeFromBuffer;
 
@@ -10,7 +10,6 @@ let create, fileTypeFromBuffer;
 const config = {
   port: parseInt(process.env.PORT || '3300', 10),
   ipfsApiUrl: process.env.IPFS_API_URL || 'http://127.0.0.1:5001',
-  databasePath: process.env.DATABASE_PATH || path.join(process.cwd(), '..', 'data', 'pinning.db'),
   uploadDir: process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads'),
   maxFileSize: parseInt(process.env.MAX_FILE_SIZE || String(800 * 1024 * 1024), 10), // 800MB default
   ipfsTimeout: parseInt(process.env.IPFS_TIMEOUT || '60000', 10), // 60 second timeout
@@ -29,29 +28,9 @@ if (!fs.existsSync(config.uploadDir)) {
   const fileType = await import('file-type');
   fileTypeFromBuffer = fileType.fileTypeFromBuffer;
 
-  // Initialize SQLite database (read-only)
-  let db;
-  function initializeDatabase() {
-    const dbPath = config.databasePath;
-    
-    if (!fs.existsSync(dbPath)) {
-      console.error(`Database file not found: ${dbPath}`);
-      console.error('Make sure the pinning service has been started at least once to create the database.');
-      process.exit(1);
-    }
-
-    // Open database in read-only mode for security
-    db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    
-    // Prepare statements for better performance
-    db.validateSession = db.prepare('SELECT username FROM sessions WHERE session_token = ?');
-    db.getUserPoolId = db.prepare('SELECT pool_id FROM users WHERE username = ?');
-    
-    console.log(`SQLite database connected (read-only): ${dbPath}`);
-    return db;
-  }
-
-  db = initializeDatabase();
+  // Initialize PostgreSQL connection pool
+  const pool = createPostgresPool();
+  console.log('PostgreSQL connection pool initialized');
 
   const app = express();
   
@@ -111,43 +90,43 @@ if (!fs.existsSync(config.uploadDir)) {
     console.error(`Make sure IPFS daemon is running on ${config.ipfsApiUrl}`);
   }
 
-  // Validate session token using SQLite (synchronous for better performance)
-  function validateSession(token) {
+  // Validate session token using PostgreSQL
+  async function validateSession(token) {
     // Handle "Bearer " prefix
     const sessionToken = token.startsWith('Bearer ') ? token.slice(7) : token;
-    
-    const row = db.validateSession.get(sessionToken);
+
+    const row = await pgValidateSession(sessionToken);
     if (!row) {
       return null;
     }
     return row.username;
   }
 
-  // Get user's pool ID from SQLite
-  function getUserPoolId(username) {
+  // Get user's pool ID from PostgreSQL
+  async function getUserPoolId(username) {
     const defaultPoolId = 1;
-    
-    const row = db.getUserPoolId.get(username);
+
+    const row = await pgGetUserPoolId(username);
     if (!row || row.pool_id === null || row.pool_id === undefined) {
       return defaultPoolId;
     }
     return row.pool_id;
   }
 
-  // Authentication middleware
-  function authenticate(req, res, next) {
+  // Authentication middleware (async)
+  async function authenticate(req, res, next) {
     const authToken = req.headers['authorization'];
     if (!authToken) {
       return res.status(401).json({ error: 'No authentication token provided' });
     }
 
     try {
-      const username = validateSession(authToken);
+      const username = await validateSession(authToken);
       if (!username) {
         return res.status(401).json({ error: 'Invalid or expired session token' });
       }
 
-      const poolId = getUserPoolId(username);
+      const poolId = await getUserPoolId(username);
       req.username = username;
       req.poolId = poolId;
       next();
@@ -307,15 +286,15 @@ if (!fs.existsSync(config.uploadDir)) {
   });
 
   // Graceful shutdown
-  process.on('SIGTERM', () => {
+  process.on('SIGTERM', async () => {
     console.log('SIGTERM received, shutting down gracefully...');
-    db.close();
+    await closePool();
     process.exit(0);
   });
 
-  process.on('SIGINT', () => {
+  process.on('SIGINT', async () => {
     console.log('SIGINT received, shutting down gracefully...');
-    db.close();
+    await closePool();
     process.exit(0);
   });
 
@@ -323,7 +302,7 @@ if (!fs.existsSync(config.uploadDir)) {
   app.listen(config.port, () => {
     console.log(`IPFS Gateway Server running on port ${config.port}`);
     console.log(`  - IPFS API: ${config.ipfsApiUrl}`);
-    console.log(`  - Database: ${config.databasePath}`);
+    console.log(`  - Database: PostgreSQL (${process.env.POSTGRES_HOST || 'localhost'}:${process.env.POSTGRES_PORT || '5432'})`);
     console.log(`  - Max file size: ${Math.round(config.maxFileSize / 1024 / 1024)}MB`);
   });
 

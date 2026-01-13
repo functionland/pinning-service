@@ -6,7 +6,7 @@
 
 import { Hono } from 'hono';
 import type { Env, HealthResponse } from '../types/index.js';
-import { getDatabase } from '../database/index.js';
+import { query } from '../database/index.js';
 import { getPricingInfo, getPricingConfig } from '../services/pricing.js';
 import { getCleanupStats } from '../database/repositories/ephemeralObjects.js';
 
@@ -19,12 +19,11 @@ export const healthRoutes = new Hono<Env>();
  *
  * Basic health check endpoint.
  */
-healthRoutes.get('/', (c) => {
+healthRoutes.get('/', async (c) => {
   let dbStatus: 'connected' | 'disconnected' = 'disconnected';
 
   try {
-    const db = getDatabase();
-    db.prepare('SELECT 1').get();
+    await query('SELECT 1');
     dbStatus = 'connected';
   } catch {
     dbStatus = 'disconnected';
@@ -46,15 +45,14 @@ healthRoutes.get('/', (c) => {
  *
  * Detailed health check with stats.
  */
-healthRoutes.get('/detailed', (c) => {
+healthRoutes.get('/detailed', async (c) => {
   let dbStatus: 'connected' | 'disconnected' = 'disconnected';
   let cleanupStats = null;
 
   try {
-    const db = getDatabase();
-    db.prepare('SELECT 1').get();
+    await query('SELECT 1');
     dbStatus = 'connected';
-    cleanupStats = getCleanupStats();
+    cleanupStats = await getCleanupStats();
   } catch {
     dbStatus = 'disconnected';
   }

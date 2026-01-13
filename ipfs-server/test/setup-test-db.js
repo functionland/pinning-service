@@ -1,78 +1,93 @@
 /**
  * Setup test database for ipfs-server tests
- * Creates a SQLite database with test user and session
+ * Creates test user and session in PostgreSQL
+ *
+ * Requires PostgreSQL environment variables:
+ *   POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+ *
+ * For testing, use a Docker container:
+ *   docker run -d --name postgres-test \
+ *     -e POSTGRES_DB=pinning_service_test \
+ *     -e POSTGRES_USER=test_user \
+ *     -e POSTGRES_PASSWORD=test_pass \
+ *     -p 5433:5432 \
+ *     postgres:15
  */
 
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
+const { createPostgresPool, query, closePool } = require('../database/postgres.js');
 
-const TEST_DB_PATH = path.join(__dirname, 'test.db');
 const TEST_TOKEN = 'test-token-for-ipfs-gateway';
 const TEST_USERNAME = 'test@gateway.local';
+const TEST_POOL_ID = 42;
 
-function setupTestDatabase() {
-  // Remove existing test database
-  if (fs.existsSync(TEST_DB_PATH)) {
-    fs.unlinkSync(TEST_DB_PATH);
-  }
+async function setupTestDatabase() {
+  console.log('Setting up PostgreSQL test database...');
 
-  const db = new Database(TEST_DB_PATH);
+  // Initialize connection pool
+  createPostgresPool();
 
-  // Create tables (matching pinning service schema)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      pool_id INTEGER DEFAULT 1,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS sessions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL,
-      session_token TEXT UNIQUE NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expires_at DATETIME,
-      FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(session_token);
-    CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-  `);
+  // Clear any existing test data
+  await query('DELETE FROM sessions WHERE username = $1', [TEST_USERNAME]);
+  await query('DELETE FROM users WHERE username = $1', [TEST_USERNAME]);
 
   // Insert test user
-  db.prepare(`
-    INSERT OR REPLACE INTO users (username, password_hash, pool_id)
-    VALUES (?, ?, ?)
-  `).run(TEST_USERNAME, 'test-hash', 42);
+  await query(
+    `INSERT INTO users (username, password_hash, pool_id)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (username) DO UPDATE SET pool_id = $3`,
+    [TEST_USERNAME, 'test-hash', TEST_POOL_ID]
+  );
 
   // Insert test session
-  db.prepare(`
-    INSERT OR REPLACE INTO sessions (username, session_token)
-    VALUES (?, ?)
-  `).run(TEST_USERNAME, TEST_TOKEN);
+  await query(
+    `INSERT INTO sessions (username, session_token, created_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (session_token) DO UPDATE SET username = $1, created_at = NOW()`,
+    [TEST_USERNAME, TEST_TOKEN]
+  );
 
-  db.close();
-
-  console.log('Test database created:', TEST_DB_PATH);
-  console.log('Test token:', TEST_TOKEN);
-  console.log('Test username:', TEST_USERNAME);
-  console.log('Test pool_id:', 42);
+  console.log('Test database setup complete:');
+  console.log('  Test token:', TEST_TOKEN);
+  console.log('  Test username:', TEST_USERNAME);
+  console.log('  Test pool_id:', TEST_POOL_ID);
 
   return {
-    dbPath: TEST_DB_PATH,
     token: TEST_TOKEN,
     username: TEST_USERNAME,
-    poolId: 42
+    poolId: TEST_POOL_ID
   };
+}
+
+async function cleanupTestDatabase() {
+  console.log('Cleaning up PostgreSQL test database...');
+
+  // Remove test data
+  await query('DELETE FROM sessions WHERE username = $1', [TEST_USERNAME]);
+  await query('DELETE FROM users WHERE username = $1', [TEST_USERNAME]);
+
+  // Close pool
+  await closePool();
+
+  console.log('Test database cleanup complete');
 }
 
 // Run if called directly
 if (require.main === module) {
-  setupTestDatabase();
+  setupTestDatabase()
+    .then(() => {
+      console.log('Setup complete');
+      return closePool();
+    })
+    .catch(err => {
+      console.error('Setup failed:', err);
+      process.exit(1);
+    });
 }
 
-module.exports = { setupTestDatabase, TEST_DB_PATH, TEST_TOKEN, TEST_USERNAME };
+module.exports = {
+  setupTestDatabase,
+  cleanupTestDatabase,
+  TEST_TOKEN,
+  TEST_USERNAME,
+  TEST_POOL_ID
+};

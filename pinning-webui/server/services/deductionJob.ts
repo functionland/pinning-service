@@ -6,9 +6,10 @@
  *
  * If balance goes negative, user is suspended.
  * Runs every hour.
+ * Uses PostgreSQL for database operations.
  */
 
-import Database from 'better-sqlite3';
+import { query, getClient } from '../database/postgres.js';
 
 // Configuration (from env or defaults)
 const FREE_TIER_BYTES = parseInt(process.env.FREE_TIER_BYTES || '524288000'); // 500MB
@@ -22,19 +23,20 @@ interface UserStorage {
 }
 
 // Get all users with storage over free tier
-function getUsersOverFreeTier(db: Database.Database): UserStorage[] {
+async function getUsersOverFreeTier(): Promise<UserStorage[]> {
   // Query pins table for users with total storage > free tier
-  const users = db.prepare(`
-    SELECT username, SUM(size) as totalSize
-    FROM pins
-    WHERE status != 'deleted'
-    GROUP BY username
-    HAVING SUM(size) > ?
-  `).all(FREE_TIER_BYTES) as Array<{ username: string; totalSize: number }>;
+  const result = await query<{ username: string; totalsize: string }>(
+    `SELECT username, SUM(size) as totalsize
+     FROM pins
+     WHERE status != 'deleted'
+     GROUP BY username
+     HAVING SUM(size) > $1`,
+    [FREE_TIER_BYTES]
+  );
 
-  return users.map(u => ({
+  return result.rows.map(u => ({
     username: u.username,
-    totalSize: u.totalSize || 0,
+    totalSize: parseInt(u.totalsize || '0', 10),
   }));
 }
 
@@ -49,28 +51,34 @@ function calculateHourlyDeduction(totalBytes: number): number {
 }
 
 // Process deduction for a single user
-function processUserDeduction(db: Database.Database, username: string, storageBytes: number): {
+async function processUserDeduction(username: string, storageBytes: number): Promise<{
   deducted: boolean;
   amount: number;
   suspended: boolean;
-} {
+}> {
   const deductionAmount = calculateHourlyDeduction(storageBytes);
 
   if (deductionAmount <= 0) {
     return { deducted: false, amount: 0, suspended: false };
   }
 
-  const transaction = db.transaction(() => {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
     // Get or create user credits
-    const credits = db.prepare(`
-      SELECT balance_fula, is_suspended FROM user_credits WHERE user_email = ?
-    `).get(username) as { balance_fula: number; is_suspended: number } | undefined;
+    const creditsResult = await client.query<{ balance_fula: number; is_suspended: number }>(
+      'SELECT balance_fula, is_suspended FROM user_credits WHERE user_email = $1',
+      [username]
+    );
+    const credits = creditsResult.rows[0];
 
     let currentBalance = credits?.balance_fula || 0;
     let isSuspended = credits?.is_suspended === 1;
 
     // Skip if already suspended (they'll be unsuspended when they add credits)
     if (isSuspended) {
+      await client.query('COMMIT');
       return { deducted: false, amount: 0, suspended: true };
     }
 
@@ -79,75 +87,88 @@ function processUserDeduction(db: Database.Database, username: string, storageBy
 
     if (credits) {
       // Update existing record
-      db.prepare(`
-        UPDATE user_credits
-        SET balance_fula = ?,
-            total_deducted_fula = total_deducted_fula + ?,
-            last_deduction_at = CURRENT_TIMESTAMP,
-            is_suspended = ?,
-            suspended_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE suspended_at END,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE user_email = ?
-      `).run(newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend ? 1 : 0, username);
+      await client.query(
+        `UPDATE user_credits
+         SET balance_fula = $1,
+             total_deducted_fula = total_deducted_fula + $2,
+             last_deduction_at = NOW(),
+             is_suspended = $3,
+             suspended_at = CASE WHEN $4 THEN NOW() ELSE suspended_at END,
+             updated_at = NOW()
+         WHERE user_email = $5`,
+        [newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend, username]
+      );
     } else {
       // Create new record with negative balance
-      db.prepare(`
-        INSERT INTO user_credits (user_email, balance_fula, total_deducted_fula, is_suspended, suspended_at, last_deduction_at)
-        VALUES (?, ?, ?, ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, CURRENT_TIMESTAMP)
-      `).run(username, newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend ? 1 : 0);
+      await client.query(
+        `INSERT INTO user_credits (user_email, balance_fula, total_deducted_fula, is_suspended, suspended_at, last_deduction_at)
+         VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN NOW() ELSE NULL END, NOW())`,
+        [username, newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend]
+      );
     }
 
     // Log the deduction
-    db.prepare(`
-      INSERT INTO credit_history (user_email, tx_type, amount_fula, balance_after, reference_id)
-      VALUES (?, 'hourly_deduction', ?, ?, ?)
-    `).run(username, -deductionAmount, newBalance, new Date().toISOString());
+    await client.query(
+      `INSERT INTO credit_history (user_email, tx_type, amount_fula, balance_after, reference_id)
+       VALUES ($1, 'hourly_deduction', $2, $3, $4)`,
+      [username, -deductionAmount, newBalance, new Date().toISOString()]
+    );
 
+    await client.query('COMMIT');
     return { deducted: true, amount: deductionAmount, suspended: shouldSuspend };
-  });
-
-  return transaction();
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // Check if users should be unsuspended (e.g., they unpinned content)
-function checkForUnsuspension(db: Database.Database): number {
+async function checkForUnsuspension(): Promise<number> {
   // Get suspended users
-  const suspendedUsers = db.prepare(`
-    SELECT user_email FROM user_credits WHERE is_suspended = 1
-  `).all() as Array<{ user_email: string }>;
+  const suspendedResult = await query<{ user_email: string }>(
+    'SELECT user_email FROM user_credits WHERE is_suspended = 1'
+  );
 
   let unsuspendedCount = 0;
 
-  for (const user of suspendedUsers) {
+  for (const user of suspendedResult.rows) {
     // Check their current storage
-    const storage = db.prepare(`
-      SELECT COALESCE(SUM(size), 0) as totalSize
-      FROM pins
-      WHERE username = ? AND status != 'deleted'
-    `).get(user.user_email) as { totalSize: number };
+    const storageResult = await query<{ totalsize: string }>(
+      `SELECT COALESCE(SUM(size), 0) as totalsize
+       FROM pins
+       WHERE username = $1 AND status != 'deleted'`,
+      [user.user_email]
+    );
+    const storage = parseInt(storageResult.rows[0]?.totalsize || '0', 10);
 
     // If under free tier, unsuspend them
-    if (storage.totalSize < FREE_TIER_BYTES) {
-      db.prepare(`
-        UPDATE user_credits
-        SET is_suspended = 0, suspended_at = NULL, updated_at = CURRENT_TIMESTAMP
-        WHERE user_email = ?
-      `).run(user.user_email);
+    if (storage < FREE_TIER_BYTES) {
+      await query(
+        `UPDATE user_credits
+         SET is_suspended = 0, suspended_at = NULL, updated_at = NOW()
+         WHERE user_email = $1`,
+        [user.user_email]
+      );
 
       console.log(`[deductionJob] Unsuspended ${user.user_email} (now under free tier)`);
       unsuspendedCount++;
     } else {
       // Check if they have positive balance
-      const credits = db.prepare(`
-        SELECT balance_fula FROM user_credits WHERE user_email = ?
-      `).get(user.user_email) as { balance_fula: number } | undefined;
+      const creditsResult = await query<{ balance_fula: number }>(
+        'SELECT balance_fula FROM user_credits WHERE user_email = $1',
+        [user.user_email]
+      );
+      const credits = creditsResult.rows[0];
 
       if (credits && credits.balance_fula > 0) {
-        db.prepare(`
-          UPDATE user_credits
-          SET is_suspended = 0, suspended_at = NULL, updated_at = CURRENT_TIMESTAMP
-          WHERE user_email = ?
-        `).run(user.user_email);
+        await query(
+          `UPDATE user_credits
+           SET is_suspended = 0, suspended_at = NULL, updated_at = NOW()
+           WHERE user_email = $1`,
+          [user.user_email]
+        );
 
         console.log(`[deductionJob] Unsuspended ${user.user_email} (has positive balance)`);
         unsuspendedCount++;
@@ -159,17 +180,17 @@ function checkForUnsuspension(db: Database.Database): number {
 }
 
 // Main deduction function
-export async function runDeductionJob(db: Database.Database): Promise<void> {
+export async function runDeductionJob(): Promise<void> {
   console.log('[deductionJob] Starting hourly deduction...');
 
   // First, check for users who should be unsuspended
-  const unsuspended = checkForUnsuspension(db);
+  const unsuspended = await checkForUnsuspension();
   if (unsuspended > 0) {
     console.log(`[deductionJob] Unsuspended ${unsuspended} users`);
   }
 
   // Get users over free tier
-  const users = getUsersOverFreeTier(db);
+  const users = await getUsersOverFreeTier();
 
   if (users.length === 0) {
     console.log('[deductionJob] No users over free tier');
@@ -181,14 +202,18 @@ export async function runDeductionJob(db: Database.Database): Promise<void> {
   let usersSuspended = 0;
 
   for (const user of users) {
-    const result = processUserDeduction(db, user.username, user.totalSize);
+    try {
+      const result = await processUserDeduction(user.username, user.totalSize);
 
-    if (result.deducted) {
-      totalDeducted += result.amount;
-      usersDeducted++;
-    }
-    if (result.suspended) {
-      usersSuspended++;
+      if (result.deducted) {
+        totalDeducted += result.amount;
+        usersDeducted++;
+      }
+      if (result.suspended) {
+        usersSuspended++;
+      }
+    } catch (error) {
+      console.error(`[deductionJob] Error processing ${user.username}:`, error);
     }
   }
 
@@ -198,7 +223,7 @@ export async function runDeductionJob(db: Database.Database): Promise<void> {
 // Start the cron job
 let deductionInterval: NodeJS.Timeout | null = null;
 
-export function startDeductionJob(db: Database.Database, intervalMs: number = 60 * 60 * 1000): void {
+export function startDeductionJob(intervalMs: number = 60 * 60 * 1000): void {
   if (deductionInterval) {
     console.log('[deductionJob] Deduction job already running');
     return;
@@ -210,7 +235,7 @@ export function startDeductionJob(db: Database.Database, intervalMs: number = 60
   // This prevents double-deduction if server restarts
 
   deductionInterval = setInterval(() => {
-    runDeductionJob(db).catch(err => console.error('[deductionJob] Error:', err));
+    runDeductionJob().catch(err => console.error('[deductionJob] Error:', err));
   }, intervalMs);
 }
 

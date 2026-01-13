@@ -65,14 +65,10 @@ export async function deriveEncryptionKey(
 /**
  * Derives a playlist encryption key from user credentials using PBKDF2
  *
- * NOTE: This is different from deriveEncryptionKey()!
- * Due to a bug in FxFiles Flutter app, PlaylistService uses just the raw
- * Google ID without the "google:" prefix, while AuthService uses "google:{id}".
+ * Uses the same key format as file encryption: "google:{googleId}"
+ * (Fixed from previous bug where playlists used raw ID without prefix)
  *
- * - Files: Key from "google:{googleId}" + salt "fula-files-v1:{email}"
- * - Playlists: Key from just "{googleId}" + salt "fula-files-v1:{email}"
- *
- * @param googleUserId - The Google user ID (raw, without prefix)
+ * @param googleUserId - The Google user ID
  * @param userEmail - The user's email address (used as salt)
  * @returns Promise<CryptoKey> - The derived AES-GCM key for playlists
  */
@@ -80,39 +76,8 @@ export async function derivePlaylistEncryptionKey(
   googleUserId: string,
   userEmail: string
 ): Promise<CryptoKey> {
-  const encoder = new TextEncoder();
-
-  // NOTE: Playlists use just the raw Google ID, NOT "google:{id}"
-  // This is a bug in FxFiles PlaylistService._getEncryptionKey()
-  const password = googleUserId;
-
-  // Salt format: "fula-files-v1:{email}" - same as file encryption
-  const salt = encoder.encode(`${SALT_PREFIX}${userEmail}`);
-
-  // Import the password as the base key material
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(password),
-    'PBKDF2',
-    false,
-    ['deriveBits', 'deriveKey']
-  );
-
-  // Derive the AES-GCM key using PBKDF2
-  const derivedKey = await crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: salt,
-      iterations: PBKDF2_ITERATIONS,
-      hash: 'SHA-256',
-    },
-    keyMaterial,
-    { name: 'AES-GCM', length: KEY_LENGTH_BITS },
-    true, // extractable
-    ['encrypt', 'decrypt']
-  );
-
-  return derivedKey;
+  // Now uses same format as file encryption
+  return deriveEncryptionKey(googleUserId, userEmail);
 }
 
 /**
@@ -134,6 +99,22 @@ export async function importKey(keyBytes: Uint8Array): Promise<CryptoKey> {
     true,
     ['encrypt', 'decrypt']
   );
+}
+
+/**
+ * Derives encryption key bytes directly (for fula-client)
+ * Returns raw 32-byte Uint8Array instead of CryptoKey
+ *
+ * @param googleUserId - The Google user ID
+ * @param userEmail - The user's email address
+ * @returns Promise<Uint8Array> - 32-byte key
+ */
+export async function deriveEncryptionKeyBytes(
+  googleUserId: string,
+  userEmail: string
+): Promise<Uint8Array> {
+  const key = await deriveEncryptionKey(googleUserId, userEmail);
+  return exportKey(key);
 }
 
 /**

@@ -1,10 +1,19 @@
 /**
  * Tests for IPFS Gateway Server
- * 
+ *
  * Prerequisites:
- * 1. Run: npm run test:setup (creates test database)
- * 2. Have IPFS daemon running on localhost:5001
- * 
+ * 1. Have PostgreSQL running with test database
+ *    docker run -d --name postgres-test \
+ *      -e POSTGRES_DB=pinning_service_test \
+ *      -e POSTGRES_USER=test_user \
+ *      -e POSTGRES_PASSWORD=test_pass \
+ *      -p 5433:5432 \
+ *      postgres:15
+ * 2. Set environment variables:
+ *    export POSTGRES_HOST=localhost POSTGRES_PORT=5433 POSTGRES_DB=pinning_service_test
+ *    export POSTGRES_USER=test_user POSTGRES_PASSWORD=test_pass
+ * 3. Have IPFS daemon running on localhost:5001
+ *
  * Run tests: npm test
  */
 
@@ -13,7 +22,7 @@ const assert = require('node:assert');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { setupTestDatabase, TEST_DB_PATH, TEST_TOKEN } = require('./setup-test-db.js');
+const { setupTestDatabase, cleanupTestDatabase, TEST_TOKEN, TEST_POOL_ID } = require('./setup-test-db.js');
 
 // Test configuration
 const PORT = 3399; // Use different port for tests
@@ -49,7 +58,7 @@ function uploadFile(filePath, token) {
     const boundary = '----TestBoundary' + Math.random().toString(36).substring(2);
     const fileName = path.basename(filePath);
     const fileContent = fs.readFileSync(filePath);
-    
+
     const bodyParts = [
       `--${boundary}`,
       `Content-Disposition: form-data; name="file"; filename="${fileName}"`,
@@ -119,22 +128,28 @@ function waitForServer(maxAttempts = 30) {
 }
 
 describe('IPFS Gateway Server Tests', () => {
-  
+
   before(async () => {
-    // Setup test database
+    // Setup test database (PostgreSQL)
     console.log('Setting up test database...');
-    setupTestDatabase();
-    
+    await setupTestDatabase();
+
     // Start server with test config
     console.log('Starting test server...');
     const { spawn } = require('child_process');
-    
+
+    // Pass PostgreSQL environment variables to the server process
     serverProcess = spawn('node', ['server.js'], {
       cwd: path.join(__dirname, '..'),
       env: {
         ...process.env,
         PORT: PORT.toString(),
-        DATABASE_PATH: TEST_DB_PATH,
+        // PostgreSQL connection (inherited from environment or set explicitly)
+        POSTGRES_HOST: process.env.POSTGRES_HOST || 'localhost',
+        POSTGRES_PORT: process.env.POSTGRES_PORT || '5433',
+        POSTGRES_DB: process.env.POSTGRES_DB || 'pinning_service_test',
+        POSTGRES_USER: process.env.POSTGRES_USER || 'test_user',
+        POSTGRES_PASSWORD: process.env.POSTGRES_PASSWORD || 'test_pass',
         IPFS_API_URL: 'http://127.0.0.1:5001',
         UPLOAD_DIR: path.join(__dirname, 'uploads'),
         NODE_ENV: 'test'
@@ -161,12 +176,10 @@ describe('IPFS Gateway Server Tests', () => {
       serverProcess.kill('SIGTERM');
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    
-    // Remove test database
-    if (fs.existsSync(TEST_DB_PATH)) {
-      fs.unlinkSync(TEST_DB_PATH);
-    }
-    
+
+    // Cleanup test database
+    await cleanupTestDatabase();
+
     // Remove test uploads directory
     const uploadsDir = path.join(__dirname, 'uploads');
     if (fs.existsSync(uploadsDir)) {
@@ -249,7 +262,7 @@ describe('IPFS Gateway Server Tests', () => {
         assert.strictEqual(res.status, 200);
         assert.ok(res.data.cid, 'Should return CID');
         assert.ok(res.data.cid.startsWith('bafkrei'), 'CID should be v1 format');
-        assert.strictEqual(res.data.poolId, 42, 'Should return user pool ID');
+        assert.strictEqual(res.data.poolId, TEST_POOL_ID, 'Should return user pool ID');
         assert.ok(res.data.size > 0, 'Should return file size');
 
         console.log('Uploaded CID:', res.data.cid);
@@ -300,7 +313,7 @@ describe('IPFS Gateway Server Tests', () => {
 
     it('should return 404 for non-existent CID', async () => {
       const fakeCid = 'bafkreixxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
-      
+
       const res = await makeRequest({
         hostname: 'localhost',
         port: PORT,

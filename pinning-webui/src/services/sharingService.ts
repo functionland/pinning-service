@@ -365,14 +365,18 @@ export async function processSharePayloadV2(
     id: token.id,
     mode: token.mode,
     hasSnapshotBinding: !!token.snapshot_binding,
+    snapshotStorageKey: token.snapshot_binding?.storage_key,
     expiresAt: token.expires_at,
+    pathScope: token.path_scope,
   });
 
-  // Get storage key from snapshot_binding
-  const storageKey = token.snapshot_binding?.storage_key;
+  // Get storage key from snapshot_binding OR from payload.k
+  // For temporal mode, snapshot_binding may not exist
+  const storageKey = token.snapshot_binding?.storage_key || payload.k;
   if (!storageKey) {
-    throw new Error('V2 share token missing snapshot_binding.storage_key');
+    throw new Error('V2 share: no storage key found in snapshot_binding or payload.k');
   }
+  console.log('[processSharePayloadV2] Using storage key:', storageKey);
 
   // Decode secret key
   const secretKey = base64ToUint8Array(payload.sk);

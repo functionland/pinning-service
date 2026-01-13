@@ -133,7 +133,7 @@ func main() {
 		systemKey = "disabled"
 	}
 	adminAPIController := openapi.NewAdminAPIControllerPostgres(postgresService, systemKey)
-	adminRouter := openapi.NewAdminRouter(adminAPIController)
+	adminRouter := openapi.NewAdminRouterPostgres(adminAPIController)
 
 	// Initialize router
 	mainRouter := openapi.NewRouter(pinsAPIController)

@@ -281,6 +281,6 @@ cd /root/pinning-service
 git pull
 go mod download
 systemctl stop fula-pinning-service
-go build -o /home/root/pinning-service/ipfs-pinning -tags "sqlite" main_sqlite.go
+go build -o /home/root/pinning-service/ipfs-pinning main_postgres.go
 systemctl start fula-pinning-service
 systemctl status fula-pinning-service

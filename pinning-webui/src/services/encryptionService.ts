@@ -577,16 +577,15 @@ export async function decrypt(
   
   // Extract nonce (first 12 bytes)
   const nonce = encryptedData.slice(0, NONCE_LENGTH);
-  
-  // Extract tag (next 16 bytes)
-  const tag = encryptedData.slice(NONCE_LENGTH, NONCE_LENGTH + TAG_LENGTH);
-  
-  // Extract ciphertext (remaining bytes)
-  const ciphertext = encryptedData.slice(NONCE_LENGTH + TAG_LENGTH);
-  
+
+  // FxFiles stores: nonce | ciphertext | mac (mac at the END)
+  // Extract ciphertext (middle bytes)
+  const ciphertext = encryptedData.slice(NONCE_LENGTH, encryptedData.length - TAG_LENGTH);
+
+  // Extract tag/mac (last 16 bytes)
+  const tag = encryptedData.slice(encryptedData.length - TAG_LENGTH);
+
   // Web Crypto API expects ciphertext + tag concatenated
-  // FxFiles stores: nonce | tag | ciphertext
-  // We need: nonce, ciphertext | tag
   const ciphertextWithTag = new Uint8Array(ciphertext.length + tag.length);
   ciphertextWithTag.set(ciphertext, 0);
   ciphertextWithTag.set(tag, ciphertext.length);
@@ -636,14 +635,14 @@ export async function encrypt(
   const encryptedArray = new Uint8Array(encrypted);
   
   // Web Crypto returns: ciphertext | tag
-  // We need to reformat to: nonce | tag | ciphertext (FxFiles format)
+  // Reformat to: nonce | ciphertext | tag (FxFiles format - tag at end)
   const ciphertext = encryptedArray.slice(0, encryptedArray.length - TAG_LENGTH);
   const tag = encryptedArray.slice(encryptedArray.length - TAG_LENGTH);
-  
-  const result = new Uint8Array(NONCE_LENGTH + TAG_LENGTH + ciphertext.length);
+
+  const result = new Uint8Array(NONCE_LENGTH + ciphertext.length + TAG_LENGTH);
   result.set(nonce, 0);
-  result.set(tag, NONCE_LENGTH);
-  result.set(ciphertext, NONCE_LENGTH + TAG_LENGTH);
+  result.set(ciphertext, NONCE_LENGTH);
+  result.set(tag, NONCE_LENGTH + ciphertext.length);
   
   return result;
 }

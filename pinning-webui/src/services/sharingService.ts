@@ -49,7 +49,8 @@ export interface SharePayload {
   t?: ShareTokenData | string;  // Token: object for v1, JSON string for v2
   sk?: string;         // Secret key (base64) - link private key
   b?: string;          // Bucket name
-  k?: string;          // File key/path
+  k?: string;          // File key/path (v2: for DEK derivation only, NOT for fetching)
+  cid?: string;        // Storage key/CID (v2 only: for fetching from IPFS)
   l?: string;          // Label/name
   f?: string;          // Filename (v2 only)
   // Password-protected fields
@@ -370,15 +371,20 @@ export async function processSharePayloadV2(
     pathScope: token.path_scope,
   });
 
-  // Get storage key:
-  // 1. Snapshot mode: use snapshot_binding.storage_key (CID)
-  // 2. Temporal mode: use path_scope (contains the CID)
-  // Note: payload.k is the original filename for display, not the storage key
-  const storageKey = token.snapshot_binding?.storage_key || token.path_scope;
+  console.log('[processSharePayloadV2] Payload fields:', {
+    k: payload.k,       // Original path for DEK derivation
+    cid: payload.cid,   // Storage key for fetching
+  });
+
+  // V2 payload format:
+  // - payload.k = original filename path (used internally by fula_client for DEK derivation)
+  // - payload.cid = storage key/CID (used to fetch the encrypted file from IPFS)
+  // These are different values! The file is uploaded with key=filename but stored at CID
+  const storageKey = payload.cid || token.snapshot_binding?.storage_key || token.path_scope;
   if (!storageKey) {
-    throw new Error('V2 share: no storage key found in snapshot_binding or path_scope');
+    throw new Error('V2 share: no storage key found in payload.cid, snapshot_binding, or path_scope');
   }
-  console.log('[processSharePayloadV2] Using storage key:', storageKey, '(from', token.snapshot_binding?.storage_key ? 'snapshot_binding' : 'path_scope', ')');
+  console.log('[processSharePayloadV2] Using storage key:', storageKey, '(from', payload.cid ? 'payload.cid' : (token.snapshot_binding?.storage_key ? 'snapshot_binding' : 'path_scope'), ')');
 
   // Decode secret key
   const secretKey = base64ToUint8Array(payload.sk);

@@ -5,21 +5,41 @@
  * Handles client initialization and provides decryption functions.
  */
 
-import { createEncryptedClient, getDecrypted } from '@functionland/fula-client';
+import init, {
+  createEncryptedClient,
+  getDecrypted,
+  listBuckets,
+  listDecrypted,
+  listDirectory,
+} from '@functionland/fula-client';
 
 // Default gateway endpoint
-const FULA_GATEWAY_ENDPOINT = 'https://ipfs.cloud.fx.land:9000';
+const FULA_GATEWAY_ENDPOINT = 'https://s3.cloud.fx.land';
+
+// Track WASM initialization
+let wasmInitialized = false;
 
 // Cached client instance
 let cachedClient: any = null;
 let cachedSecretKey: Uint8Array | null = null;
+let cachedAccessToken: string | null = null;
+
+/**
+ * Initialize WASM module (must be called before using any fula-client functions)
+ */
+async function ensureWasmInitialized(): Promise<void> {
+  if (!wasmInitialized) {
+    await init();
+    wasmInitialized = true;
+  }
+}
 
 /**
  * Get or create an encrypted Fula client
  *
  * @param secretKey - 32-byte encryption key (from PBKDF2 derivation)
  * @param accessToken - JWT token for S3 authentication
- * @param endpoint - Gateway endpoint (default: https://ipfs.cloud.fx.land:9000)
+ * @param endpoint - Gateway endpoint (default: https://s3.cloud.fx.land)
  * @returns Encrypted client handle
  */
 export async function getFulaClient(
@@ -27,24 +47,28 @@ export async function getFulaClient(
   accessToken: string,
   endpoint: string = FULA_GATEWAY_ENDPOINT
 ): Promise<any> {
-  // Check if we can reuse cached client (same key)
-  if (cachedClient && cachedSecretKey && arraysEqual(secretKey, cachedSecretKey)) {
+  await ensureWasmInitialized();
+
+  // Check if we can reuse cached client (same key and token)
+  if (
+    cachedClient &&
+    cachedSecretKey &&
+    cachedAccessToken === accessToken &&
+    arraysEqual(secretKey, cachedSecretKey)
+  ) {
     return cachedClient;
   }
 
   // Create new encrypted client
-  const client = await createEncryptedClient({
-    endpoint,
-    accessToken,
-  }, {
-    secretKey,
-    enableMetadataPrivacy: true,
-    obfuscationMode: 'flatNamespace',
-  });
+  const client = await createEncryptedClient(
+    { endpoint, accessToken },
+    { secretKey, obfuscationMode: 'flatNamespace' }
+  );
 
   // Cache for reuse
   cachedClient = client;
   cachedSecretKey = new Uint8Array(secretKey);
+  cachedAccessToken = accessToken;
 
   return client;
 }
@@ -54,7 +78,7 @@ export async function getFulaClient(
  *
  * @param client - Fula encrypted client handle
  * @param bucket - Bucket name
- * @param path - Original file path (not CID)
+ * @param path - Original file path
  * @returns Decrypted data as Uint8Array
  */
 export async function fetchAndDecryptFula(
@@ -67,11 +91,54 @@ export async function fetchAndDecryptFula(
 }
 
 /**
+ * List all buckets
+ *
+ * @param client - Fula encrypted client handle
+ * @returns Array of bucket info
+ */
+export async function listFulaBuckets(client: any): Promise<any[]> {
+  return listBuckets(client);
+}
+
+/**
+ * List files in a bucket with decrypted metadata
+ *
+ * @param client - Fula encrypted client handle
+ * @param bucket - Bucket name
+ * @param options - List options (prefix, etc.)
+ * @returns Array of file info
+ */
+export async function listDecryptedFiles(
+  client: any,
+  bucket: string,
+  options?: { prefix?: string }
+): Promise<any[]> {
+  return listDecrypted(client, bucket, options || {});
+}
+
+/**
+ * List directory structure
+ *
+ * @param client - Fula encrypted client handle
+ * @param bucket - Bucket name
+ * @param prefix - Directory prefix
+ * @returns Directory listing
+ */
+export async function listFulaDirectory(
+  client: any,
+  bucket: string,
+  prefix: string
+): Promise<any> {
+  return listDirectory(client, bucket, prefix);
+}
+
+/**
  * Clear cached client (call on logout)
  */
 export function clearFulaClient(): void {
   cachedClient = null;
   cachedSecretKey = null;
+  cachedAccessToken = null;
 }
 
 /**

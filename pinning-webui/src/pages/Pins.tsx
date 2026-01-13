@@ -5,6 +5,7 @@ import { S3Client, ListObjectsCommand, GetObjectCommand } from '@aws-sdk/client-
 import {
   deriveEncryptionKey,
   derivePlaylistEncryptionKey,
+  deriveEncryptionKeyBytes,
   exportKey,
   importKey,
   fetchAndDecrypt,
@@ -13,6 +14,7 @@ import {
   computeHashedUserId,
   decrypt,
 } from '../services/encryptionService';
+import { getFulaClient, fetchAndDecryptFula } from '../services/fulaClientService';
 import {
   storeEncryptionKey,
   retrieveEncryptionKey,
@@ -448,7 +450,7 @@ export default function Pins() {
     }
   };
 
-  // Fetch shared by me data directly from S3 using user's JWT token
+  // Fetch shared by me data using fula-client
   // Bucket: fula-metadata, Key: .fula/shares/{hashedUserId}.json.enc
   const fetchSharedByMe = async () => {
     if (!user?.id || !user?.email) return;
@@ -465,7 +467,7 @@ export default function Pins() {
       }
       setSharedByMeNeedsKey(false);
 
-      // Step 2: Get JWT token for S3 authentication
+      // Step 2: Get JWT token for authentication
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) {
         throw new Error('Failed to get API key');
@@ -473,42 +475,31 @@ export default function Pins() {
       const { key: jwtToken } = await tokenRes.json();
       console.log('[SharedByMe] Got JWT token');
 
-      // Step 3: Compute hashedUserId from Google credentials
-      const hashedUserId = await computeHashedUserId(user.id, user.email);
-      console.log('[SharedByMe] Computed hashedUserId:', hashedUserId);
+      // Step 3: Create fula-client
+      const fulaClient = await getFulaClient(keyBytes, jwtToken, 'https://s3.cloud.fx.land');
+      console.log('[SharedByMe] Created fula-client');
 
-      // Step 4: Fetch from S3 directly
-      const s3Client = createS3Client(jwtToken);
+      // Step 4: Compute hashedUserId and construct path
+      const hashedUserId = await computeHashedUserId(user.id, user.email);
       const s3Key = `.fula/shares/${hashedUserId}.json.enc`;
-      console.log('[SharedByMe] Fetching from S3 - Bucket: fula-metadata, Key:', s3Key);
+      console.log('[SharedByMe] Fetching - Bucket: fula-metadata, Key:', s3Key);
 
       try {
-        const command = new GetObjectCommand({
-          Bucket: 'fula-metadata',
-          Key: s3Key,
-        });
-        const response = await s3Client.send(command);
-        const encryptedBytes = await streamToUint8Array(response.Body as ReadableStream<Uint8Array>);
-        console.log('[SharedByMe] Fetched', encryptedBytes.length, 'bytes');
-
-        // Step 5: Decrypt
-        const key = await importKey(keyBytes);
-        const decryptedBytes = await decrypt(encryptedBytes, key);
-
-        // Step 6: Parse JSON
+        // Step 5: Fetch and decrypt using fula-client
+        const decryptedBytes = await fetchAndDecryptFula(fulaClient, 'fula-metadata', s3Key);
         const jsonText = new TextDecoder().decode(decryptedBytes);
         console.log('[SharedByMe] Decrypted JSON:', jsonText.substring(0, 200));
 
         const sharesJson = JSON.parse(jsonText);
         const shares = parseOutgoingShares(sharesJson.shares || sharesJson || []);
         setSharedByMeData(shares);
-      } catch (s3Err: any) {
-        if (s3Err.name === 'NoSuchKey' || s3Err.$metadata?.httpStatusCode === 404) {
+      } catch (fetchErr: any) {
+        if (fetchErr.message?.includes('not found') || fetchErr.message?.includes('404')) {
           console.log('[SharedByMe] No shares file found');
           setSharedByMeData([]);
           return;
         }
-        throw s3Err;
+        throw fetchErr;
       }
     } catch (err) {
       console.error('[SharedByMe] Error:', err);
@@ -518,21 +509,18 @@ export default function Pins() {
     }
   };
 
-  // Fetch playlists directly from S3 using user's JWT token
+  // Fetch playlists using fula-client
   // Bucket: playlists, Prefix: user-playlists/
-  // Lists all playlist files and decrypts each one
   const fetchPlaylists = async () => {
     if (!user?.id || !user?.email) return;
     setPlaylistsLoading(true);
     setPlaylistsError(null);
     try {
-      // Step 1: Derive playlist encryption key
-      // NOTE: Playlists use a DIFFERENT key than files due to a bug in FxFiles Flutter app
-      // Files use "google:{id}" but playlists use just "{id}" (no prefix)
-      console.log('[Playlists] Deriving playlist encryption key for user:', user.id);
-      const playlistKey = await derivePlaylistEncryptionKey(user.id, user.email);
+      // Step 1: Derive encryption key bytes for fula-client
+      console.log('[Playlists] Deriving encryption key for user:', user.id);
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
 
-      // Step 2: Get JWT token for S3 authentication
+      // Step 2: Get JWT token for authentication
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) {
         throw new Error('Failed to get API key');
@@ -540,7 +528,11 @@ export default function Pins() {
       const { key: jwtToken } = await tokenRes.json();
       console.log('[Playlists] Got JWT token');
 
-      // Step 3: List all playlists from S3
+      // Step 3: Create fula-client
+      const fulaClient = await getFulaClient(keyBytes, jwtToken, 'https://s3.cloud.fx.land');
+      console.log('[Playlists] Created fula-client');
+
+      // Step 4: List playlists from S3 (still use S3 client for listing)
       const s3Client = createS3Client(jwtToken);
       console.log('[Playlists] Listing from S3 - Bucket: playlists, Prefix: user-playlists/');
 
@@ -558,7 +550,7 @@ export default function Pins() {
           return;
         }
 
-        // Step 4: Fetch and decrypt each playlist
+        // Step 5: Fetch and decrypt each playlist using fula-client
         const decryptedPlaylists: Playlist[] = [];
 
         for (const obj of objects) {
@@ -566,20 +558,8 @@ export default function Pins() {
 
           try {
             console.log('[Playlists] Fetching:', obj.Key);
-            const getCommand = new GetObjectCommand({
-              Bucket: 'playlists',
-              Key: obj.Key,
-            });
-            const getResponse = await s3Client.send(getCommand);
-            console.log('[Playlists] Response body type:', getResponse.Body?.constructor?.name);
-            const encryptedBytes = await streamToUint8Array(getResponse.Body as ReadableStream<Uint8Array>);
-
-            // Debug: log received data
-            console.log('[Playlists] Received', encryptedBytes.length, 'bytes');
-            console.log('[Playlists] First 32 bytes (hex):', Array.from(encryptedBytes.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
-
-            // Decrypt using playlist-specific key (without "google:" prefix)
-            const decryptedBytes = await decrypt(encryptedBytes, playlistKey);
+            // Use fula-client to fetch and decrypt
+            const decryptedBytes = await fetchAndDecryptFula(fulaClient, 'playlists', obj.Key);
             const jsonText = new TextDecoder().decode(decryptedBytes);
             console.log('[Playlists] Decrypted:', obj.Key);
 

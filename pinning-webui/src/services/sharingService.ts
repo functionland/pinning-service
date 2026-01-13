@@ -370,13 +370,15 @@ export async function processSharePayloadV2(
     pathScope: token.path_scope,
   });
 
-  // Get storage key from snapshot_binding OR from payload.k
-  // For temporal mode, snapshot_binding may not exist
-  const storageKey = token.snapshot_binding?.storage_key || payload.k;
+  // Get storage key:
+  // 1. Snapshot mode: use snapshot_binding.storage_key (CID)
+  // 2. Temporal mode: use path_scope (contains the CID)
+  // Note: payload.k is the original filename for display, not the storage key
+  const storageKey = token.snapshot_binding?.storage_key || token.path_scope;
   if (!storageKey) {
-    throw new Error('V2 share: no storage key found in snapshot_binding or payload.k');
+    throw new Error('V2 share: no storage key found in snapshot_binding or path_scope');
   }
-  console.log('[processSharePayloadV2] Using storage key:', storageKey);
+  console.log('[processSharePayloadV2] Using storage key:', storageKey, '(from', token.snapshot_binding?.storage_key ? 'snapshot_binding' : 'path_scope', ')');
 
   // Decode secret key
   const secretKey = base64ToUint8Array(payload.sk);

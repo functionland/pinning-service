@@ -425,13 +425,13 @@ export async function processSharePayloadV2(
  *
  * Two-step approach (as FxFiles does):
  * 1. acceptShare(client, tokenJson) → AcceptedShare handle
- * 2. getWithShare(client, bucket, originalPath, share) → decrypted data
+ * 2. getWithShare(client, bucket, storageKey, share) → decrypted data
  *
  * URL structure for proxy:
- * - Endpoint: /api/share/v2/fetch/{cid}
- * - fula_client builds: {endpoint}/{bucket}/{originalPath}
- * - Final URL: /api/share/v2/fetch/{cid}/{bucket}/{originalPath}
- * - Server uses {cid} to fetch from S3, ignores {originalPath}
+ * - Endpoint: /api/share/v2/fetch
+ * - fula_client builds: {endpoint}/{bucket}/{storageKey}
+ * - Final URL: /api/share/v2/fetch/{bucket}/{storageKey}
+ * - Server uses {storageKey} (CID) to fetch from S3
  */
 export async function fetchSharedContentV2(
   shareData: ProcessedShareDataV2
@@ -439,14 +439,13 @@ export async function fetchSharedContentV2(
   console.log('[fetchSharedContentV2] Fetching with fula_client:', {
     bucket: shareData.bucket,
     storageKey: shareData.storageKey,
-    originalPath: shareData.originalPath,
+    name: shareData.name,
   });
 
   // Use server-side proxy to fetch encrypted content from internal S3
-  // Include the CID in the endpoint URL so server knows what to fetch
-  // fula_client builds URL as: {endpoint}/{bucket}/{path}
-  // So final URL: /api/share/v2/fetch/{cid}/{bucket}/{originalPath}
-  const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch/${shareData.storageKey}`;
+  // fula_client builds URL as: {endpoint}/{bucket}/{storageKey}
+  // storageKey is the CID, which matches token.path_scope
+  const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch`;
   console.log('[fetchSharedContentV2] Using proxy endpoint:', proxyEndpoint);
 
   // Create client with link's private key, pointing to our proxy
@@ -458,13 +457,14 @@ export async function fetchSharedContentV2(
   console.log('[fetchSharedContentV2] Share accepted successfully');
 
   // Step 2: Fetch and decrypt using the accepted share
-  // Pass originalPath (not storageKey) - fula_client validates path matches token.path_scope
+  // Pass storageKey (CID) - token.path_scope is the CID, not the filename
+  // The originalPath is only for display purposes
   console.log('[fetchSharedContentV2] Step 2: Fetching with accepted share...');
-  console.log('[fetchSharedContentV2] Calling getWithShare with path:', shareData.originalPath);
+  console.log('[fetchSharedContentV2] Calling getWithShare with storageKey:', shareData.storageKey);
   const decryptedData = await decryptWithAcceptedShare(
     client,
     shareData.bucket,
-    shareData.originalPath,  // Use original path for scope validation, not CID
+    shareData.storageKey,  // Use CID - must match token.path_scope
     acceptedShare
   );
 

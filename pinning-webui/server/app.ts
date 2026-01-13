@@ -980,27 +980,23 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // V2 Share fetch - proxies to internal S3 for encrypted content
   // Client decrypts using fula_client after receiving encrypted bytes
   //
-  // Route format: /api/share/v2/fetch/:cid/:bucket/:path
-  // - :cid = storage key (IPFS CID) to fetch from S3
+  // Route format: /api/share/v2/fetch/:bucket/:storageKey
   // - :bucket = bucket name
-  // - :path = original path (used by fula_client for scope validation, we ignore it)
+  // - :storageKey = IPFS CID to fetch from S3 (same as token.path_scope)
   //
-  // fula_client builds URL as: {endpoint}/{bucket}/{path}
-  // So we set endpoint = /api/share/v2/fetch/{cid} and fula_client adds /{bucket}/{path}
-  app.get('/api/share/v2/fetch/:cid/:bucket/{*path}', async (req: Request, res: Response) => {
+  // fula_client builds URL as: {endpoint}/{bucket}/{storageKey}
+  app.get('/api/share/v2/fetch/:bucket/:storageKey', async (req: Request, res: Response) => {
     try {
-      const { cid, bucket } = req.params;
-      // We use the CID to fetch, not the path (path is for fula_client validation only)
-      const storageKey = cid;
+      const { bucket, storageKey } = req.params;
 
       if (!bucket || !storageKey) {
-        return res.status(400).json({ error: 'Missing bucket or cid parameter' });
+        return res.status(400).json({ error: 'Missing bucket or storageKey parameter' });
       }
 
       // Validate bucket and storageKey (alphanumeric, underscores, hyphens, dots)
       const safePattern = /^[a-zA-Z0-9_\-\.]+$/;
       if (!safePattern.test(bucket) || !safePattern.test(storageKey)) {
-        return res.status(400).json({ error: 'Invalid bucket or cid format' });
+        return res.status(400).json({ error: 'Invalid bucket or storageKey format' });
       }
 
       const s3Jwt = config.s3AdminJwt;

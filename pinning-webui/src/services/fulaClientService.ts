@@ -166,10 +166,17 @@ export async function createShareClient(
 ): Promise<EncryptedClient> {
   await ensureWasmInitialized();
 
-  // Create client without access token (uses IPFS gateway directly)
+  console.log('[createShareClient] Creating client with:', {
+    endpoint,
+    secretKeyLength: secretKey.length,
+    secretKeyFirst4: Array.from(secretKey.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' '),
+  });
+
+  // Create client with link's private key
+  // Use flatNamespace mode to match FxFiles encryption format
   const client = await createEncryptedClient(
     { endpoint },
-    { secretKey }
+    { secretKey, obfuscationMode: 'flatNamespace' }
   );
 
   return client;

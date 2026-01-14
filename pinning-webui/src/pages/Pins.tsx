@@ -14,7 +14,7 @@ import {
   computeHashedUserId,
   decrypt,
 } from '../services/encryptionService';
-import { getFulaClient, fetchAndDecryptFula } from '../services/fulaClientService';
+import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid } from '../services/fulaClientService';
 import {
   storeEncryptionKey,
   retrieveEncryptionKey,
@@ -25,6 +25,7 @@ import {
   Playlist,
   parseOutgoingShares,
   parsePlaylists,
+  detectMimeType,
 } from '../services/sharingService';
 
 // S3 endpoint for FxFiles storage
@@ -351,36 +352,36 @@ export default function Pins() {
     }, DOWNLOAD_TIMEOUT_MS);
 
     try {
-      // Retrieve the stored key
-      console.log('[Decryption] Retrieving stored key...');
-      const keyBytes = await retrieveEncryptionKey(user.email, user.email);
-      if (!keyBytes) {
-        console.log('[Decryption] No key found, showing setup modal');
-        clearTimeout(timeoutId);
-        setEncryptionKeyReady(false);
-        setDecryptingPins(prev => {
-          const next = new Set(prev);
-          next.delete(pin.request_id);
-          return next;
-        });
-        setShowSetupModal(true);
-        return;
+      // Step 1: Get encryption key bytes for fula-client
+      console.log('[Decryption] Getting encryption key...');
+      if (!user.id) {
+        throw new Error('User ID not available');
       }
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
 
-      const key = await importKey(keyBytes);
-      console.log('[Decryption] Key imported, fetching and decrypting...');
+      // Step 2: Get access token from API
+      console.log('[Decryption] Getting access token...');
+      const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
+      if (!tokenRes.ok) {
+        throw new Error('Failed to get API key. Please create one in the API Keys page.');
+      }
+      const { key: accessToken } = await tokenRes.json();
 
-      // Fetch and decrypt from IPFS gateway
-      const { data, mimeType } = await fetchAndDecrypt(
-        pin.cid,
-        key,
-        'https://ipfs.cloud.fx.land/gateway'
-      );
+      // Step 3: Create fula-client
+      console.log('[Decryption] Creating fula-client...');
+      const client = await getFulaClient(keyBytes, accessToken);
+
+      // Step 4: Fetch and decrypt from S3 (trying each bucket until found)
+      console.log('[Decryption] Fetching from S3 via fula-client...');
+      const { data } = await fetchAndDecryptByCid(client, pin.cid);
+
+      // Step 5: Detect mime type from decrypted content
+      const mimeType = detectMimeType(data);
       console.log('[Decryption] Decrypted successfully, mimeType:', mimeType);
 
       // Generate filename
       const ext = getExtensionFromMimeType(mimeType);
-      const filename = pin.name 
+      const filename = pin.name
         ? (pin.name.includes('.') ? pin.name : `${pin.name}${ext}`)
         : `decrypted-${pin.cid.slice(0, 8)}${ext}`;
 
@@ -390,8 +391,10 @@ export default function Pins() {
     } catch (err) {
       console.error('[Decryption] Download failed:', err);
       const message = err instanceof Error ? err.message : 'Decryption failed';
-      if (message.includes('Decryption failed')) {
-        setDecryptionError('This file may not be encrypted or was encrypted with a different key');
+      if (message.includes('not found in any bucket')) {
+        setDecryptionError('File not found in cloud storage. It may have been deleted.');
+      } else if (message.includes('API key')) {
+        setDecryptionError('Please create an API key in the API Keys page first.');
       } else {
         setDecryptionError(message);
       }
@@ -1172,10 +1175,10 @@ export default function Pins() {
         <>
           <div className="card overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="w-full table-fixed">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
-                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 w-10">
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-2 sm:px-4 py-2 sm:py-3 w-10">
                       <input
                         type="checkbox"
                         checked={data.pins.length > 0 && selectedPins.size === data.pins.length}
@@ -1183,22 +1186,22 @@ export default function Pins() {
                         className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
                       />
                     </th>
-                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-2 sm:px-4 py-2 sm:py-3">
                       {t.pins.cid}
                     </th>
-                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden sm:table-cell">
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-2 sm:px-4 py-2 sm:py-3 hidden sm:table-cell">
                       {t.pins.name}
                     </th>
-                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden md:table-cell">
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-2 sm:px-4 py-2 sm:py-3 hidden md:table-cell">
                       {t.pins.createdAt}
                     </th>
-                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-2 sm:px-4 py-2 sm:py-3">
                       {t.pins.status}
                     </th>
-                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden lg:table-cell">
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-2 sm:px-4 py-2 sm:py-3 hidden lg:table-cell">
                       {t.pins.requestId}
                     </th>
-                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-2 sm:px-4 py-2 sm:py-3">
                       {t.pins.actions || 'Actions'}
                     </th>
                   </tr>
@@ -1206,7 +1209,7 @@ export default function Pins() {
                 <tbody className="divide-y divide-gray-100">
                   {data.pins.map((pin: Pin) => (
                     <tr key={pin.request_id} className={`hover:bg-gray-50 ${selectedPins.has(pin.request_id) ? 'bg-primary-50' : ''}`}>
-                      <td className="px-4 py-4">
+                      <td className="px-2 sm:px-4 py-2 sm:py-4">
                         <input
                           type="checkbox"
                           checked={selectedPins.has(pin.request_id)}
@@ -1214,64 +1217,64 @@ export default function Pins() {
                           className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
                         />
                       </td>
-                      <td className="px-4 py-4">
+                      <td className="px-2 sm:px-4 py-2 sm:py-4">
                         <div className="flex items-center gap-1">
-                          <code className="text-sm font-mono text-gray-700">
-                            {pin.cid.slice(0, 12)}...{pin.cid.slice(-6)}
+                          <code className="text-xs sm:text-sm font-mono text-gray-700">
+                            {pin.cid.slice(0, 8)}...{pin.cid.slice(-4)}
                           </code>
                           <button
                             onClick={() => setExpandedValue({ type: t.pins.cid, value: pin.cid })}
-                            className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
+                            className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded flex-shrink-0"
                             title="Expand"
                           >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <svg className="w-3 h-3 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
                             </svg>
                           </button>
                         </div>
                       </td>
-                      <td className="px-4 py-4 text-sm text-gray-600 hidden sm:table-cell">
+                      <td className="px-2 sm:px-4 py-2 sm:py-4 text-sm text-gray-600 hidden sm:table-cell max-w-[120px] truncate">
                         {pin.name || <span className="text-gray-400">—</span>}
                       </td>
-                      <td className="px-4 py-4 text-sm text-gray-600 hidden md:table-cell">
+                      <td className="px-2 sm:px-4 py-2 sm:py-4 text-sm text-gray-600 hidden md:table-cell whitespace-nowrap">
                         {formatDate(pin.created_at)}
                       </td>
-                      <td className="px-4 py-4">
-                        <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(pin.status)}`}>
+                      <td className="px-2 sm:px-4 py-2 sm:py-4">
+                        <span className={`inline-flex px-1.5 sm:px-2 py-0.5 sm:py-1 text-xs font-medium rounded-full ${getStatusColor(pin.status)}`}>
                           {pin.status}
                         </span>
                       </td>
-                      <td className="px-4 py-4 hidden lg:table-cell">
+                      <td className="px-2 sm:px-4 py-2 sm:py-4 hidden lg:table-cell">
                         <div className="flex items-center gap-1">
-                          <code className="text-sm text-gray-500 font-mono">
+                          <code className="text-xs sm:text-sm text-gray-500 font-mono">
                             {pin.request_id.slice(0, 8)}...
                           </code>
                           <button
                             onClick={() => setExpandedValue({ type: t.pins.requestId, value: pin.request_id })}
-                            className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
+                            className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded flex-shrink-0"
                             title="Expand"
                           >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <svg className="w-3 h-3 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
                             </svg>
                           </button>
                         </div>
                       </td>
-                      <td className="px-4 py-4">
-                        <div className="flex items-center gap-1">
+                      <td className="px-2 sm:px-4 py-2 sm:py-4">
+                        <div className="flex items-center gap-0.5 sm:gap-1 min-w-0">
                           {/* Download Decrypted button */}
                           <button
                             onClick={() => downloadDecrypted(pin)}
                             disabled={decryptingPins.has(pin.request_id)}
-                            className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors disabled:opacity-50"
+                            className="p-1.5 sm:p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors disabled:opacity-50"
                             title={t.pins.downloadDecrypted || 'Download Decrypted'}
                           >
                             {decryptingPins.has(pin.request_id) ? (
-                              <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                               </svg>
                             ) : (
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
                               </svg>
                             )}
@@ -1280,11 +1283,11 @@ export default function Pins() {
                           <button
                             onClick={() => refreshPin(pin.request_id)}
                             disabled={refreshingPins.has(pin.request_id)}
-                            className="p-2 text-gray-500 hover:text-primary-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                            className="p-1.5 sm:p-2 text-gray-500 hover:text-primary-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
                             title={t.pins.refresh || 'Refresh status'}
                           >
                             <svg
-                              className={`w-4 h-4 ${refreshingPins.has(pin.request_id) ? 'animate-spin' : ''}`}
+                              className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${refreshingPins.has(pin.request_id) ? 'animate-spin' : ''}`}
                               fill="none"
                               stroke="currentColor"
                               viewBox="0 0 24 24"
@@ -1296,15 +1299,15 @@ export default function Pins() {
                           <button
                             onClick={() => fetchPinNodes(pin.request_id)}
                             disabled={loadingNodes.has(pin.request_id)}
-                            className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
+                            className="p-1.5 sm:p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
                             title={t.pins.viewNodes || 'View cluster nodes'}
                           >
                             {loadingNodes.has(pin.request_id) ? (
-                              <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                               </svg>
                             ) : (
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
                               </svg>
                             )}

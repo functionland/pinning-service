@@ -8,6 +8,7 @@
 import init, {
   createEncryptedClient,
   getDecrypted,
+  getDecryptedByStorageKey,
   getWithToken,
   getWithShare,
   acceptShare,
@@ -136,6 +137,58 @@ export async function listFulaDirectory(
   prefix: string
 ): Promise<any> {
   return listDirectory(client, bucket, prefix);
+}
+
+/**
+ * Fetch and decrypt a file by its storage key (CID), searching across buckets
+ *
+ * Since we don't know which bucket contains the CID, we try common buckets first
+ * then fall back to listing all buckets and trying each one.
+ *
+ * @param client - Fula encrypted client handle
+ * @param cid - Storage key (CID) of the encrypted file
+ * @returns Object containing decrypted data and the bucket where it was found
+ */
+export async function fetchAndDecryptByCid(
+  client: any,
+  cid: string
+): Promise<{ data: Uint8Array; bucket: string }> {
+  // Common file buckets to try first (optimization)
+  const priorityBuckets = ['photos', 'videos', 'documents', 'audio', 'files'];
+
+  // Try priority buckets first
+  for (const bucketName of priorityBuckets) {
+    try {
+      console.log(`[fetchAndDecryptByCid] Trying bucket: ${bucketName}`);
+      const data = await getDecryptedByStorageKey(client, bucketName, cid);
+      console.log(`[fetchAndDecryptByCid] Found in bucket: ${bucketName}`);
+      return { data: new Uint8Array(data), bucket: bucketName };
+    } catch (e) {
+      // Not in this bucket, try next
+      continue;
+    }
+  }
+
+  // If not found in priority buckets, list all buckets and try each
+  console.log('[fetchAndDecryptByCid] Not in priority buckets, listing all buckets...');
+  const allBuckets = await listBuckets(client);
+  const otherBuckets = allBuckets
+    .map((b: any) => b.name)
+    .filter((name: string) => !priorityBuckets.includes(name));
+
+  for (const bucketName of otherBuckets) {
+    try {
+      console.log(`[fetchAndDecryptByCid] Trying bucket: ${bucketName}`);
+      const data = await getDecryptedByStorageKey(client, bucketName, cid);
+      console.log(`[fetchAndDecryptByCid] Found in bucket: ${bucketName}`);
+      return { data: new Uint8Array(data), bucket: bucketName };
+    } catch (e) {
+      // Not in this bucket, try next
+      continue;
+    }
+  }
+
+  throw new Error('File not found in any bucket. It may have been deleted from cloud storage.');
 }
 
 /**

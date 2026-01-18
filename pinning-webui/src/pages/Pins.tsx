@@ -733,7 +733,18 @@ export default function Pins() {
       const seenDirs = new Set<string>();
 
       for (const file of files) {
-        const key = file.key || file.Key || '';
+        // Handle different response formats from listDecrypted:
+        // - Encrypted files: originalKey contains decrypted path, storageKey is obfuscated
+        // - Unencrypted files: both originalKey and storageKey are the same (raw CID/key)
+        // - S3-style response: key or Key property
+        const key = file.originalKey || file.storageKey || file.key || file.Key || '';
+
+        // Skip files without a valid key
+        if (!key) {
+          console.log('[FxFiles] Skipping file with no key:', file);
+          continue;
+        }
+
         const relativePath = prefix ? key.replace(prefix, '') : key;
 
         // Check if this is a directory (has more path segments)
@@ -741,10 +752,13 @@ export default function Pins() {
 
         // DEBUG: Log each file processing
         console.log('[FxFiles] Processing file:', {
+          originalKey: file.originalKey,
+          storageKey: file.storageKey,
           key,
           relativePath,
           segments,
-          segmentsLength: segments.length
+          segmentsLength: segments.length,
+          isEncrypted: file.isEncrypted
         });
 
         if (segments.length > 1) {
@@ -761,13 +775,27 @@ export default function Pins() {
           }
         } else if (segments.length === 1) {
           // This is a file in the current directory
+          // For encrypted files, originalKey should have the real filename
+          // For unencrypted files, use the storageKey/CID as name
+          const fileName = file.originalName || file.name || segments[0];
           items.push({
-            key: key,
-            name: file.originalName || file.name || segments[0],
+            key: file.storageKey || key,  // Use storageKey for downloads
+            name: fileName,
             size: file.size || file.Size,
             lastModified: file.lastModified || file.LastModified,
             isDirectory: false,
-            path: key,
+            path: file.originalKey || key,  // Use originalKey for fula-client path
+          });
+        } else if (segments.length === 0 && key) {
+          // File at root level with just a CID/key (no path structure)
+          const fileName = file.originalName || file.name || key;
+          items.push({
+            key: file.storageKey || key,
+            name: fileName,
+            size: file.size || file.Size,
+            lastModified: file.lastModified || file.LastModified,
+            isDirectory: false,
+            path: file.originalKey || key,
           });
         }
       }

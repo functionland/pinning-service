@@ -991,13 +991,20 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     try {
       const { bucket } = req.params;
       // storageKey captures the full path after bucket (handles chunks paths like "cid.chunks/00000000")
-      // Express 5 may include leading slash, so we strip it
-      let storageKey = req.params.storageKey;
+      // Express 5 returns wildcard as array of path segments, so join them
+      const rawStorageKey = req.params.storageKey;
+      let storageKey: string;
+      if (Array.isArray(rawStorageKey)) {
+        storageKey = rawStorageKey.join('/');
+      } else {
+        storageKey = rawStorageKey as string;
+      }
+      // Strip leading slash if present
       if (storageKey && storageKey.startsWith('/')) {
         storageKey = storageKey.slice(1);
       }
 
-      console.log('[webui] V2 share fetch raw params:', { bucket, storageKey: req.params.storageKey, cleaned: storageKey });
+      console.log('[webui] V2 share fetch raw params:', { bucket, rawStorageKey, storageKey });
 
       if (!bucket || !storageKey) {
         return res.status(400).json({ error: 'Missing bucket or storageKey parameter' });

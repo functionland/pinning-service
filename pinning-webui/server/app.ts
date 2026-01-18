@@ -989,8 +989,15 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // For chunked files: {endpoint}/{bucket}/{cid}.chunks/00000000
   app.get('/api/share/v2/fetch/:bucket/*storageKey', async (req: Request, res: Response) => {
     try {
-      const { bucket, storageKey } = req.params;
+      const { bucket } = req.params;
       // storageKey captures the full path after bucket (handles chunks paths like "cid.chunks/00000000")
+      // Express 5 may include leading slash, so we strip it
+      let storageKey = req.params.storageKey;
+      if (storageKey && storageKey.startsWith('/')) {
+        storageKey = storageKey.slice(1);
+      }
+
+      console.log('[webui] V2 share fetch raw params:', { bucket, storageKey: req.params.storageKey, cleaned: storageKey });
 
       if (!bucket || !storageKey) {
         return res.status(400).json({ error: 'Missing bucket or storageKey parameter' });
@@ -1001,6 +1008,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const safeBucketPattern = /^[a-zA-Z0-9_\-\.]+$/;
       const safeKeyPattern = /^[a-zA-Z0-9_\-\.\/]+$/;
       if (!safeBucketPattern.test(bucket) || !safeKeyPattern.test(storageKey)) {
+        console.log('[webui] V2 share fetch validation failed:', { bucket, storageKey, bucketOk: safeBucketPattern.test(bucket), keyOk: safeKeyPattern.test(storageKey) });
         return res.status(400).json({ error: 'Invalid bucket or storageKey format' });
       }
 

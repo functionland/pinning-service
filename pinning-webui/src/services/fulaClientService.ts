@@ -140,6 +140,25 @@ export async function listFulaDirectory(
 }
 
 /**
+ * Fetch and decrypt a file by its storage key from a specific bucket
+ *
+ * Use this when you know both the bucket and the storage key (CID).
+ *
+ * @param client - Fula encrypted client handle
+ * @param bucket - Bucket name
+ * @param storageKey - Storage key (CID) of the encrypted file
+ * @returns Decrypted data as Uint8Array
+ */
+export async function fetchAndDecryptByStorageKey(
+  client: any,
+  bucket: string,
+  storageKey: string
+): Promise<Uint8Array> {
+  const decrypted = await getDecryptedByStorageKey(client, bucket, storageKey);
+  return new Uint8Array(decrypted);
+}
+
+/**
  * Fetch and decrypt a file by its storage key (CID), searching across buckets
  *
  * Since we don't know which bucket contains the CID, we try common buckets first

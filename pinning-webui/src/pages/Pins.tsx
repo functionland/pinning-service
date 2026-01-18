@@ -14,7 +14,7 @@ import {
   computeHashedUserId,
   decrypt,
 } from '../services/encryptionService';
-import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
+import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
 import {
   storeEncryptionKey,
   retrieveEncryptionKey,
@@ -745,6 +745,12 @@ export default function Pins() {
           continue;
         }
 
+        // Skip .chunks directories and chunk files (internal implementation detail)
+        if (key.includes('.chunks')) {
+          console.log('[FxFiles] Skipping chunk file:', key);
+          continue;
+        }
+
         const relativePath = prefix ? key.replace(prefix, '') : key;
 
         // Check if this is a directory (has more path segments)
@@ -839,8 +845,10 @@ export default function Pins() {
 
       const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
 
-      // Fetch and decrypt using fula-client
-      const decryptedData = await fetchAndDecryptFula(client, fxNavigation.currentBucket, file.path);
+      // Fetch and decrypt using storage key (CID)
+      // file.key contains the storageKey (obfuscated CID) which is needed for fetching
+      console.log('[FxFiles] Downloading file:', { bucket: fxNavigation.currentBucket, storageKey: file.key });
+      const decryptedData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket, file.key);
 
       // Detect MIME type
       const mimeType = detectMimeType(decryptedData);
@@ -875,7 +883,10 @@ export default function Pins() {
       const { key: accessToken } = await tokenRes.json();
 
       const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
-      const decryptedData = await fetchAndDecryptFula(client, fxNavigation.currentBucket, file.path);
+
+      // Fetch and decrypt using storage key (CID)
+      console.log('[FxFiles] Previewing file:', { bucket: fxNavigation.currentBucket, storageKey: file.key });
+      const decryptedData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket, file.key);
 
       const mimeType = detectMimeType(decryptedData);
 

@@ -741,25 +741,14 @@ export default function Pins() {
 
       const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
 
-      // List files using listDirectory (FlatNamespace mode uses forest index)
-      // This properly decrypts file metadata from the encrypted forest
-      const dirListing = await listFulaDirectory(client, bucket, prefix || '');
+      // List files with decrypted metadata
+      // Note: listDecrypted uses HEAD requests on S3 objects
+      // For FlatNamespace, metadata comes from object headers, not forest
+      const files = await listDecryptedFiles(client, bucket, { prefix: prefix || undefined });
 
-      // DEBUG: Log raw response from listDirectory
+      // DEBUG: Log raw response
       console.log('[FxFiles] Bucket:', bucket, 'Prefix:', prefix);
-      console.log('[FxFiles] Raw directory listing:', dirListing);
-
-      // Flatten files from all directory entries
-      const files: any[] = [];
-      if (dirListing?.entries) {
-        for (const entry of dirListing.entries) {
-          if (entry.files) {
-            files.push(...entry.files);
-          }
-        }
-      }
-
-      console.log('[FxFiles] Flattened files from forest:', files);
+      console.log('[FxFiles] Raw files from listDecrypted:', files);
       console.log('[FxFiles] Number of files:', files?.length || 0);
       if (files && files.length > 0) {
         console.log('[FxFiles] First file structure:', JSON.stringify(files[0], null, 2));

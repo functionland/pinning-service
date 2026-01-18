@@ -886,9 +886,17 @@ export default function Pins() {
 
       // Fetch and decrypt using storage key (CID)
       console.log('[FxFiles] Previewing file:', { bucket: fxNavigation.currentBucket, storageKey: file.key });
+      console.log('[FxFiles] User ID for key derivation:', user.id);
+      console.log('[FxFiles] Key bytes (first 8):', Array.from(keyBytes.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+
       const decryptedData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket, file.key);
 
+      // Debug: log decrypted data info
+      console.log('[FxFiles] Decrypted data size:', decryptedData.length);
+      console.log('[FxFiles] Decrypted data (first 32 bytes):', Array.from(decryptedData.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+
       const mimeType = detectMimeType(decryptedData);
+      console.log('[FxFiles] Detected MIME type:', mimeType);
 
       // Check if previewable
       const previewableMimes = ['image/', 'video/', 'audio/', 'application/pdf', 'text/'];

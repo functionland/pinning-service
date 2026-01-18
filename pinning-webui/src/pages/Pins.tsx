@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { S3Client, ListObjectsCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import {
   deriveEncryptionKey,
+  deriveEncryptionKeyBytes,
   derivePlaylistEncryptionKey,
   exportKey,
   importKey,
@@ -18,7 +19,7 @@ import {
   isChunkedEnvelopeV2,
   decryptChunkedEnvelopeV2,
 } from '../services/encryptionService';
-import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles, deriveFulaKeyBytes } from '../services/fulaClientService';
+import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
 import {
   storeEncryptionKey,
   retrieveEncryptionKey,
@@ -402,7 +403,16 @@ export default function Pins() {
       if (!user.id) {
         throw new Error('User ID not available');
       }
-      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
+      // Debug: Log key derivation inputs (to compare with FxFiles mobile)
+      // FxFiles uses: combinedId = "google:{user.id}", salt = "fula-files-v1:{user.email}"
+      console.log('[Decryption] Key derivation inputs:', {
+        userId: user.id,
+        userIdLength: user.id.length,
+        email: user.email,
+        combinedId: `google:${user.id}`,
+      });
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      console.log('[Decryption] Derived key first 4 bytes:', Array.from(keyBytes.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
       // Step 2: Get access token from API
       console.log('[Decryption] Getting access token...');
@@ -566,7 +576,7 @@ export default function Pins() {
     try {
       // Step 1: Derive encryption key bytes for fula-client
       console.log('[Playlists] Deriving encryption key for user:', user.id);
-      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
 
       // Step 2: Get JWT token for authentication
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
@@ -675,7 +685,7 @@ export default function Pins() {
     setFxFilesError(null);
 
     try {
-      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) {
@@ -713,7 +723,17 @@ export default function Pins() {
     setFxFilesError(null);
 
     try {
-      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
+      // Debug: Log key derivation inputs for comparison with FxFiles mobile
+      console.log('[FxFiles] Key derivation inputs:', {
+        userId: user.id,
+        userIdLength: user.id.length,
+        email: user.email,
+        combinedId: `google:${user.id}`,
+        salt: `fula-files-v1:${user.email}`,
+      });
+
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      console.log('[FxFiles] Derived key first 4 bytes:', Array.from(keyBytes.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');
@@ -841,7 +861,7 @@ export default function Pins() {
     setFxDownloading(prev => new Set(prev).add(file.key));
 
     try {
-      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');
@@ -912,7 +932,7 @@ export default function Pins() {
     setFxDownloading(prev => new Set(prev).add(file.key));
 
     try {
-      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');

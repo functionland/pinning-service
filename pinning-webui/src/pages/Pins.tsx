@@ -19,7 +19,7 @@ import {
   isChunkedEnvelopeV2,
   decryptChunkedEnvelopeV2,
 } from '../services/encryptionService';
-import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
+import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles, listFulaDirectory } from '../services/fulaClientService';
 import {
   storeEncryptionKey,
   retrieveEncryptionKey,
@@ -741,12 +741,25 @@ export default function Pins() {
 
       const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
 
-      // List files with decrypted metadata
-      const files = await listDecryptedFiles(client, bucket, { prefix: prefix || undefined });
+      // List files using listDirectory (FlatNamespace mode uses forest index)
+      // This properly decrypts file metadata from the encrypted forest
+      const dirListing = await listFulaDirectory(client, bucket, prefix || '');
 
-      // DEBUG: Log raw response from listDecryptedFiles
+      // DEBUG: Log raw response from listDirectory
       console.log('[FxFiles] Bucket:', bucket, 'Prefix:', prefix);
-      console.log('[FxFiles] Raw files from listDecrypted:', files);
+      console.log('[FxFiles] Raw directory listing:', dirListing);
+
+      // Flatten files from all directory entries
+      const files: any[] = [];
+      if (dirListing?.entries) {
+        for (const entry of dirListing.entries) {
+          if (entry.files) {
+            files.push(...entry.files);
+          }
+        }
+      }
+
+      console.log('[FxFiles] Flattened files from forest:', files);
       console.log('[FxFiles] Number of files:', files?.length || 0);
       if (files && files.length > 0) {
         console.log('[FxFiles] First file structure:', JSON.stringify(files[0], null, 2));

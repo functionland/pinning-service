@@ -15,6 +15,9 @@ import {
   decrypt,
   decryptEnvelope,
   isJsonEnvelope,
+  parseEnvelope,
+  isChunkedEnvelopeV2,
+  decryptChunkedEnvelopeV2,
 } from '../services/encryptionService';
 import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
 import {
@@ -857,7 +860,28 @@ export default function Pins() {
       let decryptedData: Uint8Array;
       if (isJsonEnvelope(rawData)) {
         console.log('[FxFiles] Data is JSON envelope, performing manual decryption...');
-        decryptedData = await decryptEnvelope(rawData, keyBytes);
+
+        // Parse envelope to check version
+        const { version, envelope } = parseEnvelope(rawData);
+        console.log('[FxFiles] Envelope version:', version, 'Fields:', Object.keys(envelope).join(', '));
+
+        if (isChunkedEnvelopeV2(envelope)) {
+          // Version 2 chunked file - need to fetch and decrypt each chunk
+          console.log(`[FxFiles] Chunked file v2: ${envelope.chunkCount} chunks, chunkSize: ${envelope.chunkSize}`);
+
+          // Create chunk fetcher that gets chunk data from S3
+          const fetchChunk = async (chunkIndex: number): Promise<Uint8Array> => {
+            const chunkKey = `${file.key}.chunks/${chunkIndex.toString().padStart(8, '0')}`;
+            console.log(`[FxFiles] Fetching chunk ${chunkIndex}: ${chunkKey}`);
+            const chunkData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket!, chunkKey);
+            return chunkData;
+          };
+
+          decryptedData = await decryptChunkedEnvelopeV2(envelope, keyBytes, fetchChunk);
+        } else {
+          // Version 1 single-block envelope
+          decryptedData = await decryptEnvelope(rawData, keyBytes);
+        }
       } else {
         // Already decrypted or unencrypted file
         decryptedData = rawData;
@@ -910,7 +934,29 @@ export default function Pins() {
       let decryptedData: Uint8Array;
       if (isJsonEnvelope(rawData)) {
         console.log('[FxFiles] Data is JSON envelope, performing manual decryption...');
-        decryptedData = await decryptEnvelope(rawData, keyBytes);
+
+        // Parse envelope to check version
+        const { version, envelope } = parseEnvelope(rawData);
+        console.log('[FxFiles] Envelope version:', version, 'Fields:', Object.keys(envelope).join(', '));
+
+        if (isChunkedEnvelopeV2(envelope)) {
+          // Version 2 chunked file - need to fetch and decrypt each chunk
+          console.log(`[FxFiles] Chunked file v2: ${envelope.chunkCount} chunks, chunkSize: ${envelope.chunkSize}`);
+
+          // Create chunk fetcher that gets chunk data from S3
+          const fetchChunk = async (chunkIndex: number): Promise<Uint8Array> => {
+            const chunkKey = `${file.key}.chunks/${chunkIndex.toString().padStart(8, '0')}`;
+            console.log(`[FxFiles] Fetching chunk ${chunkIndex}: ${chunkKey}`);
+            const chunkData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket!, chunkKey);
+            return chunkData;
+          };
+
+          decryptedData = await decryptChunkedEnvelopeV2(envelope, keyBytes, fetchChunk);
+        } else {
+          // Version 1 single-block envelope
+          decryptedData = await decryptEnvelope(rawData, keyBytes);
+        }
+
         console.log('[FxFiles] Decrypted data size:', decryptedData.length);
         console.log('[FxFiles] Decrypted data (first 32 bytes):', Array.from(decryptedData.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
       } else {

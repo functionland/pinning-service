@@ -787,31 +787,42 @@ function base64ToUint8Array(base64: string): Uint8Array {
 }
 
 /**
- * Decrypt a JSON envelope from FxFiles S3 storage
- * Supports multiple field naming conventions:
- * - {"version":1,"ciphertext":"<base64>","nonce":"<base64>","tag":"<base64>"}
- * - {"version":1,"ciphertext":"<base64>","iv":"<base64>","tag":"<base64>"}
- *
- * The fula-client WASM's getDecryptedByStorageKey does NOT decrypt files.
- * It returns the raw S3 object which is a JSON encrypted envelope.
- * This function performs the actual decryption using Web Crypto API.
- *
- * @param envelopeData - The JSON envelope data as Uint8Array
- * @param keyBytes - The 32-byte AES-256 key
- * @returns Promise<Uint8Array> - The decrypted plaintext data
+ * Envelope metadata for version 2 chunked files
  */
-export async function decryptEnvelope(
-  envelopeData: Uint8Array,
-  keyBytes: Uint8Array
-): Promise<Uint8Array> {
-  // Parse JSON envelope
+export interface ChunkedEnvelopeV2 {
+  version: 2;
+  algorithm: string;
+  chunkSize: number;
+  chunkCount: number;
+  chunks: Array<{
+    iv: string;
+    tag: string;
+  }>;
+}
+
+/**
+ * Parse a JSON envelope and determine its type
+ */
+export function parseEnvelope(envelopeData: Uint8Array): { version: number; envelope: any } {
   const text = new TextDecoder().decode(envelopeData);
   const envelope = JSON.parse(text);
+  return { version: envelope.version ?? 1, envelope };
+}
 
-  if (envelope.version !== 1) {
-    throw new Error(`Unsupported envelope version: ${envelope.version}`);
-  }
+/**
+ * Check if envelope is version 2 chunked format
+ */
+export function isChunkedEnvelopeV2(envelope: any): envelope is ChunkedEnvelopeV2 {
+  return envelope.version === 2 &&
+         typeof envelope.chunkCount === 'number' &&
+         Array.isArray(envelope.chunks);
+}
 
+/**
+ * Decrypt a version 1 JSON envelope (single ciphertext block)
+ * Format: {"version":1,"ciphertext":"<base64>","nonce/iv":"<base64>","tag":"<base64>"}
+ */
+async function decryptEnvelopeV1(envelope: any, keyBytes: Uint8Array): Promise<Uint8Array> {
   // Extract fields with fallback names (iv/nonce, tag/mac)
   const ciphertextB64 = envelope.ciphertext;
   const nonceB64 = envelope.nonce ?? envelope.iv;
@@ -855,6 +866,104 @@ export async function decryptEnvelope(
   );
 
   return new Uint8Array(decrypted);
+}
+
+/**
+ * Decrypt a version 2 chunked envelope
+ * Requires a callback to fetch individual chunk data
+ *
+ * @param envelope - Parsed chunked envelope metadata
+ * @param keyBytes - The 32-byte AES-256 key
+ * @param fetchChunk - Callback to fetch chunk data by index (returns raw ciphertext)
+ * @returns Decrypted concatenated data
+ */
+export async function decryptChunkedEnvelopeV2(
+  envelope: ChunkedEnvelopeV2,
+  keyBytes: Uint8Array,
+  fetchChunk: (chunkIndex: number) => Promise<Uint8Array>
+): Promise<Uint8Array> {
+  // Import key for AES-GCM
+  const key = await crypto.subtle.importKey(
+    'raw',
+    keyBytes,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['decrypt']
+  );
+
+  // Decrypt each chunk
+  const decryptedChunks: Uint8Array[] = [];
+
+  for (let i = 0; i < envelope.chunkCount; i++) {
+    const chunkMeta = envelope.chunks[i];
+    if (!chunkMeta) {
+      throw new Error(`Missing metadata for chunk ${i}`);
+    }
+
+    // Fetch raw chunk ciphertext
+    const chunkCiphertext = await fetchChunk(i);
+
+    // Decode IV and tag from metadata
+    const iv = base64ToUint8Array(chunkMeta.iv);
+    const tag = base64ToUint8Array(chunkMeta.tag);
+
+    // Combine ciphertext + tag
+    const ciphertextWithTag = new Uint8Array(chunkCiphertext.length + tag.length);
+    ciphertextWithTag.set(chunkCiphertext, 0);
+    ciphertextWithTag.set(tag, chunkCiphertext.length);
+
+    // Decrypt chunk
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv, tagLength: 128 },
+      key,
+      ciphertextWithTag
+    );
+
+    decryptedChunks.push(new Uint8Array(decrypted));
+  }
+
+  // Concatenate all chunks
+  const totalLength = decryptedChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of decryptedChunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return result;
+}
+
+/**
+ * Decrypt a JSON envelope from FxFiles S3 storage (version 1 only)
+ * For version 2 chunked files, use parseEnvelope + decryptChunkedEnvelopeV2
+ *
+ * The fula-client WASM's getDecryptedByStorageKey does NOT decrypt files.
+ * It returns the raw S3 object which is a JSON encrypted envelope.
+ * This function performs the actual decryption using Web Crypto API.
+ *
+ * @param envelopeData - The JSON envelope data as Uint8Array
+ * @param keyBytes - The 32-byte AES-256 key
+ * @returns Promise<Uint8Array> - The decrypted plaintext data
+ */
+export async function decryptEnvelope(
+  envelopeData: Uint8Array,
+  keyBytes: Uint8Array
+): Promise<Uint8Array> {
+  const { version, envelope } = parseEnvelope(envelopeData);
+
+  if (version === 2 && isChunkedEnvelopeV2(envelope)) {
+    throw new Error(
+      `Version 2 chunked file detected (${envelope.chunkCount} chunks). ` +
+      `Use decryptChunkedEnvelopeV2() with a chunk fetcher callback.`
+    );
+  }
+
+  if (version !== 1) {
+    throw new Error(`Unsupported envelope version: ${version}. Fields: ${Object.keys(envelope).join(', ')}`);
+  }
+
+  return decryptEnvelopeV1(envelope, keyBytes);
 }
 
 /**

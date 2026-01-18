@@ -132,6 +132,18 @@ export const ar: Translations = {
     noPlaylistsDesc: 'أنشئ قوائم تشغيل في تطبيق FxFiles لعرضها هنا',
     playlists: 'قوائم تشغيل',
     playPlaylist: 'تشغيل القائمة',
+    // FxFiles
+    tabFxFiles: 'FxFiles',
+    fxBuckets: 'الحاويات',
+    buckets: 'حاويات',
+    noBuckets: 'لم يتم العثور على حاويات',
+    noBucketsDesc: 'قم بتحميل الملفات باستخدام تطبيق FxFiles لرؤيتها هنا',
+    emptyFolder: 'مجلد فارغ',
+    size: 'الحجم',
+    lastModified: 'تم التعديل',
+    preview: 'معاينة',
+    download: 'تحميل',
+    apiKeyRequired: 'يرجى إنشاء مفتاح API في صفحة مفاتيح API أولاً.',
   },
   view: {
     loading: 'جاري تحميل المحتوى المشترك...',

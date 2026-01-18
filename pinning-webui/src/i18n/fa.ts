@@ -132,6 +132,18 @@ export const fa: Translations = {
     noPlaylistsDesc: 'لیست پخش در برنامه FxFiles ایجاد کنید',
     playlists: 'لیست پخش',
     playPlaylist: 'پخش لیست',
+    // FxFiles
+    tabFxFiles: 'FxFiles',
+    fxBuckets: 'سطل‌ها',
+    buckets: 'سطل',
+    noBuckets: 'سطلی یافت نشد',
+    noBucketsDesc: 'فایل‌ها را با برنامه FxFiles آپلود کنید تا اینجا نمایش داده شوند',
+    emptyFolder: 'پوشه خالی',
+    size: 'اندازه',
+    lastModified: 'تغییر یافته',
+    preview: 'پیش‌نمایش',
+    download: 'دانلود',
+    apiKeyRequired: 'لطفاً ابتدا یک کلید API در صفحه کلیدهای API ایجاد کنید.',
   },
   view: {
     loading: 'در حال بارگذاری محتوای مشترک...',

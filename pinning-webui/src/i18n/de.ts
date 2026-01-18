@@ -132,6 +132,18 @@ export const de: Translations = {
     noPlaylistsDesc: 'Erstellen Sie Wiedergabelisten in der FxFiles-App',
     playlists: 'Wiedergabelisten',
     playPlaylist: 'Wiedergabeliste abspielen',
+    // FxFiles
+    tabFxFiles: 'FxFiles',
+    fxBuckets: 'Buckets',
+    buckets: 'Buckets',
+    noBuckets: 'Keine Buckets gefunden',
+    noBucketsDesc: 'Laden Sie Dateien mit der FxFiles-App hoch, um sie hier zu sehen',
+    emptyFolder: 'Leerer Ordner',
+    size: 'Größe',
+    lastModified: 'Geändert',
+    preview: 'Vorschau',
+    download: 'Herunterladen',
+    apiKeyRequired: 'Bitte erstellen Sie zuerst einen API-Schlüssel auf der API-Schlüssel-Seite.',
   },
   view: {
     loading: 'Geteilten Inhalt laden...',

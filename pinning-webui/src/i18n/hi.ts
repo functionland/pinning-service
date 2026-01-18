@@ -132,6 +132,18 @@ export const hi: Translations = {
     noPlaylistsDesc: 'FxFiles ऐप में प्लेलिस्ट बनाएं',
     playlists: 'प्लेलिस्ट',
     playPlaylist: 'प्लेलिस्ट चलाएं',
+    // FxFiles
+    tabFxFiles: 'FxFiles',
+    fxBuckets: 'बकेट्स',
+    buckets: 'बकेट्स',
+    noBuckets: 'कोई बकेट नहीं मिला',
+    noBucketsDesc: 'फ़ाइलें यहाँ देखने के लिए FxFiles ऐप से अपलोड करें',
+    emptyFolder: 'खाली फ़ोल्डर',
+    size: 'आकार',
+    lastModified: 'संशोधित',
+    preview: 'पूर्वावलोकन',
+    download: 'डाउनलोड',
+    apiKeyRequired: 'कृपया पहले API कुंजी पृष्ठ में एक API कुंजी बनाएं।',
   },
   view: {
     loading: 'साझा सामग्री लोड हो रही है...',

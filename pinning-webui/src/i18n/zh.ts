@@ -132,6 +132,18 @@ export const zh: Translations = {
     noPlaylistsDesc: '在 FxFiles 应用中创建播放列表以在此查看',
     playlists: '个播放列表',
     playPlaylist: '播放列表',
+    // FxFiles
+    tabFxFiles: 'FxFiles',
+    fxBuckets: '存储桶',
+    buckets: '个存储桶',
+    noBuckets: '没有找到存储桶',
+    noBucketsDesc: '使用 FxFiles 应用上传文件后将在此显示',
+    emptyFolder: '空文件夹',
+    size: '大小',
+    lastModified: '修改时间',
+    preview: '预览',
+    download: '下载',
+    apiKeyRequired: '请先在 API 密钥页面创建一个 API 密钥。',
   },
   view: {
     loading: '正在加载共享内容...',

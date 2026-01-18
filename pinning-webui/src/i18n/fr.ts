@@ -132,6 +132,18 @@ export const fr: Translations = {
     noPlaylistsDesc: 'Créez des listes dans l\'app FxFiles',
     playlists: 'listes',
     playPlaylist: 'Lire la liste',
+    // FxFiles
+    tabFxFiles: 'FxFiles',
+    fxBuckets: 'Buckets',
+    buckets: 'buckets',
+    noBuckets: 'Aucun bucket trouvé',
+    noBucketsDesc: 'Téléchargez des fichiers avec l\'app FxFiles pour les voir ici',
+    emptyFolder: 'Dossier vide',
+    size: 'Taille',
+    lastModified: 'Modifié',
+    preview: 'Aperçu',
+    download: 'Télécharger',
+    apiKeyRequired: 'Veuillez d\'abord créer une clé API sur la page des Clés API.',
   },
   view: {
     loading: 'Chargement du contenu partagé...',

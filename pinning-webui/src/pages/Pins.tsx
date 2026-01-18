@@ -720,6 +720,14 @@ export default function Pins() {
       // List files with decrypted metadata
       const files = await listDecryptedFiles(client, bucket, { prefix: prefix || undefined });
 
+      // DEBUG: Log raw response from listDecryptedFiles
+      console.log('[FxFiles] Bucket:', bucket, 'Prefix:', prefix);
+      console.log('[FxFiles] Raw files from listDecrypted:', files);
+      console.log('[FxFiles] Number of files:', files?.length || 0);
+      if (files && files.length > 0) {
+        console.log('[FxFiles] First file structure:', JSON.stringify(files[0], null, 2));
+      }
+
       // Transform response to FxFileItem format
       const items: FxFileItem[] = [];
       const seenDirs = new Set<string>();
@@ -730,6 +738,14 @@ export default function Pins() {
 
         // Check if this is a directory (has more path segments)
         const segments = relativePath.split('/').filter(Boolean);
+
+        // DEBUG: Log each file processing
+        console.log('[FxFiles] Processing file:', {
+          key,
+          relativePath,
+          segments,
+          segmentsLength: segments.length
+        });
 
         if (segments.length > 1) {
           // This is inside a subdirectory - add the subdirectory if not seen

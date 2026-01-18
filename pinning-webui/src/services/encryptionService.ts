@@ -1,27 +1,40 @@
 /**
  * Client-side encryption service for FxFiles compatibility
- * 
+ *
  * Implements the same encryption scheme as FxFiles Flutter app:
- * - Key derivation: PBKDF2 with HMAC-SHA256, 100,000 iterations, 256-bit key
+ * - Key derivation: Argon2id via fula-client WASM (memory-hard, cross-platform consistent)
+ *   - Memory: 64 MiB
+ *   - Iterations: 3
+ *   - Parallelism: 1
  * - Encryption: AES-256-GCM
- * - Format: [12-byte nonce][16-byte MAC/tag][ciphertext]
- * 
- * All cryptographic operations happen client-side using Web Crypto API.
+ * - Format: [12-byte nonce][ciphertext][16-byte MAC/tag]
+ *
+ * All cryptographic operations happen client-side.
  * No encryption keys or passwords are ever sent to the server.
  */
 
-const PBKDF2_ITERATIONS = 100000;
+import { deriveKeyFromCredentials } from './fulaClientService';
+
 const KEY_LENGTH_BITS = 256;
 const NONCE_LENGTH = 12;
 const TAG_LENGTH = 16;
-const SALT_PREFIX = 'fula-files-v1:';
 
 /**
- * Derives an encryption key from user credentials using PBKDF2
- * Compatible with FxFiles app key derivation
- * 
+ * Derives an encryption key from user credentials using Argon2id (memory-hard KDF)
+ *
+ * Uses fula-client WASM deriveKey() for cross-platform consistency and brute-force resistance.
+ * This produces identical keys on FxFiles (Flutter) and WebUI (WASM).
+ *
+ * Argon2id parameters:
+ * - Memory: 64 MiB
+ * - Iterations: 3
+ * - Parallelism: 1
+ *
+ * Input format: "google:{userId}:{email}"
+ * Context/Salt: "fula-files-v1"
+ *
  * @param googleUserId - The Google user ID (from Google OAuth 'sub' claim)
- * @param userEmail - The user's email address (used as salt)
+ * @param userEmail - The user's email address
  * @returns Promise<CryptoKey> - The derived AES-GCM key
  */
 export async function deriveEncryptionKey(
@@ -29,36 +42,28 @@ export async function deriveEncryptionKey(
   userEmail: string
 ): Promise<CryptoKey> {
   const encoder = new TextEncoder();
-  
-  // Combined ID format: "google:{userId}" - matches FxFiles
-  const combinedId = `google:${googleUserId}`;
-  
-  // Salt format: "fula-files-v1:{email}" - matches FxFiles
-  const salt = encoder.encode(`${SALT_PREFIX}${userEmail}`);
-  
-  // Import the combined ID as the base key material
-  const keyMaterial = await crypto.subtle.importKey(
+
+  // Combined input format: "google:{userId}:{email}" - matches FxFiles
+  const input = `google:${googleUserId}:${userEmail}`;
+
+  // Derive key using Argon2id via WASM (cross-platform consistent, brute-force resistant)
+  const keyBytes = await deriveKeyFromCredentials('fula-files-v1', encoder.encode(input));
+
+  // Debug logging
+  console.log('[deriveEncryptionKey] Using Argon2id KDF');
+  console.log('[deriveEncryptionKey] Input:', input);
+  console.log('[deriveEncryptionKey] Key first 4 bytes:',
+    Array.from(keyBytes.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+
+  // Import as AES-GCM key
+  const derivedKey = await crypto.subtle.importKey(
     'raw',
-    encoder.encode(combinedId),
-    'PBKDF2',
-    false,
-    ['deriveBits', 'deriveKey']
-  );
-  
-  // Derive the AES-GCM key using PBKDF2
-  const derivedKey = await crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: salt,
-      iterations: PBKDF2_ITERATIONS,
-      hash: 'SHA-256',
-    },
-    keyMaterial,
+    keyBytes,
     { name: 'AES-GCM', length: KEY_LENGTH_BITS },
     true, // extractable - needed for storage
     ['encrypt', 'decrypt']
   );
-  
+
   return derivedKey;
 }
 
@@ -181,7 +186,9 @@ export function derivePublicKeyFromSeed(seed: Uint8Array): Uint8Array {
 
 /**
  * Derive the keypair seed for user ID computation
- * Uses different salt than encryption key: "fula-files-keypair-v1:{email}"
+ *
+ * Uses Argon2id with context "fula-files-keypair-v1" for cross-platform consistency.
+ * This is used to compute the hashed user ID for shares path.
  */
 export async function deriveKeypairSeed(
   googleUserId: string,
@@ -189,40 +196,18 @@ export async function deriveKeypairSeed(
 ): Promise<Uint8Array> {
   const encoder = new TextEncoder();
 
-  // Combined ID format: "google:{userId}"
-  const combinedId = `google:${googleUserId}`;
+  // Combined input format: "google:{userId}:{email}" - matches FxFiles
+  const input = `google:${googleUserId}:${userEmail}`;
 
-  // Salt for keypair: "fula-files-keypair-v1:{email}" (different from encryption key!)
-  const salt = encoder.encode(`fula-files-keypair-v1:${userEmail}`);
-
-  // Import as PBKDF2 key material
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(combinedId),
-    'PBKDF2',
-    false,
-    ['deriveBits']
-  );
-
-  // Derive 32 bytes
-  const derivedBits = await crypto.subtle.deriveBits(
-    {
-      name: 'PBKDF2',
-      salt: salt,
-      iterations: PBKDF2_ITERATIONS,
-      hash: 'SHA-256',
-    },
-    keyMaterial,
-    256 // 32 bytes
-  );
-
-  return new Uint8Array(derivedBits);
+  // Derive key using Argon2id via WASM (cross-platform consistent)
+  // Uses different context than encryption key for domain separation
+  return deriveKeyFromCredentials('fula-files-keypair-v1', encoder.encode(input));
 }
 
 /**
  * Compute hashed user ID for shares path
  * Algorithm from FxFiles:
- * 1. Derive keypair seed with salt "fula-files-keypair-v1:{email}"
+ * 1. Derive keypair seed using Argon2id with context "fula-files-keypair-v1"
  * 2. Get X25519 public key from seed
  * 3. Base64 encode the public key
  * 4. SHA256 hash the base64 string (as UTF-8 bytes)

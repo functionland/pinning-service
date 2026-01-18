@@ -18,6 +18,7 @@ import init, {
   listDirectory,
   exportSecretKey,
   getPublicKey,
+  deriveKey,
   type EncryptedClient,
   type AcceptedShare,
 } from '@functionland/fula-client';
@@ -339,4 +340,39 @@ function arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+// ============================================================================
+// Key Derivation Functions (for cross-platform consistency)
+// ============================================================================
+
+/**
+ * Derive a 32-byte key using Argon2id (memory-hard KDF) via WASM
+ *
+ * **IMPORTANT**: Use this function to derive encryption keys from user credentials
+ * instead of Web Crypto PBKDF2. This ensures both FxFiles (Flutter) and WebUI (WASM)
+ * derive the exact same key from the same inputs, with brute-force resistance.
+ *
+ * Argon2id parameters:
+ * - Memory: 64 MiB
+ * - Iterations: 3
+ * - Parallelism: 1
+ *
+ * @param context - A context string used as salt (e.g., "fula-files-v1")
+ * @param input - The input bytes (e.g., UTF-8 encoded "google:{userId}:{email}")
+ * @returns 32-byte derived key as Uint8Array
+ *
+ * @example
+ * ```typescript
+ * const input = new TextEncoder().encode(`google:${userId}:${email}`);
+ * const secretKey = await deriveKeyFromCredentials('fula-files-v1', input);
+ * ```
+ */
+export async function deriveKeyFromCredentials(
+  context: string,
+  input: Uint8Array
+): Promise<Uint8Array> {
+  await ensureWasmInitialized();
+  const key = deriveKey(context, input);
+  return new Uint8Array(key);
 }

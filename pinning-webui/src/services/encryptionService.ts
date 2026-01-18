@@ -763,6 +763,30 @@ export function getExtensionFromMimeType(mimeType: string): string {
 }
 
 /**
+ * Decode base64 (handles both standard and URL-safe variants)
+ */
+function base64ToUint8Array(base64: string): Uint8Array {
+  // Convert URL-safe base64 to standard base64
+  let normalizedBase64 = base64.replace(/-/g, '+').replace(/_/g, '/');
+
+  // Add padding if needed
+  while (normalizedBase64.length % 4 !== 0) {
+    normalizedBase64 += '=';
+  }
+
+  // Remove any whitespace
+  normalizedBase64 = normalizedBase64.replace(/\s/g, '');
+
+  // Decode
+  const binaryString = atob(normalizedBase64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
  * Decrypt a JSON envelope from FxFiles S3 storage
  * Format: {"version":1,"ciphertext":"<base64>","nonce":"<base64>","tag":"<base64>"}
  *
@@ -786,10 +810,10 @@ export async function decryptEnvelope(
     throw new Error(`Unsupported envelope version: ${envelope.version}`);
   }
 
-  // Decode base64 fields
-  const ciphertext = Uint8Array.from(atob(envelope.ciphertext), c => c.charCodeAt(0));
-  const nonce = Uint8Array.from(atob(envelope.nonce), c => c.charCodeAt(0));
-  const tag = Uint8Array.from(atob(envelope.tag), c => c.charCodeAt(0));
+  // Decode base64 fields (handles both standard and URL-safe base64)
+  const ciphertext = base64ToUint8Array(envelope.ciphertext);
+  const nonce = base64ToUint8Array(envelope.nonce);
+  const tag = base64ToUint8Array(envelope.tag);
 
   // Import key for AES-GCM
   const key = await crypto.subtle.importKey(

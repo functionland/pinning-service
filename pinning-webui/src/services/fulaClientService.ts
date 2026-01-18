@@ -16,6 +16,7 @@ import init, {
   listBuckets,
   listDecrypted,
   listDirectory,
+  deriveKey,
   type EncryptedClient,
   type AcceptedShare,
 } from '@functionland/fula-client';
@@ -314,6 +315,34 @@ export async function decryptWithAcceptedShare(
 ): Promise<Uint8Array> {
   const decrypted = await getWithShare(client, bucket, storageKey, share);
   return new Uint8Array(decrypted);
+}
+
+// ============================================================================
+// Key Derivation (must match FxFiles mobile app)
+// ============================================================================
+
+/**
+ * Derive encryption key bytes using fula-client's BLAKE3-based derivation
+ *
+ * This MUST be used instead of PBKDF2 to match FxFiles mobile app key derivation.
+ * FxFiles uses: deriveKey('fula-files-v1', userId + email)
+ *
+ * @param googleUserId - The Google user ID
+ * @param userEmail - The user's email address
+ * @returns 32-byte encryption key as Uint8Array
+ */
+export async function deriveFulaKeyBytes(
+  googleUserId: string,
+  userEmail: string
+): Promise<Uint8Array> {
+  await ensureWasmInitialized();
+
+  // Match FxFiles mobile: context = 'fula-files-v1', input = userId + email
+  const encoder = new TextEncoder();
+  const input = encoder.encode(googleUserId + userEmail);
+  const keyBytes = deriveKey('fula-files-v1', input);
+
+  return new Uint8Array(keyBytes);
 }
 
 /**

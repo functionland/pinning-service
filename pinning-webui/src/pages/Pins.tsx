@@ -5,7 +5,6 @@ import { S3Client, ListObjectsCommand, GetObjectCommand } from '@aws-sdk/client-
 import {
   deriveEncryptionKey,
   derivePlaylistEncryptionKey,
-  deriveEncryptionKeyBytes,
   exportKey,
   importKey,
   fetchAndDecrypt,
@@ -19,7 +18,7 @@ import {
   isChunkedEnvelopeV2,
   decryptChunkedEnvelopeV2,
 } from '../services/encryptionService';
-import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
+import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles, deriveFulaKeyBytes } from '../services/fulaClientService';
 import {
   storeEncryptionKey,
   retrieveEncryptionKey,
@@ -403,7 +402,7 @@ export default function Pins() {
       if (!user.id) {
         throw new Error('User ID not available');
       }
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
 
       // Step 2: Get access token from API
       console.log('[Decryption] Getting access token...');
@@ -567,7 +566,7 @@ export default function Pins() {
     try {
       // Step 1: Derive encryption key bytes for fula-client
       console.log('[Playlists] Deriving encryption key for user:', user.id);
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
 
       // Step 2: Get JWT token for authentication
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
@@ -676,7 +675,7 @@ export default function Pins() {
     setFxFilesError(null);
 
     try {
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) {
@@ -714,7 +713,7 @@ export default function Pins() {
     setFxFilesError(null);
 
     try {
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');
@@ -842,7 +841,7 @@ export default function Pins() {
     setFxDownloading(prev => new Set(prev).add(file.key));
 
     try {
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');
@@ -913,7 +912,7 @@ export default function Pins() {
     setFxDownloading(prev => new Set(prev).add(file.key));
 
     try {
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveFulaKeyBytes(user.id, user.email);
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');

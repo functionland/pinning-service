@@ -109,6 +109,7 @@ export const en: Translations = {
     tabSharedWithMe: 'Shared with Me',
     tabSharedByMe: 'Shared by Me',
     tabPlaylists: 'Playlists',
+    tabFxFiles: 'FxFiles',
     // Shared with me
     sharedBy: 'Shared by',
     sharedOn: 'Shared on',
@@ -142,6 +143,17 @@ export const en: Translations = {
     noPlaylistsDesc: 'Create playlists in the FxFiles app to see them here',
     playlists: 'playlists',
     playPlaylist: 'Play playlist',
+    // FxFiles
+    fxBuckets: 'Buckets',
+    buckets: 'buckets',
+    noBuckets: 'No Buckets Found',
+    noBucketsDesc: 'Upload files using FxFiles app to see them here',
+    emptyFolder: 'Empty Folder',
+    size: 'Size',
+    lastModified: 'Modified',
+    preview: 'Preview',
+    download: 'Download',
+    apiKeyRequired: 'Please create an API key in the API Keys page first.',
   },
   view: {
     loading: 'Loading shared content...',

@@ -14,7 +14,7 @@ import {
   computeHashedUserId,
   decrypt,
 } from '../services/encryptionService';
-import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid } from '../services/fulaClientService';
+import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
 import {
   storeEncryptionKey,
   retrieveEncryptionKey,
@@ -105,7 +105,28 @@ interface SharedWithMeResponse {
   totalPages: number;
 }
 
-type TabType = 'myPins' | 'sharedWithMe' | 'sharedByMe' | 'playlists';
+type TabType = 'myPins' | 'sharedWithMe' | 'sharedByMe' | 'playlists' | 'fxFiles';
+
+// FxFiles Tab Types
+interface FxBucket {
+  name: string;
+  creationDate?: string;
+}
+
+interface FxFileItem {
+  key: string;
+  name: string;
+  size?: number;
+  lastModified?: string;
+  isDirectory: boolean;
+  path: string;
+}
+
+interface FxFilesNavigationState {
+  currentBucket: string | null;
+  currentPath: string;
+  breadcrumbs: { label: string; path: string }[];
+}
 
 export default function Pins() {
   const { t } = useLanguage();
@@ -153,6 +174,23 @@ export default function Pins() {
   const [playlistsError, setPlaylistsError] = useState<string | null>(null);
   const [playlistsPage, setPlaylistsPage] = useState(1);
 
+  // FxFiles state
+  const [fxFilesLoading, setFxFilesLoading] = useState(false);
+  const [fxFilesError, setFxFilesError] = useState<string | null>(null);
+  const [fxBuckets, setFxBuckets] = useState<FxBucket[]>([]);
+  const [fxFiles, setFxFiles] = useState<FxFileItem[]>([]);
+  const [fxNavigation, setFxNavigation] = useState<FxFilesNavigationState>({
+    currentBucket: null,
+    currentPath: '/',
+    breadcrumbs: [],
+  });
+  const [fxDownloading, setFxDownloading] = useState<Set<string>>(new Set());
+  const [fxPreviewData, setFxPreviewData] = useState<{
+    file: FxFileItem;
+    blobUrl: string;
+    mimeType: string;
+  } | null>(null);
+
   // Decryption state
   const [encryptionKeyReady, setEncryptionKeyReady] = useState(false);
   const [decryptingPins, setDecryptingPins] = useState<Set<string>>(new Set());
@@ -194,6 +232,9 @@ export default function Pins() {
         break;
       case 'playlists':
         if (playlistsData.length === 0 && !playlistsLoading) fetchPlaylists();
+        break;
+      case 'fxFiles':
+        if (fxBuckets.length === 0 && !fxFilesLoading && !fxNavigation.currentBucket) fetchFxBuckets();
         break;
     }
   }, [activeTab]);
@@ -592,6 +633,244 @@ export default function Pins() {
     }
   };
 
+  // ============== FxFiles Functions ==============
+
+  // Helper to format file size
+  const formatFileSize = (bytes: number): string => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  // Build breadcrumbs for FxFiles navigation
+  const buildFxBreadcrumbs = (bucket: string, prefix: string): { label: string; path: string }[] => {
+    const crumbs: { label: string; path: string }[] = [
+      { label: t.pins.fxBuckets || 'Buckets', path: '' },
+      { label: bucket, path: '/' },
+    ];
+
+    if (prefix) {
+      const parts = prefix.split('/').filter(Boolean);
+      let currentPath = '/';
+      for (const part of parts) {
+        currentPath += part + '/';
+        crumbs.push({ label: part, path: currentPath });
+      }
+    }
+
+    return crumbs;
+  };
+
+  // Fetch user's S3 buckets
+  const fetchFxBuckets = async () => {
+    if (!user?.id || !user?.email) return;
+
+    setFxFilesLoading(true);
+    setFxFilesError(null);
+
+    try {
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+
+      const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
+      if (!tokenRes.ok) {
+        throw new Error(t.pins.apiKeyRequired || 'Please create an API key in the API Keys page first.');
+      }
+      const { key: accessToken } = await tokenRes.json();
+
+      const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
+      const buckets = await listFulaBuckets(client);
+
+      setFxBuckets(buckets.map((b: any) => ({
+        name: b.name || b.Name,
+        creationDate: b.creationDate || b.CreationDate,
+      })));
+
+      setFxNavigation({
+        currentBucket: null,
+        currentPath: '/',
+        breadcrumbs: [],
+      });
+      setFxFiles([]);
+    } catch (err) {
+      console.error('[FxFiles] Error fetching buckets:', err);
+      setFxFilesError(err instanceof Error ? err.message : 'Failed to load buckets');
+    } finally {
+      setFxFilesLoading(false);
+    }
+  };
+
+  // Navigate to a bucket or directory
+  const navigateToFxDirectory = async (bucket: string, prefix: string = '') => {
+    if (!user?.id || !user?.email) return;
+
+    setFxFilesLoading(true);
+    setFxFilesError(null);
+
+    try {
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+
+      const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
+      if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');
+      const { key: accessToken } = await tokenRes.json();
+
+      const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
+
+      // List files with decrypted metadata
+      const files = await listDecryptedFiles(client, bucket, { prefix: prefix || undefined });
+
+      // Transform response to FxFileItem format
+      const items: FxFileItem[] = [];
+      const seenDirs = new Set<string>();
+
+      for (const file of files) {
+        const key = file.key || file.Key || '';
+        const relativePath = prefix ? key.replace(prefix, '') : key;
+
+        // Check if this is a directory (has more path segments)
+        const segments = relativePath.split('/').filter(Boolean);
+
+        if (segments.length > 1) {
+          // This is inside a subdirectory - add the subdirectory if not seen
+          const dirName = segments[0];
+          if (!seenDirs.has(dirName)) {
+            seenDirs.add(dirName);
+            items.push({
+              key: prefix + dirName + '/',
+              name: dirName,
+              isDirectory: true,
+              path: prefix + dirName + '/',
+            });
+          }
+        } else if (segments.length === 1) {
+          // This is a file in the current directory
+          items.push({
+            key: key,
+            name: file.originalName || file.name || segments[0],
+            size: file.size || file.Size,
+            lastModified: file.lastModified || file.LastModified,
+            isDirectory: false,
+            path: key,
+          });
+        }
+      }
+
+      // Sort: directories first, then files alphabetically
+      items.sort((a, b) => {
+        if (a.isDirectory && !b.isDirectory) return -1;
+        if (!a.isDirectory && b.isDirectory) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      setFxFiles(items);
+
+      // Update navigation state
+      const breadcrumbs = buildFxBreadcrumbs(bucket, prefix);
+      setFxNavigation({
+        currentBucket: bucket,
+        currentPath: prefix || '/',
+        breadcrumbs,
+      });
+    } catch (err) {
+      console.error('[FxFiles] Error navigating:', err);
+      setFxFilesError(err instanceof Error ? err.message : 'Failed to load directory');
+    } finally {
+      setFxFilesLoading(false);
+    }
+  };
+
+  // Download and decrypt a file
+  const downloadFxFile = async (file: FxFileItem) => {
+    if (!user?.id || !user?.email || !fxNavigation.currentBucket) return;
+
+    setFxDownloading(prev => new Set(prev).add(file.key));
+
+    try {
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+
+      const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
+      if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');
+      const { key: accessToken } = await tokenRes.json();
+
+      const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
+
+      // Fetch and decrypt using fula-client
+      const decryptedData = await fetchAndDecryptFula(client, fxNavigation.currentBucket, file.path);
+
+      // Detect MIME type
+      const mimeType = detectMimeType(decryptedData);
+      const ext = getExtensionFromMimeType(mimeType);
+      const filename = file.name.includes('.') ? file.name : `${file.name}${ext}`;
+
+      // Trigger download
+      downloadBlob(decryptedData, filename, mimeType);
+    } catch (err) {
+      console.error('[FxFiles] Download failed:', err);
+      setFxFilesError(err instanceof Error ? err.message : 'Download failed');
+    } finally {
+      setFxDownloading(prev => {
+        const next = new Set(prev);
+        next.delete(file.key);
+        return next;
+      });
+    }
+  };
+
+  // Preview a file
+  const previewFxFile = async (file: FxFileItem) => {
+    if (!user?.id || !user?.email || !fxNavigation.currentBucket) return;
+
+    setFxDownloading(prev => new Set(prev).add(file.key));
+
+    try {
+      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+
+      const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
+      if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');
+      const { key: accessToken } = await tokenRes.json();
+
+      const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
+      const decryptedData = await fetchAndDecryptFula(client, fxNavigation.currentBucket, file.path);
+
+      const mimeType = detectMimeType(decryptedData);
+
+      // Check if previewable
+      const previewableMimes = ['image/', 'video/', 'audio/', 'application/pdf', 'text/'];
+      const isPreviewable = previewableMimes.some(m => mimeType.startsWith(m));
+
+      if (!isPreviewable) {
+        // Not previewable, download instead
+        const ext = getExtensionFromMimeType(mimeType);
+        const filename = file.name.includes('.') ? file.name : `${file.name}${ext}`;
+        downloadBlob(decryptedData, filename, mimeType);
+        return;
+      }
+
+      // Create blob URL for preview
+      const blob = new Blob([decryptedData], { type: mimeType });
+      const blobUrl = URL.createObjectURL(blob);
+      setFxPreviewData({ file, blobUrl, mimeType });
+    } catch (err) {
+      console.error('[FxFiles] Preview failed:', err);
+      setFxFilesError(err instanceof Error ? err.message : 'Preview failed');
+    } finally {
+      setFxDownloading(prev => {
+        const next = new Set(prev);
+        next.delete(file.key);
+        return next;
+      });
+    }
+  };
+
+  // Close preview modal
+  const closeFxPreview = () => {
+    if (fxPreviewData) {
+      URL.revokeObjectURL(fxPreviewData.blobUrl);
+      setFxPreviewData(null);
+    }
+  };
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setPage(1);
@@ -796,6 +1075,15 @@ export default function Pins() {
       icon: (
         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+        </svg>
+      ),
+    },
+    {
+      id: 'fxFiles',
+      label: t.pins.tabFxFiles || 'FxFiles',
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
         </svg>
       ),
     },
@@ -1762,6 +2050,280 @@ export default function Pins() {
     );
   };
 
+  // Render FxFiles Tab Content
+  const renderFxFilesTab = () => {
+    // Loading state
+    if (fxFilesLoading) {
+      return (
+        <div className="card">
+          <div className="animate-pulse space-y-4">
+            {[...Array(5)].map((_, i) => (
+              <div key={i} className="h-12 bg-gray-200 rounded"></div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // Error state
+    if (fxFilesError) {
+      return (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700 flex justify-between items-center">
+          <span>{fxFilesError}</span>
+          <button onClick={() => setFxFilesError(null)} className="text-red-500 hover:text-red-700">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      );
+    }
+
+    // Bucket list view (no bucket selected)
+    if (!fxNavigation.currentBucket) {
+      if (fxBuckets.length === 0) {
+        return (
+          <div className="card text-center py-12">
+            <div className="text-5xl mb-4">
+              <svg className="w-16 h-16 mx-auto text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+              {t.pins.noBuckets || 'No Buckets Found'}
+            </h3>
+            <p className="text-gray-600">
+              {t.pins.noBucketsDesc || 'Upload files using FxFiles app to see them here'}
+            </p>
+          </div>
+        );
+      }
+
+      return (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {fxBuckets.map((bucket) => (
+            <div
+              key={bucket.name}
+              onClick={() => navigateToFxDirectory(bucket.name, '')}
+              className="card hover:shadow-lg transition-shadow cursor-pointer"
+            >
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
+                  <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="font-semibold text-gray-900">{bucket.name}</h3>
+                  {bucket.creationDate && (
+                    <p className="text-sm text-gray-500">
+                      {t.pins.createdAt}: {formatDate(bucket.creationDate)}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // File browser view
+    return (
+      <div className="space-y-4">
+        {/* Breadcrumb Navigation */}
+        <div className="flex items-center gap-2 text-sm flex-wrap bg-gray-50 rounded-lg p-3">
+          {fxNavigation.breadcrumbs.map((crumb, idx) => (
+            <span key={idx} className="flex items-center">
+              {idx > 0 && <span className="text-gray-400 mx-2">/</span>}
+              <button
+                onClick={() => {
+                  if (crumb.path === '') {
+                    // Go back to bucket list
+                    fetchFxBuckets();
+                  } else {
+                    navigateToFxDirectory(fxNavigation.currentBucket!, crumb.path === '/' ? '' : crumb.path);
+                  }
+                }}
+                className={`hover:text-primary-600 ${
+                  idx === fxNavigation.breadcrumbs.length - 1
+                    ? 'text-gray-900 font-medium'
+                    : 'text-gray-500 hover:underline'
+                }`}
+              >
+                {crumb.label}
+              </button>
+            </span>
+          ))}
+        </div>
+
+        {/* File/Folder Table */}
+        {fxFiles.length === 0 ? (
+          <div className="card text-center py-12">
+            <div className="text-5xl mb-4">
+              <svg className="w-16 h-16 mx-auto text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+              {t.pins.emptyFolder || 'Empty Folder'}
+            </h3>
+          </div>
+        ) : (
+          <div className="card overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                      {t.pins.name}
+                    </th>
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden sm:table-cell">
+                      {t.pins.size || 'Size'}
+                    </th>
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 hidden md:table-cell">
+                      {t.pins.lastModified || 'Modified'}
+                    </th>
+                    <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                      {t.pins.actions || 'Actions'}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {fxFiles.map((item) => (
+                    <tr key={item.key} className="hover:bg-gray-50">
+                      <td className="px-4 py-4">
+                        <div className="flex items-center gap-3">
+                          {/* Icon */}
+                          {item.isDirectory ? (
+                            <svg className="w-5 h-5 text-yellow-500" fill="currentColor" viewBox="0 0 24 24">
+                              <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
+                            </svg>
+                          ) : (
+                            <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                            </svg>
+                          )}
+                          {/* Name (clickable for directories) */}
+                          {item.isDirectory ? (
+                            <button
+                              onClick={() => navigateToFxDirectory(fxNavigation.currentBucket!, item.path)}
+                              className="text-primary-600 hover:text-primary-800 font-medium hover:underline"
+                            >
+                              {item.name}
+                            </button>
+                          ) : (
+                            <span className="text-gray-900">{item.name}</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-4 py-4 text-sm text-gray-500 hidden sm:table-cell">
+                        {item.isDirectory ? '--' : formatFileSize(item.size || 0)}
+                      </td>
+                      <td className="px-4 py-4 text-sm text-gray-500 hidden md:table-cell">
+                        {item.lastModified ? formatDate(item.lastModified) : '--'}
+                      </td>
+                      <td className="px-4 py-4">
+                        {!item.isDirectory && (
+                          <div className="flex items-center gap-1">
+                            {/* Preview button */}
+                            <button
+                              onClick={() => previewFxFile(item)}
+                              disabled={fxDownloading.has(item.key)}
+                              className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
+                              title={t.pins.preview || 'Preview'}
+                            >
+                              {fxDownloading.has(item.key) ? (
+                                <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                </svg>
+                              ) : (
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                </svg>
+                              )}
+                            </button>
+                            {/* Download button */}
+                            <button
+                              onClick={() => downloadFxFile(item)}
+                              disabled={fxDownloading.has(item.key)}
+                              className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors disabled:opacity-50"
+                              title={t.pins.download || 'Download'}
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                              </svg>
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Render FxFiles Preview Modal
+  const renderFxPreviewModal = () => {
+    if (!fxPreviewData) return null;
+
+    const { file, blobUrl, mimeType } = fxPreviewData;
+
+    return (
+      <div className="fixed inset-0 bg-black/75 flex items-center justify-center z-50 p-4" onClick={closeFxPreview}>
+        <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+          {/* Header */}
+          <div className="p-4 border-b border-gray-100 flex justify-between items-center">
+            <h2 className="text-lg font-semibold text-gray-900 truncate">{file.name}</h2>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => downloadFxFile(file)}
+                className="btn-secondary flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                {t.pins.download || 'Download'}
+              </button>
+              <button onClick={closeFxPreview} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          {/* Content */}
+          <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-gray-50">
+            {mimeType.startsWith('image/') && (
+              <img src={blobUrl} alt={file.name} className="max-w-full max-h-full object-contain" />
+            )}
+            {mimeType.startsWith('video/') && (
+              <video src={blobUrl} controls className="max-w-full max-h-full" />
+            )}
+            {mimeType.startsWith('audio/') && (
+              <div className="w-full max-w-md">
+                <audio src={blobUrl} controls className="w-full" />
+              </div>
+            )}
+            {mimeType === 'application/pdf' && (
+              <iframe src={blobUrl} className="w-full h-full min-h-[500px]" title={file.name} />
+            )}
+            {mimeType.startsWith('text/') && (
+              <iframe src={blobUrl} className="w-full h-full min-h-[500px] bg-white" title={file.name} />
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // Main return with tabbed interface
   return (
     <div className="space-y-6">
@@ -1774,6 +2336,7 @@ export default function Pins() {
              activeTab === 'sharedWithMe' && sharedWithMeData ? `${sharedWithMeData.total} ${t.pins.items || 'items'}` :
              activeTab === 'sharedByMe' ? `${sharedByMeData.length} ${t.pins.items || 'items'}` :
              activeTab === 'playlists' ? `${playlistsData.length} ${t.pins.playlists || 'playlists'}` :
+             activeTab === 'fxFiles' ? `${fxNavigation.currentBucket ? fxFiles.length + ' ' + (t.pins.items || 'items') : fxBuckets.length + ' ' + (t.pins.buckets || 'buckets')}` :
              t.common.loading}
           </p>
         </div>
@@ -1812,7 +2375,11 @@ export default function Pins() {
         {activeTab === 'sharedWithMe' && renderSharedWithMeTab()}
         {activeTab === 'sharedByMe' && renderSharedByMeTab()}
         {activeTab === 'playlists' && renderPlaylistsTab()}
+        {activeTab === 'fxFiles' && renderFxFilesTab()}
       </div>
+
+      {/* FxFiles Preview Modal */}
+      {renderFxPreviewModal()}
 
       {/* Copied toast notification */}
       {copied && (

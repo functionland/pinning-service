@@ -155,6 +155,18 @@ export interface Translations {
     noPlaylistsDesc: string;
     playlists: string;
     playPlaylist: string;
+    // FxFiles
+    tabFxFiles?: string;
+    fxBuckets?: string;
+    buckets?: string;
+    noBuckets?: string;
+    noBucketsDesc?: string;
+    emptyFolder?: string;
+    size?: string;
+    lastModified?: string;
+    preview?: string;
+    download?: string;
+    apiKeyRequired?: string;
   };
   view: {
     loading: string;

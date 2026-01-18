@@ -788,7 +788,9 @@ function base64ToUint8Array(base64: string): Uint8Array {
 
 /**
  * Decrypt a JSON envelope from FxFiles S3 storage
- * Format: {"version":1,"ciphertext":"<base64>","nonce":"<base64>","tag":"<base64>"}
+ * Supports multiple field naming conventions:
+ * - {"version":1,"ciphertext":"<base64>","nonce":"<base64>","tag":"<base64>"}
+ * - {"version":1,"ciphertext":"<base64>","iv":"<base64>","tag":"<base64>"}
  *
  * The fula-client WASM's getDecryptedByStorageKey does NOT decrypt files.
  * It returns the raw S3 object which is a JSON encrypted envelope.
@@ -810,10 +812,26 @@ export async function decryptEnvelope(
     throw new Error(`Unsupported envelope version: ${envelope.version}`);
   }
 
+  // Extract fields with fallback names (iv/nonce, tag/mac)
+  const ciphertextB64 = envelope.ciphertext;
+  const nonceB64 = envelope.nonce ?? envelope.iv;
+  const tagB64 = envelope.tag ?? envelope.mac;
+
+  // Validate required fields
+  if (!ciphertextB64) {
+    throw new Error(`Missing ciphertext in envelope. Fields: ${Object.keys(envelope).join(', ')}`);
+  }
+  if (!nonceB64) {
+    throw new Error(`Missing nonce/iv in envelope. Fields: ${Object.keys(envelope).join(', ')}`);
+  }
+  if (!tagB64) {
+    throw new Error(`Missing tag/mac in envelope. Fields: ${Object.keys(envelope).join(', ')}`);
+  }
+
   // Decode base64 fields (handles both standard and URL-safe base64)
-  const ciphertext = base64ToUint8Array(envelope.ciphertext);
-  const nonce = base64ToUint8Array(envelope.nonce);
-  const tag = base64ToUint8Array(envelope.tag);
+  const ciphertext = base64ToUint8Array(ciphertextB64);
+  const nonce = base64ToUint8Array(nonceB64);
+  const tag = base64ToUint8Array(tagB64);
 
   // Import key for AES-GCM
   const key = await crypto.subtle.importKey(

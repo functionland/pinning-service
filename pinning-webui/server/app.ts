@@ -980,22 +980,28 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // V2 Share fetch - proxies to internal S3 for encrypted content
   // Client decrypts using fula_client after receiving encrypted bytes
   //
-  // Route format: /api/share/v2/fetch/:bucket/:storageKey
+  // Route format: /api/share/v2/fetch/:bucket/*
   // - :bucket = bucket name
-  // - :storageKey = IPFS CID to fetch from S3 (same as token.path_scope)
+  // - * = IPFS CID to fetch from S3, may include path segments for chunked files
+  //       e.g., "bafyabc123" or "bafyabc123.chunks/00000000"
   //
   // fula_client builds URL as: {endpoint}/{bucket}/{storageKey}
-  app.get('/api/share/v2/fetch/:bucket/:storageKey', async (req: Request, res: Response) => {
+  // For chunked files: {endpoint}/{bucket}/{cid}.chunks/00000000
+  app.get('/api/share/v2/fetch/:bucket/*', async (req: Request, res: Response) => {
     try {
-      const { bucket, storageKey } = req.params;
+      const { bucket } = req.params;
+      // Get the full path after bucket (handles chunks paths like "cid.chunks/00000000")
+      const storageKey = req.params[0];
 
       if (!bucket || !storageKey) {
         return res.status(400).json({ error: 'Missing bucket or storageKey parameter' });
       }
 
-      // Validate bucket and storageKey (alphanumeric, underscores, hyphens, dots)
-      const safePattern = /^[a-zA-Z0-9_\-\.]+$/;
-      if (!safePattern.test(bucket) || !safePattern.test(storageKey)) {
+      // Validate bucket (alphanumeric, underscores, hyphens, dots)
+      // Validate storageKey (same, but also allows / for chunk paths)
+      const safeBucketPattern = /^[a-zA-Z0-9_\-\.]+$/;
+      const safeKeyPattern = /^[a-zA-Z0-9_\-\.\/]+$/;
+      if (!safeBucketPattern.test(bucket) || !safeKeyPattern.test(storageKey)) {
         return res.status(400).json({ error: 'Invalid bucket or storageKey format' });
       }
 

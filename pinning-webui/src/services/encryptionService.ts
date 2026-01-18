@@ -763,6 +763,67 @@ export function getExtensionFromMimeType(mimeType: string): string {
 }
 
 /**
+ * Decrypt a JSON envelope from FxFiles S3 storage
+ * Format: {"version":1,"ciphertext":"<base64>","nonce":"<base64>","tag":"<base64>"}
+ *
+ * The fula-client WASM's getDecryptedByStorageKey does NOT decrypt files.
+ * It returns the raw S3 object which is a JSON encrypted envelope.
+ * This function performs the actual decryption using Web Crypto API.
+ *
+ * @param envelopeData - The JSON envelope data as Uint8Array
+ * @param keyBytes - The 32-byte AES-256 key
+ * @returns Promise<Uint8Array> - The decrypted plaintext data
+ */
+export async function decryptEnvelope(
+  envelopeData: Uint8Array,
+  keyBytes: Uint8Array
+): Promise<Uint8Array> {
+  // Parse JSON envelope
+  const text = new TextDecoder().decode(envelopeData);
+  const envelope = JSON.parse(text);
+
+  if (envelope.version !== 1) {
+    throw new Error(`Unsupported envelope version: ${envelope.version}`);
+  }
+
+  // Decode base64 fields
+  const ciphertext = Uint8Array.from(atob(envelope.ciphertext), c => c.charCodeAt(0));
+  const nonce = Uint8Array.from(atob(envelope.nonce), c => c.charCodeAt(0));
+  const tag = Uint8Array.from(atob(envelope.tag), c => c.charCodeAt(0));
+
+  // Import key for AES-GCM
+  const key = await crypto.subtle.importKey(
+    'raw',
+    keyBytes,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['decrypt']
+  );
+
+  // Combine ciphertext + tag (Web Crypto expects this format)
+  const ciphertextWithTag = new Uint8Array(ciphertext.length + tag.length);
+  ciphertextWithTag.set(ciphertext, 0);
+  ciphertextWithTag.set(tag, ciphertext.length);
+
+  // Decrypt
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: nonce, tagLength: 128 },
+    key,
+    ciphertextWithTag
+  );
+
+  return new Uint8Array(decrypted);
+}
+
+/**
+ * Check if data looks like a JSON encrypted envelope
+ * (starts with '{' character, 0x7b)
+ */
+export function isJsonEnvelope(data: Uint8Array): boolean {
+  return data.length > 0 && data[0] === 0x7b; // '{' character
+}
+
+/**
  * Trigger a file download in the browser
  */
 export function downloadBlob(data: Uint8Array, filename: string, mimeType: string): void {

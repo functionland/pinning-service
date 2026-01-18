@@ -13,6 +13,8 @@ import {
   getExtensionFromMimeType,
   computeHashedUserId,
   decrypt,
+  decryptEnvelope,
+  isJsonEnvelope,
 } from '../services/encryptionService';
 import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
 import {
@@ -845,10 +847,21 @@ export default function Pins() {
 
       const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
 
-      // Fetch and decrypt using storage key (CID)
+      // Fetch using storage key (CID) - fula-client returns raw S3 data
       // file.key contains the storageKey (obfuscated CID) which is needed for fetching
       console.log('[FxFiles] Downloading file:', { bucket: fxNavigation.currentBucket, storageKey: file.key });
-      const decryptedData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket, file.key);
+      const rawData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket, file.key);
+
+      // Check if this is a JSON envelope that needs manual decryption
+      // fula-client WASM does NOT decrypt the file - it returns the JSON envelope
+      let decryptedData: Uint8Array;
+      if (isJsonEnvelope(rawData)) {
+        console.log('[FxFiles] Data is JSON envelope, performing manual decryption...');
+        decryptedData = await decryptEnvelope(rawData, keyBytes);
+      } else {
+        // Already decrypted or unencrypted file
+        decryptedData = rawData;
+      }
 
       // Detect MIME type
       const mimeType = detectMimeType(decryptedData);
@@ -884,16 +897,26 @@ export default function Pins() {
 
       const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
 
-      // Fetch and decrypt using storage key (CID)
+      // Fetch using storage key (CID) - fula-client returns raw S3 data
       console.log('[FxFiles] Previewing file:', { bucket: fxNavigation.currentBucket, storageKey: file.key });
-      console.log('[FxFiles] User ID for key derivation:', user.id);
-      console.log('[FxFiles] Key bytes (first 8):', Array.from(keyBytes.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+      const rawData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket, file.key);
 
-      const decryptedData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket, file.key);
+      // Debug: log raw data info
+      console.log('[FxFiles] Raw data size:', rawData.length);
+      console.log('[FxFiles] Raw data (first 32 bytes):', Array.from(rawData.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
-      // Debug: log decrypted data info
-      console.log('[FxFiles] Decrypted data size:', decryptedData.length);
-      console.log('[FxFiles] Decrypted data (first 32 bytes):', Array.from(decryptedData.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+      // Check if this is a JSON envelope that needs manual decryption
+      // fula-client WASM does NOT decrypt the file - it returns the JSON envelope
+      let decryptedData: Uint8Array;
+      if (isJsonEnvelope(rawData)) {
+        console.log('[FxFiles] Data is JSON envelope, performing manual decryption...');
+        decryptedData = await decryptEnvelope(rawData, keyBytes);
+        console.log('[FxFiles] Decrypted data size:', decryptedData.length);
+        console.log('[FxFiles] Decrypted data (first 32 bytes):', Array.from(decryptedData.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+      } else {
+        // Already decrypted or unencrypted file
+        decryptedData = rawData;
+      }
 
       const mimeType = detectMimeType(decryptedData);
       console.log('[FxFiles] Detected MIME type:', mimeType);

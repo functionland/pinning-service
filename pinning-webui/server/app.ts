@@ -980,18 +980,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // V2 Share fetch - proxies to internal S3 for encrypted content
   // Client decrypts using fula_client after receiving encrypted bytes
   //
-  // Route format: /api/share/v2/fetch/:bucket/*
+  // Route format: /api/share/v2/fetch/:bucket/*storageKey
   // - :bucket = bucket name
-  // - * = IPFS CID to fetch from S3, may include path segments for chunked files
+  // - *storageKey = IPFS CID to fetch from S3, may include path segments for chunked files
   //       e.g., "bafyabc123" or "bafyabc123.chunks/00000000"
   //
   // fula_client builds URL as: {endpoint}/{bucket}/{storageKey}
   // For chunked files: {endpoint}/{bucket}/{cid}.chunks/00000000
-  app.get('/api/share/v2/fetch/:bucket/*', async (req: Request, res: Response) => {
+  app.get('/api/share/v2/fetch/:bucket/*storageKey', async (req: Request, res: Response) => {
     try {
-      const { bucket } = req.params;
-      // Get the full path after bucket (handles chunks paths like "cid.chunks/00000000")
-      const storageKey = req.params[0];
+      const { bucket, storageKey } = req.params;
+      // storageKey captures the full path after bucket (handles chunks paths like "cid.chunks/00000000")
 
       if (!bucket || !storageKey) {
         return res.status(400).json({ error: 'Missing bucket or storageKey parameter' });

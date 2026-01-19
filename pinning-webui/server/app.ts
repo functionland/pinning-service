@@ -37,6 +37,12 @@ import {
   deleteUserProfile,
   addPin,
   verifyApiKey,
+  getUserReferralCodes,
+  createUserReferralCode,
+  updateReferralCodeName,
+  deleteUserReferralCode,
+  getUserCompany,
+  updateUserCompany,
 } from './database/postgres.js';
 
 // Session user type
@@ -738,6 +744,36 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
+  // Get user's company/organization
+  app.get('/api/profile/company', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const company = await getUserCompany(req.session.user!.email);
+      res.json({ company: company || '' });
+    } catch (error) {
+      console.error('[webui] Error getting company:', error);
+      res.status(500).json({ error: 'Failed to get company' });
+    }
+  });
+
+  // Update user's company/organization
+  app.put('/api/profile/company', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { company } = req.body;
+
+      if (company !== undefined && typeof company !== 'string') {
+        return res.status(400).json({ error: 'Company must be a string' });
+      }
+
+      // Treat empty string as null
+      const companyValue = company && company.trim() ? company.trim() : null;
+      await updateUserCompany(req.session.user!.email, companyValue);
+      res.json({ success: true, company: companyValue || '' });
+    } catch (error) {
+      console.error('[webui] Error updating company:', error);
+      res.status(500).json({ error: 'Failed to update company' });
+    }
+  });
+
   // ============ Shares and Playlists Endpoints ============
   // Server proxies S3 bucket requests, returns encrypted data for client-side decryption
   // Same pattern as file downloads: fetch encrypted → client decrypts
@@ -1423,20 +1459,16 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
   // ============ Referral Endpoints ============
 
-  // Get user's referral info (code + stats)
+  // Get user's referral info (codes + stats)
   app.get('/api/referral', requireAuth, async (req: Request, res: Response) => {
     try {
       const email = req.session.user!.email;
 
-      // Get or create referral code
-      const codeResult = await query<{ code: string; created_at: string }>(
-        'SELECT code, created_at FROM referral_codes WHERE user_email = $1',
-        [email]
-      );
-      let codeRow = codeResult.rows[0];
+      // Get all referral codes for user
+      let codes = await getUserReferralCodes(email);
 
-      if (!codeRow) {
-        // Generate code for existing users who don't have one
+      // If no codes exist, create a default one (for existing users)
+      if (codes.length === 0) {
         let code = generateReferralCode();
         let exists = true;
         while (exists) {
@@ -1447,9 +1479,21 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
             code = generateReferralCode();
           }
         }
-        await query('INSERT INTO referral_codes (user_email, code) VALUES ($1, $2)', [email, code]);
-        codeRow = { code, created_at: new Date().toISOString() };
+        await query(
+          'INSERT INTO referral_codes (user_email, code, is_default) VALUES ($1, $2, TRUE)',
+          [email, code]
+        );
+        codes = [{
+          code,
+          name: null,
+          inheritedName: null,
+          isDefault: true,
+          createdAt: new Date().toISOString(),
+        }];
       }
+
+      // Find the default code for legacy compatibility
+      const defaultCode = codes.find(c => c.isDefault) || codes[0];
 
       // Get referral stats with 3-level breakdown using recursive CTE
       const levelStatsResult = await query<{ level: number; count: string; credits: string }>(`
@@ -1496,16 +1540,83 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
 
       res.json({
-        code: codeRow.code,
-        createdAt: codeRow.created_at,
+        // New: array of all codes with names
+        codes: codes.map(c => ({
+          code: c.code,
+          name: c.name,
+          displayName: c.name || c.inheritedName,
+          inheritedName: c.inheritedName,
+          isDefault: c.isDefault,
+          createdAt: c.createdAt,
+        })),
+        // Legacy: single default code for backward compatibility
+        code: defaultCode.code,
+        createdAt: defaultCode.createdAt,
         stats,
-        // Keep legacy fields for backward compatibility
         totalReferred: stats.level1.count,
         totalCreditsFromReferrals: stats.total.credits,
       });
     } catch (error) {
       console.error('[webui] Error getting referral info:', error);
       res.status(500).json({ error: 'Failed to get referral info' });
+    }
+  });
+
+  // Create a new referral code
+  app.post('/api/referral/codes', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const email = req.session.user!.email;
+      const { name } = req.body;
+
+      const result = await createUserReferralCode(email, name || null);
+
+      if (result.error) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({ code: result.code });
+    } catch (error) {
+      console.error('[webui] Error creating referral code:', error);
+      res.status(500).json({ error: 'Failed to create referral code' });
+    }
+  });
+
+  // Update a referral code's name
+  app.put('/api/referral/codes/:code', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const email = req.session.user!.email;
+      const { code } = req.params;
+      const { name } = req.body;
+
+      const result = await updateReferralCodeName(email, code, name || null);
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[webui] Error updating referral code:', error);
+      res.status(500).json({ error: 'Failed to update referral code' });
+    }
+  });
+
+  // Delete a referral code
+  app.delete('/api/referral/codes/:code', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const email = req.session.user!.email;
+      const { code } = req.params;
+
+      const result = await deleteUserReferralCode(email, code);
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[webui] Error deleting referral code:', error);
+      res.status(500).json({ error: 'Failed to delete referral code' });
     }
   });
 
@@ -2006,6 +2117,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // ============ API v1 Endpoints (Bearer Token Auth for External Apps) ============
   // These endpoints use API key (JWT) authentication instead of browser sessions
   // Existing /api/* endpoints remain unchanged for web UI compatibility
+
+  // GET /api/v1/userinfo - User information (company/organization)
+  app.get('/api/v1/userinfo', requireApiAuth, async (req: Request, res: Response) => {
+    try {
+      const company = await getUserCompany(req.apiUser!.email);
+      res.json({ org: company || '' });
+    } catch (error) {
+      console.error('[webui] Error getting userinfo:', error);
+      res.status(500).json({ error: 'Failed to get user info' });
+    }
+  });
 
   // GET /api/v1/storage - Storage usage and credit info
   app.get('/api/v1/storage', requireApiAuth, async (req: Request, res: Response) => {

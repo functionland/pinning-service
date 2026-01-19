@@ -152,10 +152,23 @@ export async function getOrCreateWebuiUser(
     return { ...existing.rows[0], isNew: false };
   }
 
-  // Insert new user
+  // Look up referrer's code name for inheritance (do this first so we can set company)
+  let inheritedName: string | null = null;
+  if (referralCode) {
+    const referrerCodeInfo = await query<{ name: string | null; inherited_name: string | null }>(
+      'SELECT name, inherited_name FROM referral_codes WHERE code = $1',
+      [referralCode]
+    );
+    if (referrerCodeInfo.rows[0]) {
+      // Inherit name: use the code's name first, or its inherited_name if no name
+      inheritedName = referrerCodeInfo.rows[0].name || referrerCodeInfo.rows[0].inherited_name;
+    }
+  }
+
+  // Insert new user with company pre-filled from referral link name
   await query(
-    'INSERT INTO webui_users (email, name, picture, last_login_at) VALUES ($1, $2, $3, NOW())',
-    [email, name, picture]
+    'INSERT INTO webui_users (email, name, picture, last_login_at, company) VALUES ($1, $2, $3, NOW(), $4)',
+    [email, name, picture, inheritedName]
   );
 
   // Create first API key automatically
@@ -196,7 +209,12 @@ export async function getOrCreateWebuiUser(
     }
     codeExists = await query('SELECT 1 FROM referral_codes WHERE code = $1', [newReferralCode]);
   }
-  await query('INSERT INTO referral_codes (user_email, code) VALUES ($1, $2)', [email, newReferralCode]);
+
+  // Insert with is_default and inherited_name
+  await query(
+    'INSERT INTO referral_codes (user_email, code, is_default, inherited_name) VALUES ($1, $2, TRUE, $3)',
+    [email, newReferralCode, inheritedName]
+  );
 
   // If referred by someone, create referral record
   if (referralCode) {
@@ -400,6 +418,148 @@ export async function getReferralStats(email: string): Promise<{
   };
 }
 
+// Get all referral codes for a user
+export interface ReferralCodeInfo {
+  code: string;
+  name: string | null;
+  inheritedName: string | null;
+  isDefault: boolean;
+  createdAt: string;
+}
+
+export async function getUserReferralCodes(email: string): Promise<ReferralCodeInfo[]> {
+  const result = await query<{
+    code: string;
+    name: string | null;
+    inherited_name: string | null;
+    is_default: boolean;
+    created_at: string;
+  }>(
+    `SELECT code, name, inherited_name, is_default, created_at
+     FROM referral_codes
+     WHERE user_email = $1
+     ORDER BY is_default DESC, created_at ASC`,
+    [email]
+  );
+
+  return result.rows.map(r => ({
+    code: r.code,
+    name: r.name,
+    inheritedName: r.inherited_name,
+    isDefault: r.is_default,
+    createdAt: r.created_at,
+  }));
+}
+
+// Create a new referral code for a user
+export async function createUserReferralCode(
+  email: string,
+  name: string | null
+): Promise<{ code: string; error?: string }> {
+  // Check max codes limit (10 per user)
+  const countResult = await query<{ count: string }>(
+    'SELECT COUNT(*) as count FROM referral_codes WHERE user_email = $1',
+    [email]
+  );
+  const currentCount = parseInt(countResult.rows[0]?.count || '0', 10);
+  if (currentCount >= 10) {
+    return { code: '', error: 'Maximum of 10 referral codes allowed per user' };
+  }
+
+  // Truncate name to 50 chars if provided
+  const truncatedName = name ? name.substring(0, 50) : null;
+
+  // Generate unique code
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let newCode = '';
+  for (let i = 0; i < 8; i++) {
+    newCode += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+
+  let codeExists = await query('SELECT 1 FROM referral_codes WHERE code = $1', [newCode]);
+  while (codeExists.rows[0]) {
+    newCode = '';
+    for (let i = 0; i < 8; i++) {
+      newCode += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    codeExists = await query('SELECT 1 FROM referral_codes WHERE code = $1', [newCode]);
+  }
+
+  await query(
+    'INSERT INTO referral_codes (user_email, code, name, is_default) VALUES ($1, $2, $3, FALSE)',
+    [email, newCode, truncatedName]
+  );
+
+  return { code: newCode };
+}
+
+// Update a referral code's name
+export async function updateReferralCodeName(
+  email: string,
+  code: string,
+  name: string | null
+): Promise<{ success: boolean; error?: string }> {
+  // Truncate name to 50 chars if provided
+  const truncatedName = name ? name.substring(0, 50) : null;
+
+  const result = await query(
+    'UPDATE referral_codes SET name = $1 WHERE user_email = $2 AND code = $3',
+    [truncatedName, email, code]
+  );
+
+  if ((result.rowCount || 0) === 0) {
+    return { success: false, error: 'Referral code not found' };
+  }
+
+  return { success: true };
+}
+
+// Delete a referral code
+export async function deleteUserReferralCode(
+  email: string,
+  code: string
+): Promise<{ success: boolean; error?: string }> {
+  // Check if this code has any referrals
+  const referralsResult = await query<{ count: string }>(
+    'SELECT COUNT(*) as count FROM referrals WHERE referral_code = $1',
+    [code]
+  );
+  const referralCount = parseInt(referralsResult.rows[0]?.count || '0', 10);
+  if (referralCount > 0) {
+    return { success: false, error: 'Cannot delete code with existing referrals' };
+  }
+
+  // Check if this is the only code
+  const countResult = await query<{ count: string }>(
+    'SELECT COUNT(*) as count FROM referral_codes WHERE user_email = $1',
+    [email]
+  );
+  const totalCodes = parseInt(countResult.rows[0]?.count || '0', 10);
+  if (totalCodes <= 1) {
+    return { success: false, error: 'Cannot delete your only referral code' };
+  }
+
+  // Check if this is the default code
+  const codeInfo = await query<{ is_default: boolean }>(
+    'SELECT is_default FROM referral_codes WHERE user_email = $1 AND code = $2',
+    [email, code]
+  );
+  if (codeInfo.rows[0]?.is_default) {
+    return { success: false, error: 'Cannot delete the default referral code' };
+  }
+
+  const result = await query(
+    'DELETE FROM referral_codes WHERE user_email = $1 AND code = $2',
+    [email, code]
+  );
+
+  if ((result.rowCount || 0) === 0) {
+    return { success: false, error: 'Referral code not found' };
+  }
+
+  return { success: true };
+}
+
 // ============================================
 // API Key Verification
 // ============================================
@@ -449,6 +609,29 @@ export async function markAppDownloaded(email: string): Promise<void> {
   );
 }
 
+// ============================================
+// User Company/Organization
+// ============================================
+
+export async function getUserCompany(email: string): Promise<string | null> {
+  const result = await query<{ company: string | null }>(
+    'SELECT company FROM webui_users WHERE email = $1',
+    [email]
+  );
+  return result.rows[0]?.company || null;
+}
+
+export async function updateUserCompany(email: string, company: string | null): Promise<boolean> {
+  // Truncate company to 100 chars if provided
+  const truncatedCompany = company ? company.substring(0, 100) : null;
+
+  const result = await query(
+    'UPDATE webui_users SET company = $1 WHERE email = $2',
+    [truncatedCompany, email]
+  );
+  return (result.rowCount || 0) > 0;
+}
+
 export default {
   createPostgresPool,
   getPool,
@@ -468,8 +651,14 @@ export default {
   addPin,
   getReferralCode,
   getReferralStats,
+  getUserReferralCodes,
+  createUserReferralCode,
+  updateReferralCodeName,
+  deleteUserReferralCode,
   verifyApiKey,
   getChainSyncState,
   updateChainSyncState,
   markAppDownloaded,
+  getUserCompany,
+  updateUserCompany,
 };

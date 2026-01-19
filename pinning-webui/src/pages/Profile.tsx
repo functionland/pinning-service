@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
@@ -11,6 +11,58 @@ export default function Profile() {
   const [deleteConfirmation, setDeleteConfirmation] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Company state
+  const [company, setCompany] = useState('');
+  const [companyLoading, setCompanyLoading] = useState(true);
+  const [companySaving, setCompanySaving] = useState(false);
+  const [companyError, setCompanyError] = useState<string | null>(null);
+  const [companySuccess, setCompanySuccess] = useState(false);
+
+  useEffect(() => {
+    fetchCompany();
+  }, []);
+
+  const fetchCompany = async () => {
+    try {
+      const res = await fetch('/api/profile/company', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setCompany(data.company || '');
+      }
+    } catch (err) {
+      console.error('Failed to fetch company:', err);
+    } finally {
+      setCompanyLoading(false);
+    }
+  };
+
+  const handleSaveCompany = async () => {
+    setCompanySaving(true);
+    setCompanyError(null);
+    setCompanySuccess(false);
+
+    try {
+      const res = await fetch('/api/profile/company', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ company: company.trim() }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to save company');
+      }
+
+      setCompanySuccess(true);
+      setTimeout(() => setCompanySuccess(false), 3000);
+    } catch (err) {
+      setCompanyError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setCompanySaving(false);
+    }
+  };
 
   const handleDeleteProfile = async () => {
     if (deleteConfirmation !== 'delete') {
@@ -69,6 +121,48 @@ export default function Profile() {
             <h2 className="text-xl font-semibold text-gray-900">{user?.name || t.common.user}</h2>
             <p className="text-gray-600">{user?.email}</p>
             <p className="text-sm text-gray-500 mt-1">{t.profile.signedWith}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Company/Organization */}
+      <div className="card">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">{t.profile?.company || 'Company / Organization'}</h3>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {t.profile?.companyLabel || 'Company Name'}
+            </label>
+            {companyLoading ? (
+              <div className="animate-pulse h-10 bg-gray-100 rounded-lg"></div>
+            ) : (
+              <input
+                type="text"
+                value={company}
+                onChange={(e) => setCompany(e.target.value)}
+                placeholder={t.profile?.companyPlaceholder || 'Enter your company or organization name'}
+                className="w-full input"
+                maxLength={100}
+              />
+            )}
+            <p className="text-xs text-gray-500 mt-1">
+              {t.profile?.companyHint || 'This helps identify your organization in reports'}
+            </p>
+          </div>
+          {companyError && (
+            <p className="text-sm text-red-600">{companyError}</p>
+          )}
+          {companySuccess && (
+            <p className="text-sm text-green-600">{t.profile?.companySaved || 'Company saved successfully'}</p>
+          )}
+          <div className="flex justify-end">
+            <button
+              onClick={handleSaveCompany}
+              disabled={companySaving || companyLoading}
+              className="btn-primary px-4 py-2 disabled:opacity-50"
+            >
+              {companySaving ? (t.common?.saving || 'Saving...') : (t.common?.save || 'Save')}
+            </button>
           </div>
         </div>
       </div>

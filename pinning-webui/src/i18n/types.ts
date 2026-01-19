@@ -192,6 +192,11 @@ export interface Translations {
     auth: string;
     googleOAuth: string;
     signedWith: string;
+    company?: string;
+    companyLabel?: string;
+    companyPlaceholder?: string;
+    companyHint?: string;
+    companySaved?: string;
     dangerTitle: string;
     dangerDesc: string;
     deleteAccount: string;
@@ -230,6 +235,11 @@ export interface Translations {
     error: string;
     user: string;
     today: string;
+    cancel?: string;
+    create?: string;
+    creating?: string;
+    save?: string;
+    saving?: string;
   };
   referrals?: {
     title: string;
@@ -260,6 +270,28 @@ export interface Translations {
     totalNetwork?: string;
     users?: string;
     expandHint?: string;
+    // Multiple referral codes
+    yourLinks?: string;
+    createNew?: string;
+    labelColumn?: string;
+    codeColumn?: string;
+    linkColumn?: string;
+    actionsColumn?: string;
+    noLabel?: string;
+    defaultBadge?: string;
+    inheritedBadge?: string;
+    copy?: string;
+    edit?: string;
+    editLabel?: string;
+    delete?: string;
+    maxCodesReached?: string;
+    createModalTitle?: string;
+    editModalTitle?: string;
+    labelInput?: string;
+    labelPlaceholder?: string;
+    labelHint?: string;
+    editingCode?: string;
+    inheritedFrom?: string;
   };
   admin?: {
     title: string;

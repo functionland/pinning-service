@@ -198,12 +198,12 @@ export default function Dashboard() {
             </div>
           </Link>
 
-          <Link to="/billing" className="card hover:shadow-md transition-shadow group">
+          <Link to="/referrals" className="card hover:shadow-md transition-shadow group">
             <div className="flex items-center space-x-4">
-              <div className="text-3xl group-hover:scale-110 transition-transform">💳</div>
+              <div className="text-3xl group-hover:scale-110 transition-transform">🎁</div>
               <div>
-                <h3 className="font-semibold text-gray-900">{t.nav.billing || 'Billing'}</h3>
-                <p className="text-sm text-gray-500">Manage credits & wallets</p>
+                <h3 className="font-semibold text-gray-900">{t.nav.referrals || 'Referrals'}</h3>
+                <p className="text-sm text-gray-500">{t.referrals.subtitle || 'Share & earn rewards'}</p>
               </div>
             </div>
           </Link>

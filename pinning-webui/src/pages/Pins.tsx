@@ -184,6 +184,8 @@ export default function Pins() {
   const [fxFilesError, setFxFilesError] = useState<string | null>(null);
   const [fxBuckets, setFxBuckets] = useState<FxBucket[]>([]);
   const [fxFiles, setFxFiles] = useState<FxFileItem[]>([]);
+  const [fxFilesPage, setFxFilesPage] = useState(1);
+  const FX_FILES_PER_PAGE = 50; // Pagination to prevent UI freeze on large buckets
   const [fxNavigation, setFxNavigation] = useState<FxFilesNavigationState>({
     currentBucket: null,
     currentPath: '/',
@@ -777,6 +779,19 @@ export default function Pins() {
           continue;
         }
 
+        // Skip internal files (forest index, failed decryptions)
+        // Internal files have originalKey === storageKey and start with 'Qm'
+        // These are either:
+        // 1. Forest index files (encrypted directory structure)
+        // 2. Files where metadata decryption failed (isEncrypted: false, originalKey = storageKey)
+        const storageKey = file.storageKey || file.key || file.Key || '';
+        const isInternalFile = storageKey.startsWith('Qm') &&
+          (file.originalKey === storageKey || !file.originalKey || file.originalKey.startsWith('Qm'));
+        if (isInternalFile && !file.isEncrypted) {
+          console.log('[FxFiles] Skipping internal/unresolved file:', key);
+          continue;
+        }
+
         const relativePath = prefix ? key.replace(prefix, '') : key;
 
         // Check if this is a directory (has more path segments)
@@ -840,6 +855,7 @@ export default function Pins() {
       });
 
       setFxFiles(items);
+      setFxFilesPage(1); // Reset to first page on navigation
 
       // Update navigation state
       const breadcrumbs = buildFxBreadcrumbs(bucket, prefix);
@@ -2284,9 +2300,10 @@ export default function Pins() {
     // File browser view
     return (
       <div className="space-y-4">
-        {/* Breadcrumb Navigation */}
-        <div className="flex items-center gap-2 text-sm flex-wrap bg-gray-50 rounded-lg p-3">
-          {fxNavigation.breadcrumbs.map((crumb, idx) => (
+        {/* Breadcrumb Navigation with Refresh Button */}
+        <div className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+          <div className="flex items-center gap-2 text-sm flex-wrap">
+            {fxNavigation.breadcrumbs.map((crumb, idx) => (
             <span key={idx} className="flex items-center">
               {idx > 0 && <span className="text-gray-400 mx-2">/</span>}
               <button
@@ -2308,6 +2325,34 @@ export default function Pins() {
               </button>
             </span>
           ))}
+          </div>
+          {/* Refresh Button */}
+          <button
+            onClick={() => {
+              if (fxNavigation.currentBucket) {
+                navigateToFxDirectory(fxNavigation.currentBucket, fxNavigation.currentPath === '/' ? '' : fxNavigation.currentPath);
+              } else {
+                fetchFxBuckets();
+              }
+            }}
+            disabled={fxFilesLoading}
+            className="p-2 text-gray-500 hover:text-primary-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+            title={t.pins.refresh || 'Refresh'}
+          >
+            <svg
+              className={`w-5 h-5 ${fxFilesLoading ? 'animate-spin' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+          </button>
         </div>
 
         {/* File/Folder Table */}
@@ -2324,6 +2369,22 @@ export default function Pins() {
           </div>
         ) : (
           <div className="card overflow-hidden">
+            {/* File count and pagination info */}
+            <div className="px-4 py-2 bg-gray-50 border-b border-gray-100 flex justify-between items-center text-sm text-gray-600">
+              <span>
+                {fxFiles.length} {fxFiles.length === 1 ? (t.pins.file || 'file') : (t.pins.files || 'files')}
+                {fxFiles.length > FX_FILES_PER_PAGE && (
+                  <span className="ml-2">
+                    (showing {((fxFilesPage - 1) * FX_FILES_PER_PAGE) + 1}-{Math.min(fxFilesPage * FX_FILES_PER_PAGE, fxFiles.length)})
+                  </span>
+                )}
+              </span>
+              {fxFiles.length > FX_FILES_PER_PAGE && (
+                <span>
+                  Page {fxFilesPage} of {Math.ceil(fxFiles.length / FX_FILES_PER_PAGE)}
+                </span>
+              )}
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead className="bg-gray-50 border-b border-gray-100">
@@ -2343,7 +2404,7 @@ export default function Pins() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {fxFiles.map((item) => (
+                  {fxFiles.slice((fxFilesPage - 1) * FX_FILES_PER_PAGE, fxFilesPage * FX_FILES_PER_PAGE).map((item) => (
                     <tr key={item.key} className="hover:bg-gray-50">
                       <td className="px-4 py-4">
                         <div className="flex items-center gap-3">
@@ -2415,6 +2476,34 @@ export default function Pins() {
                   ))}
                 </tbody>
               </table>
+
+              {/* Pagination Controls */}
+              {fxFiles.length > FX_FILES_PER_PAGE && (
+                <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 flex items-center justify-between">
+                  <div className="text-sm text-gray-600">
+                    Showing {((fxFilesPage - 1) * FX_FILES_PER_PAGE) + 1} to {Math.min(fxFilesPage * FX_FILES_PER_PAGE, fxFiles.length)} of {fxFiles.length} files
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setFxFilesPage(p => Math.max(1, p - 1))}
+                      disabled={fxFilesPage === 1}
+                      className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-sm text-gray-600">
+                      Page {fxFilesPage} of {Math.ceil(fxFiles.length / FX_FILES_PER_PAGE)}
+                    </span>
+                    <button
+                      onClick={() => setFxFilesPage(p => Math.min(Math.ceil(fxFiles.length / FX_FILES_PER_PAGE), p + 1))}
+                      disabled={fxFilesPage >= Math.ceil(fxFiles.length / FX_FILES_PER_PAGE)}
+                      className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

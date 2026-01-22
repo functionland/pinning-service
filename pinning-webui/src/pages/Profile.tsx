@@ -120,7 +120,9 @@ export default function Profile() {
           <div>
             <h2 className="text-xl font-semibold text-gray-900">{user?.name || t.common.user}</h2>
             <p className="text-gray-600">{user?.email}</p>
-            <p className="text-sm text-gray-500 mt-1">{t.profile.signedWith}</p>
+            <p className="text-sm text-gray-500 mt-1">
+              {user?.provider === 'apple' ? 'Signed in with Apple' : t.profile.signedWith}
+            </p>
           </div>
         </div>
       </div>
@@ -181,7 +183,9 @@ export default function Profile() {
           </div>
           <div className="flex justify-between py-3">
             <span className="text-gray-600">{t.profile.auth}</span>
-            <span className="text-gray-900">{t.profile.googleOAuth}</span>
+            <span className="text-gray-900">
+              {user?.provider === 'apple' ? 'Apple Sign-In' : t.profile.googleOAuth}
+            </span>
           </div>
         </div>
       </div>

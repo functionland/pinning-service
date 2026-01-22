@@ -52,6 +52,22 @@ function formatStorageSize(bytes: number): { value: string; unit: string } {
   return { value: mb.toFixed(1), unit: 'MB' };
 }
 
+// Apple Sign-In response type
+interface AppleSignInResponse {
+  authorization: {
+    code: string;
+    id_token: string;
+    state?: string;
+  };
+  user?: {
+    email?: string;
+    name?: {
+      firstName?: string;
+      lastName?: string;
+    };
+  };
+}
+
 declare global {
   interface Window {
     google?: {
@@ -75,6 +91,17 @@ declare global {
         };
       };
     };
+    AppleID?: {
+      auth: {
+        init: (config: {
+          clientId: string;
+          scope: string;
+          redirectURI: string;
+          usePopup: boolean;
+        }) => void;
+        signIn: () => Promise<AppleSignInResponse>;
+      };
+    };
   }
 }
 
@@ -87,7 +114,7 @@ const REFERRAL_CODE_KEY = 'fula-referral-code';
 const REFERRAL_REDIRECT_KEY = 'fula-referral-redirect';
 
 export default function Login() {
-  const { user, login } = useAuth();
+  const { user, login, loginWithApple } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { t } = useLanguage();
@@ -99,6 +126,7 @@ export default function Login() {
   const formattedSize = formatStorageSize(animatedSize);
   const returnTo = searchParams.get('returnTo');
   const redirectParam = searchParams.get('redirect');
+  const platformParam = searchParams.get('platform')?.toLowerCase(); // 'google', 'apple', or null (show both)
 
   // Capture referral code and redirect from URL and store in localStorage (keep first code only)
   useEffect(() => {
@@ -186,6 +214,88 @@ export default function Login() {
     }
   }, [login, navigate, returnTo, redirectParam]);
 
+  const handleAppleSignIn = useCallback(async () => {
+    console.log('[Login] Apple Sign-In clicked');
+    try {
+      const appleClientId = import.meta.env.VITE_APPLE_CLIENT_ID || '';
+
+      if (!appleClientId) {
+        console.error('[Login] VITE_APPLE_CLIENT_ID is not set!');
+        alert('Apple Sign-In is not configured');
+        return;
+      }
+
+      if (!window.AppleID) {
+        console.error('[Login] Apple Sign-In SDK not loaded');
+        alert('Apple Sign-In is not available. Please try again later.');
+        return;
+      }
+
+      // Initialize Apple Sign-In
+      window.AppleID.auth.init({
+        clientId: appleClientId,
+        scope: 'name email',
+        redirectURI: window.location.origin + '/login',
+        usePopup: true,
+      });
+
+      // Trigger sign-in
+      const response = await window.AppleID.auth.signIn();
+      console.log('[Login] Apple response received');
+
+      // Get referral code from localStorage
+      const referralCode = localStorage.getItem(REFERRAL_CODE_KEY) || undefined;
+
+      // Send to backend
+      const result = await loginWithApple(
+        response.authorization.id_token,
+        response.user,
+        referralCode
+      );
+      console.log('[Login] Apple login successful, isNew:', result.isNew);
+
+      // Get stored redirect before clearing localStorage
+      const storedRedirect = localStorage.getItem(REFERRAL_REDIRECT_KEY);
+
+      // Clear referral data from localStorage after login
+      if (result.isNew) {
+        localStorage.removeItem(REFERRAL_CODE_KEY);
+      }
+      localStorage.removeItem(REFERRAL_REDIRECT_KEY);
+
+      // Priority 1: Check for redirect param in URL
+      if (redirectParam && redirectParam.startsWith('/')) {
+        navigate(redirectParam, { replace: true });
+        return;
+      }
+
+      // Priority 2: Check for stored redirect in localStorage
+      if (storedRedirect && storedRedirect.startsWith('/')) {
+        navigate(storedRedirect, { replace: true });
+        return;
+      }
+
+      // Priority 3: returnTo parameter
+      if (returnTo && returnTo.startsWith('/')) {
+        navigate(returnTo, { replace: true });
+        return;
+      }
+
+      // Default: Navigate to dashboard
+      if (result.isNew) {
+        navigate('/?welcome=true');
+      } else {
+        navigate('/');
+      }
+    } catch (error) {
+      console.error('[Login] Apple login failed:', error);
+      // Don't show alert for user cancellation
+      if (error instanceof Error && !error.message.includes('popup_closed')) {
+        alert('Apple login failed: ' + error.message);
+      }
+    }
+  }, [loginWithApple, navigate, returnTo, redirectParam]);
+
   useEffect(() => {
     if (user) {
       // Priority 1: redirect param
@@ -233,20 +343,22 @@ export default function Login() {
       }
     };
 
-    // Wait for Google script to load
-    if (window.google) {
-      initializeGoogle();
-    } else {
-      const checkGoogle = setInterval(() => {
-        if (window.google) {
-          clearInterval(checkGoogle);
-          initializeGoogle();
-        }
-      }, 100);
-      
-      return () => clearInterval(checkGoogle);
+    // Wait for Google script to load (only if Google sign-in is shown)
+    if (!platformParam || platformParam === 'google') {
+      if (window.google) {
+        initializeGoogle();
+      } else {
+        const checkGoogle = setInterval(() => {
+          if (window.google) {
+            clearInterval(checkGoogle);
+            initializeGoogle();
+          }
+        }, 100);
+
+        return () => clearInterval(checkGoogle);
+      }
     }
-  }, [user, navigate, handleCredentialResponse, returnTo, redirectParam]);
+  }, [user, navigate, handleCredentialResponse, returnTo, redirectParam, platformParam]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary-50 to-gray-100 flex flex-col items-center justify-center p-4">
@@ -308,8 +420,24 @@ export default function Login() {
             {t.login.signIn}
           </h2>
 
-          <div className="flex justify-center">
-            <div id="google-signin-button"></div>
+          <div className="flex flex-col items-center gap-4">
+            {/* Google Sign-In Button - show if no platform param or platform=google */}
+            {(!platformParam || platformParam === 'google') && (
+              <div id="google-signin-button"></div>
+            )}
+
+            {/* Apple Sign-In Button - show if no platform param or platform=apple */}
+            {(!platformParam || platformParam === 'apple') && (
+              <button
+                onClick={handleAppleSignIn}
+                className="flex items-center justify-center gap-3 w-[280px] h-[44px] bg-black text-white rounded-md hover:bg-gray-800 transition-colors font-medium text-sm"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09l.01-.01zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/>
+                </svg>
+                Sign in with Apple
+              </button>
+            )}
           </div>
 
           <div className="mt-6 pt-6 border-t border-gray-100">

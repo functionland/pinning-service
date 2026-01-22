@@ -47,10 +47,11 @@ import {
 
 // Session user type
 export interface SessionUser {
-  id: string; // Google user ID (sub claim)
+  id: string; // User ID (Google sub claim or Apple sub)
   email: string;
   name: string;
   picture: string;
+  provider: 'google' | 'apple'; // Authentication provider
 }
 
 // Extend express session
@@ -80,6 +81,11 @@ export interface AppConfig {
   systemKey?: string;  // For x402 gateway integration
   s3AdminJwt?: string;  // For internal S3 fetch (share links)
   s3InternalUrl?: string;  // Internal S3 endpoint (default: http://127.0.0.1:9000)
+  // Apple Sign-In configuration
+  appleClientId?: string;
+  appleTeamId?: string;
+  appleKeyId?: string;
+  applePrivateKey?: string;
 }
 
 // Database operations type (async for PostgreSQL)
@@ -298,7 +304,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'", "https://accounts.google.com", "https://apis.google.com", "https://www.gstatic.com"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'", "https://accounts.google.com", "https://apis.google.com", "https://www.gstatic.com", "https://appleid.cdn-apple.com"],
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://accounts.google.com"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
         imgSrc: ["'self'", "data:", "https:", "blob:"],
@@ -345,8 +351,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           // Solana (for Phantom)
           "https://*.solana.com",
           "wss://*.solana.com",
+          // Apple Sign-In
+          "https://appleid.apple.com",
         ],
-        frameSrc: ["'self'", "blob:", "https://accounts.google.com", "https://*.phantom.app", "https://verify.walletconnect.org", "https://verify.walletconnect.com", "https://*.walletconnect.org", "https://*.walletconnect.com"],
+        frameSrc: ["'self'", "blob:", "https://accounts.google.com", "https://appleid.apple.com", "https://*.phantom.app", "https://verify.walletconnect.org", "https://verify.walletconnect.com", "https://*.walletconnect.org", "https://*.walletconnect.com"],
         objectSrc: ["'self'", "blob:"],
         mediaSrc: ["'self'", "blob:"],
         frameAncestors: ["'self'"],
@@ -453,6 +461,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         email: email,
         name: name || '',
         picture: picture || '',
+        provider: 'google',
       };
 
       res.json({
@@ -462,6 +471,68 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       });
     } catch (error) {
       console.error('[webui] Google auth error:', error);
+      res.status(401).json({ error: 'Authentication failed' });
+    }
+  });
+
+  // Apple Sign-In endpoint
+  app.post('/auth/apple', async (req: Request, res: Response) => {
+    try {
+      const { identityToken, user: appleUser, referralCode } = req.body;
+
+      if (!identityToken) {
+        return res.status(400).json({ error: 'Missing identity token' });
+      }
+
+      if (!config.appleClientId) {
+        return res.status(500).json({ error: 'Apple Sign-In not configured' });
+      }
+
+      // Dynamically import apple-signin-auth (ESM module)
+      const AppleSignIn = await import('apple-signin-auth');
+
+      // Verify the identity token with Apple
+      const applePayload = await AppleSignIn.default.verifyIdToken(identityToken, {
+        audience: config.appleClientId,
+        ignoreExpiration: false,
+      });
+
+      const { sub, email: tokenEmail } = applePayload;
+
+      if (!sub) {
+        return res.status(400).json({ error: 'Invalid token: missing user ID' });
+      }
+
+      // Apple only sends email on first sign-in, so we need to handle both cases
+      // Priority: token email > user object email
+      const userEmail = tokenEmail || appleUser?.email;
+
+      if (!userEmail) {
+        return res.status(400).json({ error: 'Email is required. Please ensure you share your email with the app.' });
+      }
+
+      // Get name from user object (only provided on first sign-in)
+      const userName = appleUser?.name
+        ? `${appleUser.name.firstName || ''} ${appleUser.name.lastName || ''}`.trim()
+        : '';
+
+      const user = await dbOps.getOrCreateUser(userEmail, userName, '', referralCode || undefined);
+
+      req.session.user = {
+        id: sub,
+        email: userEmail,
+        name: userName || user.name || '',
+        picture: '', // Apple doesn't provide profile pictures
+        provider: 'apple',
+      };
+
+      res.json({
+        success: true,
+        user: req.session.user,
+        isNew: user.isNew,
+      });
+    } catch (error) {
+      console.error('[webui] Apple auth error:', error);
       res.status(401).json({ error: 'Authentication failed' });
     }
   });

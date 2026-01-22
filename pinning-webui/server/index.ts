@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import fs from 'fs';
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { createApp, initializeDatabase, seedChainSyncState, type AppConfig } from './app.js';
@@ -22,6 +23,13 @@ const config: AppConfig = {
   systemKey: process.env.PINNING_SYSTEM_KEY,  // For x402 gateway integration
   s3AdminJwt: process.env.S3_ADMIN_JWT,  // For internal S3 fetch (share links)
   s3InternalUrl: process.env.S3_INTERNAL_URL || 'http://127.0.0.1:9000',
+  // Apple Sign-In configuration
+  appleClientId: process.env.APPLE_CLIENT_ID,
+  appleTeamId: process.env.APPLE_TEAM_ID,
+  appleKeyId: process.env.APPLE_KEY_ID,
+  applePrivateKey: process.env.APPLE_PRIVATE_KEY_PATH
+    ? fs.readFileSync(process.env.APPLE_PRIVATE_KEY_PATH, 'utf8')
+    : undefined,
 };
 
 // Debug .env loading
@@ -31,6 +39,8 @@ console.log(`[webui]   SESSION_SECRET: ${config.sessionSecret.substring(0, 10)}.
 console.log(`[webui]   POSTGRES_HOST: ${process.env.POSTGRES_HOST || '(not set)'}`);
 console.log(`[webui]   NODE_ENV: ${config.nodeEnv}`);
 console.log(`[webui]   PINNING_SYSTEM_KEY: ${config.systemKey ? '****' : '(not set)'}`);
+console.log(`[webui]   APPLE_CLIENT_ID: ${config.appleClientId || '(not set)'}`);
+console.log(`[webui]   APPLE_PRIVATE_KEY: ${config.applePrivateKey ? 'loaded from file' : '(not set)'}`);
 
 async function main() {
   try {

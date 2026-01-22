@@ -13,6 +13,7 @@ export default function GetKey() {
   const [finalRedirectUrl, setFinalRedirectUrl] = useState<string | null>(null);
 
   const redirectUrl = searchParams.get('redirect');
+  const platformParam = searchParams.get('platform');
 
   useEffect(() => {
     // Wait for auth to finish loading
@@ -41,8 +42,15 @@ export default function GetKey() {
 
     // If user is not logged in, redirect to login with returnTo
     if (!user) {
-      const currentUrl = `/get-key?redirect=${encodeURIComponent(redirectUrl)}`;
-      navigate(`/login?returnTo=${encodeURIComponent(currentUrl)}`, { replace: true });
+      let currentUrl = `/get-key?redirect=${encodeURIComponent(redirectUrl)}`;
+      if (platformParam) {
+        currentUrl += `&platform=${encodeURIComponent(platformParam)}`;
+      }
+      let loginUrl = `/login?returnTo=${encodeURIComponent(currentUrl)}`;
+      if (platformParam) {
+        loginUrl += `&platform=${encodeURIComponent(platformParam)}`;
+      }
+      navigate(loginUrl, { replace: true });
       return;
     }
 
@@ -79,7 +87,7 @@ export default function GetKey() {
     };
 
     fetchKeyAndRedirect();
-  }, [user, loading, redirectUrl, navigate]);
+  }, [user, loading, redirectUrl, platformParam, navigate]);
 
   // Show loading state
   if (loading || processing) {

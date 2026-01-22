@@ -17,7 +17,8 @@
       "WebFetch(domain:docs.fx.land)",
       "Bash(npm search:*)",
       "Bash(npm pack:*)",
-      "Bash(npm view:*)"
+      "Bash(npm view:*)",
+      "Bash(tree:*)"
     ]
   }
 }

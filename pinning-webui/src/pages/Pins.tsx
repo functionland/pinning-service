@@ -338,8 +338,8 @@ export default function Pins() {
 
     try {
       console.log('[Decryption] Deriving key for user:', user.id, user.email);
-      // Derive key from Google user ID and email (deriveEncryptionKey adds "google:" prefix internally)
-      const key = await deriveEncryptionKey(user.id, user.email);
+      // Derive key from user ID and email (deriveEncryptionKey uses provider prefix)
+      const key = await deriveEncryptionKey(user.provider, user.id, user.email);
       console.log('[Decryption] Key derived successfully');
       
       const keyBytes = await exportKey(key);
@@ -413,7 +413,7 @@ export default function Pins() {
         email: user.email,
         combinedId: `google:${user.id}`,
       });
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveEncryptionKeyBytes(user.provider, user.id, user.email);
       console.log('[Decryption] Derived key first 4 bytes:', Array.from(keyBytes.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
       // Step 2: Get access token from API
@@ -540,7 +540,7 @@ export default function Pins() {
       console.log('[SharedByMe] Created fula-client');
 
       // Step 4: Compute hashedUserId and construct path
-      const hashedUserId = await computeHashedUserId(user.id, user.email);
+      const hashedUserId = await computeHashedUserId(user.provider, user.id, user.email);
       const s3Key = `.fula/shares/${hashedUserId}.json.enc`;
       console.log('[SharedByMe] Fetching - Bucket: fula-metadata, Key:', s3Key);
 
@@ -578,7 +578,7 @@ export default function Pins() {
     try {
       // Step 1: Derive encryption key bytes for fula-client
       console.log('[Playlists] Deriving encryption key for user:', user.id);
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveEncryptionKeyBytes(user.provider, user.id, user.email);
 
       // Step 2: Get JWT token for authentication
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
@@ -687,7 +687,7 @@ export default function Pins() {
     setFxFilesError(null);
 
     try {
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveEncryptionKeyBytes(user.provider, user.id, user.email);
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) {
@@ -734,7 +734,7 @@ export default function Pins() {
         salt: `fula-files-v1:${user.email}`,
       });
 
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveEncryptionKeyBytes(user.provider, user.id, user.email);
       console.log('[FxFiles] Derived key first 4 bytes:', Array.from(keyBytes.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
@@ -879,7 +879,7 @@ export default function Pins() {
     setFxDownloading(prev => new Set(prev).add(file.key));
 
     try {
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveEncryptionKeyBytes(user.provider, user.id, user.email);
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');
@@ -950,7 +950,7 @@ export default function Pins() {
     setFxDownloading(prev => new Set(prev).add(file.key));
 
     try {
-      const keyBytes = await deriveEncryptionKeyBytes(user.id, user.email);
+      const keyBytes = await deriveEncryptionKeyBytes(user.provider, user.id, user.email);
 
       const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
       if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');

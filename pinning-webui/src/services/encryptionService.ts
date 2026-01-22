@@ -19,6 +19,9 @@ const KEY_LENGTH_BITS = 256;
 const NONCE_LENGTH = 12;
 const TAG_LENGTH = 16;
 
+// Authentication provider type
+export type AuthProvider = 'google' | 'apple';
+
 /**
  * Derives an encryption key from user credentials using Argon2id (memory-hard KDF)
  *
@@ -30,21 +33,23 @@ const TAG_LENGTH = 16;
  * - Iterations: 3
  * - Parallelism: 1
  *
- * Input format: "google:{userId}:{email}"
+ * Input format: "{provider}:{userId}:{email}"
  * Context/Salt: "fula-files-v1"
  *
- * @param googleUserId - The Google user ID (from Google OAuth 'sub' claim)
+ * @param provider - The authentication provider ('google' or 'apple')
+ * @param userId - The user ID (from OAuth 'sub' claim)
  * @param userEmail - The user's email address
  * @returns Promise<CryptoKey> - The derived AES-GCM key
  */
 export async function deriveEncryptionKey(
-  googleUserId: string,
+  provider: AuthProvider,
+  userId: string,
   userEmail: string
 ): Promise<CryptoKey> {
   const encoder = new TextEncoder();
 
-  // Combined input format: "google:{userId}:{email}" - matches FxFiles
-  const input = `google:${googleUserId}:${userEmail}`;
+  // Combined input format: "{provider}:{userId}:{email}" - matches FxFiles
+  const input = `${provider}:${userId}:${userEmail}`;
 
   // Derive key using Argon2id via WASM (cross-platform consistent, brute-force resistant)
   const keyBytes = await deriveKeyFromCredentials('fula-files-v1', encoder.encode(input));
@@ -70,19 +75,20 @@ export async function deriveEncryptionKey(
 /**
  * Derives a playlist encryption key from user credentials using PBKDF2
  *
- * Uses the same key format as file encryption: "google:{googleId}"
- * (Fixed from previous bug where playlists used raw ID without prefix)
+ * Uses the same key format as file encryption: "{provider}:{userId}:{email}"
  *
- * @param googleUserId - The Google user ID
+ * @param provider - The authentication provider ('google' or 'apple')
+ * @param userId - The user ID
  * @param userEmail - The user's email address (used as salt)
  * @returns Promise<CryptoKey> - The derived AES-GCM key for playlists
  */
 export async function derivePlaylistEncryptionKey(
-  googleUserId: string,
+  provider: AuthProvider,
+  userId: string,
   userEmail: string
 ): Promise<CryptoKey> {
   // Now uses same format as file encryption
-  return deriveEncryptionKey(googleUserId, userEmail);
+  return deriveEncryptionKey(provider, userId, userEmail);
 }
 
 /**
@@ -110,15 +116,17 @@ export async function importKey(keyBytes: Uint8Array): Promise<CryptoKey> {
  * Derives encryption key bytes directly (for fula-client)
  * Returns raw 32-byte Uint8Array instead of CryptoKey
  *
- * @param googleUserId - The Google user ID
+ * @param provider - The authentication provider ('google' or 'apple')
+ * @param userId - The user ID
  * @param userEmail - The user's email address
  * @returns Promise<Uint8Array> - 32-byte key
  */
 export async function deriveEncryptionKeyBytes(
-  googleUserId: string,
+  provider: AuthProvider,
+  userId: string,
   userEmail: string
 ): Promise<Uint8Array> {
-  const key = await deriveEncryptionKey(googleUserId, userEmail);
+  const key = await deriveEncryptionKey(provider, userId, userEmail);
   return exportKey(key);
 }
 
@@ -189,15 +197,20 @@ export function derivePublicKeyFromSeed(seed: Uint8Array): Uint8Array {
  *
  * Uses Argon2id with context "fula-files-keypair-v1" for cross-platform consistency.
  * This is used to compute the hashed user ID for shares path.
+ *
+ * @param provider - The authentication provider ('google' or 'apple')
+ * @param userId - The user ID
+ * @param userEmail - The user's email address
  */
 export async function deriveKeypairSeed(
-  googleUserId: string,
+  provider: AuthProvider,
+  userId: string,
   userEmail: string
 ): Promise<Uint8Array> {
   const encoder = new TextEncoder();
 
-  // Combined input format: "google:{userId}:{email}" - matches FxFiles
-  const input = `google:${googleUserId}:${userEmail}`;
+  // Combined input format: "{provider}:{userId}:{email}" - matches FxFiles
+  const input = `${provider}:${userId}:${userEmail}`;
 
   // Derive key using Argon2id via WASM (cross-platform consistent)
   // Uses different context than encryption key for domain separation
@@ -212,13 +225,18 @@ export async function deriveKeypairSeed(
  * 3. Base64 encode the public key
  * 4. SHA256 hash the base64 string (as UTF-8 bytes)
  * 5. Base64 encode hash, take first 16 chars, make URL-safe
+ *
+ * @param provider - The authentication provider ('google' or 'apple')
+ * @param userId - The user ID
+ * @param userEmail - The user's email address
  */
 export async function computeHashedUserId(
-  googleUserId: string,
+  provider: AuthProvider,
+  userId: string,
   userEmail: string
 ): Promise<string> {
   // Step 1-2: Derive keypair seed and get public key
-  const seed = await deriveKeypairSeed(googleUserId, userEmail);
+  const seed = await deriveKeypairSeed(provider, userId, userEmail);
   const publicKey = derivePublicKeyFromSeed(seed);
 
   // Step 3: Base64 encode the public key

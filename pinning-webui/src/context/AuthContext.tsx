@@ -2,16 +2,27 @@ import { createContext, useContext, useState, useEffect, useCallback, ReactNode 
 import { clearAllKeys } from '../services/secureStorage';
 
 interface User {
-  id: string; // Google user ID for encryption key derivation
+  id: string; // User ID for encryption key derivation (Google sub or Apple sub)
   email: string;
   name: string;
   picture: string;
+  provider: 'google' | 'apple'; // Authentication provider
+}
+
+// Apple user info sent on first sign-in
+interface AppleUserInfo {
+  email?: string;
+  name?: {
+    firstName?: string;
+    lastName?: string;
+  };
 }
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
   login: (credential: string, referralCode?: string) => Promise<{ isNew: boolean }>;
+  loginWithApple: (identityToken: string, appleUser?: AppleUserInfo, referralCode?: string) => Promise<{ isNew: boolean }>;
   logout: () => Promise<void>;
 }
 
@@ -26,7 +37,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const res = await fetch('/auth/me', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
-        setUser(data.user);
+        // Backward compatibility: default to 'google' if provider not set
+        setUser({
+          ...data.user,
+          provider: data.user.provider || 'google',
+        });
       }
     } catch (error) {
       console.error('Auth check failed:', error);
@@ -52,7 +67,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const data = await res.json();
-    setUser(data.user);
+    // Ensure provider is set (should be 'google' from server)
+    setUser({
+      ...data.user,
+      provider: data.user.provider || 'google',
+    });
+    return { isNew: data.isNew };
+  };
+
+  const loginWithApple = async (identityToken: string, appleUser?: AppleUserInfo, referralCode?: string) => {
+    const res = await fetch('/auth/apple', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ identityToken, user: appleUser, referralCode }),
+    });
+
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Apple login failed');
+    }
+
+    const data = await res.json();
+    setUser({
+      ...data.user,
+      provider: data.user.provider || 'apple',
+    });
     return { isNew: data.isNew };
   };
 
@@ -71,7 +111,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, loginWithApple, logout }}>
       {children}
     </AuthContext.Provider>
   );

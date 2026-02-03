@@ -20,23 +20,28 @@ import { createWalletClient, http, type Hex, encodePacked, keccak256 } from 'vie
 
 // Known chain configurations
 // Network names must match facilitator's supported networks
-const KNOWN_CHAINS: Record<number, { networkName: string; tokenName: string; tokenAddress: string }> = {
+// Token names must match the token contract's name() function for EIP-712
+const KNOWN_CHAINS: Record<number, { networkName: string; tokenName: string; tokenVersion: string; tokenAddress: string }> = {
   // Base Sepolia (x402 default test network)
   84532: {
     networkName: 'base-sepolia',
     tokenName: 'USD Coin',
+    tokenVersion: '2',
     tokenAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
   },
   // SKALE Base (mainnet) - Chain ID 1187947933
+  // Bridged USDC using FiatTokenV2_2 implementation
   1187947933: {
     networkName: 'skale-base',
-    tokenName: 'USD Coin',
+    tokenName: 'Bridged USDC (SKALE Bridge)',
+    tokenVersion: '1',
     tokenAddress: '0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20',
   },
   // SKALE Base Spolia (testnet) - Chain ID 324705682
   324705682: {
     networkName: 'skale-base-spolia',
-    tokenName: 'USD Coin',
+    tokenName: 'USDC',
+    tokenVersion: '1',
     tokenAddress: '0x7F5373AE26c3E8FfC4c77b7255DF7eC1A9aF52a6',
   },
 };
@@ -49,9 +54,10 @@ async function main() {
   const receivingAddress = args[1] || '0xc2dc75e756029fe7b70f6d13160a436345ea91db';
   const chainId = parseInt(args[2] || '1187947933', 10);
   const tokenAddress = args[3] || KNOWN_CHAINS[chainId]?.tokenAddress || '0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20';
-  const tokenName = KNOWN_CHAINS[chainId]?.tokenName || 'USD Coin';
+  const tokenName = args[4] || KNOWN_CHAINS[chainId]?.tokenName || 'USD Coin';
+  const tokenVersion = args[5] || KNOWN_CHAINS[chainId]?.tokenVersion || '2';
   const networkName = KNOWN_CHAINS[chainId]?.networkName || 'skale-base';
-  const facilitatorUrl = args[4] || 'https://facilitator.payai.network';
+  const facilitatorUrl = args[6] || 'https://facilitator.payai.network';
 
   if (!privateKey) {
     console.error('Facilitator Diagnostic Script');
@@ -155,10 +161,13 @@ async function main() {
     nonce: nonce as Hex,
   };
 
+  // EIP-712 domain for EIP-3009 transferWithAuthorization
+  // Must include verifyingContract (the token address)
   const domain = {
     name: tokenName,
-    version: '1',
+    version: tokenVersion,
     chainId: chainId,
+    verifyingContract: tokenAddress as Hex,
   };
 
   const PAYMENT_TYPES = {
@@ -223,15 +232,14 @@ async function main() {
     asset: tokenAddress,
     extra: {
       name: tokenName,
-      version: '2',
+      version: tokenVersion,
     },
   };
 
+  // x402 spec: paymentPayload should be the JSON object, not base64
   const verifyBody = {
-    paymentPayload: paymentHeader,
+    paymentPayload: paymentPayload,
     paymentRequirements,
-    payload: paymentHeader,
-    details: paymentRequirements,
   };
 
   console.log('\n  Request body being sent to /verify:');

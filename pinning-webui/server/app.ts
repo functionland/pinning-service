@@ -1943,6 +1943,58 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
+  // Ensure user exists and get/create API key (for x402 gateway wallet users)
+  // Creates user if doesn't exist, creates API key if user has none
+  // Returns the API key for use in x402 requests
+  app.post('/api/admin/ensure-user-key', requireAdminOrSystemKey, async (req: Request, res: Response) => {
+    const { email } = req.body;
+
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Email required' });
+    }
+
+    try {
+      // 1. Check if user exists in webui_users
+      let user = await dbOps.getUserByEmail(email);
+
+      if (!user) {
+        // 2. Create user in webui_users (simplified version - no OAuth data)
+        await query(
+          `INSERT INTO webui_users (email, name, picture) VALUES ($1, $2, $3)`,
+          [email, email.split('@')[0], null]
+        );
+
+        // Also create in main users table for pinning service compatibility
+        await query(
+          `INSERT INTO users (username, password_hash, pool_id) VALUES ($1, $2, 1)
+           ON CONFLICT (username) DO NOTHING`,
+          [email, 'x402-wallet-user-' + uuidv4()]
+        );
+
+        console.log(`[webui] Created x402 wallet user: ${email}`);
+      }
+
+      // 3. Check if user has an API key
+      const existingKeys = await dbOps.getApiKeys(email);
+
+      let apiKey: string;
+      if (existingKeys.length > 0) {
+        // User has a key, return the first one
+        apiKey = existingKeys[0].key_id;
+      } else {
+        // Create new API key
+        apiKey = await dbOps.createApiKey(email);
+        console.log(`[webui] Created API key for x402 user: ${email}`);
+      }
+
+      res.json({ success: true, email, apiKey });
+
+    } catch (error) {
+      console.error('[webui] ensure-user-key error:', error);
+      res.status(500).json({ error: 'Failed to ensure user/key' });
+    }
+  });
+
   // Check if current user is admin (for frontend)
   app.get('/api/admin/check', requireAuth, (req: Request, res: Response) => {
     if (isAdmin(req.session.user!.email)) {

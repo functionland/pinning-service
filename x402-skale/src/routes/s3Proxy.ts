@@ -1,34 +1,42 @@
 /**
- * S3 Proxy Routes - x402 Standards Compliant (Option C - Gift Model)
+ * S3 Proxy Routes - x402 Standards Compliant
  *
  * Handles S3-compatible operations with x402 payment.
  *
- * AUTH MODEL (Option C):
- * - JWT Authorization header: Identifies the user (email from sub claim)
- * - x402 payment header: Provides payment (any wallet can pay for any user)
+ * AUTH MODEL:
+ * Supports two authentication modes:
  *
- * Identity Model:
- * - JWT email = user identity for storage + credits
- * - Wallet = payment source only (no binding enforced)
- * - Supports "gift" payments (anyone can pay for anyone's storage)
+ * 1. JWT + x402 (Gift Model):
+ *    - JWT Authorization header: Identifies the user (email from sub claim)
+ *    - x402 payment header: Provides payment (any wallet can pay for any user)
+ *    - Credits assigned to JWT email
+ *    - JWT passed through to S3 backend
+ *
+ * 2. x402-only (Standard x402):
+ *    - No JWT required - payment alone authorizes the request
+ *    - User auto-created from wallet address ({wallet}@walletpayment.fx.land)
+ *    - User's API key used for S3 backend authentication
+ *    - Credits assigned to wallet-based email
  *
  * Flow:
- * 1. Client sends request with both JWT and X-PAYMENT headers
- * 2. JWT middleware extracts user email (identity)
+ * 1. Client sends request with X-PAYMENT (and optionally JWT)
+ * 2. x402OrJwtMiddleware determines auth mode
  * 3. x402 middleware verifies payment, settles with facilitator
- * 4. Credits assigned to JWT email (not wallet)
- * 5. JWT passed through to S3 backend for authorization
+ * 4. For x402-only: auto-create user, get their API key
+ * 5. Proxy to S3 with appropriate auth
+ * 6. Credits assigned to user email
  */
 
 import { Hono } from 'hono';
 import type { Env, UploadResponse } from '../types/index.js';
 import { x402PaymentMiddleware, getPaymentInfo } from '../middleware/x402Payment.js';
-import { jwtValidatorMiddleware, getJwtUser } from '../middleware/jwtValidator.js';
+import { x402OrJwtMiddleware, getJwtUser, getAuthMode } from '../middleware/jwtValidator.js';
 import { proxyToS3, buildGatewayUrl } from '../services/s3Proxy.js';
 import { adjustPinningCredits } from '../services/pinningIntegration.js';
 import { trackEphemeralObject } from '../database/repositories/ephemeralObjects.js';
 import { HttpError } from '../middleware/errorHandler.js';
 import { config } from '../config/index.js';
+import { ensureWalletUserAndGetApiKey } from '../services/walletUser.js';
 
 export const s3ProxyRoutes = new Hono<Env>();
 
@@ -38,7 +46,7 @@ export const s3ProxyRoutes = new Hono<Env>();
  * Upload an object with x402 payment.
  *
  * Headers:
- * - Authorization: Bearer <JWT> (required - passed through to S3)
+ * - Authorization: Bearer <JWT> (optional - if absent, x402 payment alone is used)
  * - X-PAYMENT: Base64-encoded payment payload (standard x402)
  *   OR Payment-Authorization: x402 <payload> (alternative)
  * - X-Fula-TTL: <seconds> (optional, default 3600)
@@ -47,9 +55,8 @@ export const s3ProxyRoutes = new Hono<Env>();
  */
 s3ProxyRoutes.put(
   '/:bucket/:key{.+}',
-  jwtValidatorMiddleware,      // First: Validate JWT and extract user email
-  x402PaymentMiddleware,       // Second: Verify x402 payment (any wallet)
-  // Option C: No wallet assertion - any wallet can pay for any user
+  x402OrJwtMiddleware,         // First: Accept JWT OR x402 payment
+  x402PaymentMiddleware,       // Second: Verify x402 payment
   async (c) => {
     const bucket = c.req.param('bucket');
     const key = c.req.param('key');
@@ -58,23 +65,35 @@ s3ProxyRoutes.put(
 
     const payment = getPaymentInfo(c);
     const jwtUser = getJwtUser(c);
+    const authMode = getAuthMode(c);
 
     if (!payment) {
       throw new HttpError(500, 'Payment info not found after middleware', 'INTERNAL_ERROR');
     }
 
-    // Get the original Authorization header to pass through to S3
-    const authHeader = c.req.header('Authorization');
-    if (!authHeader) {
-      throw new HttpError(401, 'Authorization header required', 'MISSING_AUTH');
+    // Determine auth header and user email based on auth mode
+    let authHeader: string;
+    let userEmail: string;
+
+    if (authMode === 'jwt' && jwtUser) {
+      // JWT mode: use original JWT for S3
+      authHeader = c.req.header('Authorization')!;
+      userEmail = jwtUser.sub || jwtUser.email || '';
+      console.log(`[upload] JWT mode: user=${userEmail}, wallet=${payment.payer}`);
+    } else {
+      // x402-only mode: get/create user's API key, use it for S3
+      const walletUser = await ensureWalletUserAndGetApiKey(payment.payer);
+      authHeader = `Bearer ${walletUser.apiKey}`;  // User's own API key!
+      userEmail = walletUser.email;
+      console.log(`[upload] x402-only mode: user=${userEmail}, wallet=${payment.payer}`);
     }
 
     // Get request body
     const body = await c.req.arrayBuffer();
     const bodyBuffer = Buffer.from(body);
 
-    // Proxy to S3 with the original JWT
-    console.log(`[upload] Proxying PUT ${bucket}/${key} (${contentLength} bytes) from wallet ${payment.payer}`);
+    // Proxy to S3 with appropriate auth
+    console.log(`[upload] Proxying PUT ${bucket}/${key} (${contentLength} bytes)`);
 
     const result = await proxyToS3(
       {
@@ -91,7 +110,7 @@ s3ProxyRoutes.put(
           'X-Amz-Meta-Ttl-Seconds': payment.ttlSeconds.toString(),
         },
       },
-      authHeader  // Pass through the original JWT
+      authHeader
     );
 
     if (!result.success) {
@@ -103,26 +122,23 @@ s3ProxyRoutes.put(
     }
 
     // Track ephemeral object for cleanup
-    // Use JWT sub (user's email) as the user identity - this is what S3 knows
     const expiresAt = new Date(Date.now() + payment.ttlSeconds * 1000);
-    const userId = jwtUser?.sub || jwtUser?.email || payment.payer;
 
     await trackEphemeralObject({
       bucket,
       key,
-      wallet: userId,  // This is actually the user_id (email from JWT sub)
+      wallet: userEmail,  // User email (from JWT or wallet-based)
       sizeBytes: payment.sizeBytes,
       sizeMb: payment.sizeMb,
       paymentId: payment.paymentId,
       expiresAt,
     });
 
-    // Adjust pinning service credits (use JWT email, not wallet)
+    // Adjust pinning service credits
     const ttlHours = Math.ceil(payment.ttlSeconds / 3600);
-    const userEmail = jwtUser?.sub || jwtUser?.email || '';
     const creditResult = await adjustPinningCredits({
-      userEmail,           // JWT email - real user identity
-      wallet: payment.payer,  // For logging only
+      userEmail,              // User email for credit tracking
+      wallet: payment.payer,  // Wallet for logging
       amountUsdc: payment.priceUsdc,
       paymentId: payment.paymentId,
       sizeMb: payment.sizeMb,
@@ -239,38 +255,45 @@ s3ProxyRoutes.on('HEAD', '/:bucket/:key{.+}', async (c) => {
  * DELETE /:bucket/:key
  *
  * Delete an object.
- * Only the owner (wallet that uploaded) can delete.
- * Requires JWT for S3 access and x402 payment to prove ownership.
+ * Requires x402 payment (and optionally JWT for S3 access).
  *
  * Headers:
- * - Authorization: Bearer <JWT> (required - passed through to S3)
+ * - Authorization: Bearer <JWT> (optional - if absent, x402 payment alone is used)
  * - X-PAYMENT: Base64-encoded payment payload (standard x402)
  */
 s3ProxyRoutes.delete(
   '/:bucket/:key{.+}',
-  jwtValidatorMiddleware,      // First: Validate JWT and extract user email
-  x402PaymentMiddleware,       // Second: Verify x402 payment (any wallet)
-  // Option C: No wallet assertion - any wallet can pay for any user
+  x402OrJwtMiddleware,         // First: Accept JWT OR x402 payment
+  x402PaymentMiddleware,       // Second: Verify x402 payment
   async (c) => {
     const bucket = c.req.param('bucket');
     const key = c.req.param('key');
 
     const payment = getPaymentInfo(c);
+    const jwtUser = getJwtUser(c);
+    const authMode = getAuthMode(c);
+
     if (!payment) {
       throw new HttpError(402, 'Payment required to delete', 'PAYMENT_REQUIRED');
     }
 
-    // Get the original Authorization header to pass through to S3
-    const authHeader = c.req.header('Authorization');
-    if (!authHeader) {
-      throw new HttpError(401, 'Authorization header required', 'MISSING_AUTH');
-    }
+    // Determine auth header based on auth mode
+    let authHeader: string;
 
-    console.log(`[delete] DELETE ${bucket}/${key} by wallet ${payment.payer}`);
+    if (authMode === 'jwt' && jwtUser) {
+      // JWT mode: use original JWT for S3
+      authHeader = c.req.header('Authorization')!;
+      console.log(`[delete] JWT mode: DELETE ${bucket}/${key} by user=${jwtUser.sub || jwtUser.email}`);
+    } else {
+      // x402-only mode: get/create user's API key, use it for S3
+      const walletUser = await ensureWalletUserAndGetApiKey(payment.payer);
+      authHeader = `Bearer ${walletUser.apiKey}`;
+      console.log(`[delete] x402-only mode: DELETE ${bucket}/${key} by user=${walletUser.email}`);
+    }
 
     const result = await proxyToS3(
       { method: 'DELETE', bucket, key },
-      authHeader  // Pass through the original JWT
+      authHeader
     );
 
     if (!result.success) {

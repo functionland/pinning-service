@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:local": "tsx scripts/local-test.ts",
+    "test:x402": "tsx scripts/test-x402-upload.ts",
     "migrate": "./node_modules/.bin/tsx scripts/migrate.ts",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"

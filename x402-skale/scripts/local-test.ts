@@ -114,6 +114,46 @@ mockWebUI.post('/api/admin/adjust', async (c) => {
   });
 });
 
+// Track wallet users (for x402-only mode)
+const walletUsers: Map<string, { email: string; apiKey: string }> = new Map();
+
+// Ensure user + API key for x402 wallet authentication
+mockWebUI.post('/api/admin/ensure-user-key', async (c) => {
+  const systemKey = c.req.header('X-System-Key');
+
+  if (systemKey !== 'test-system-key') {
+    console.log(`[mock-webui] ensure-user-key rejected - invalid system key: ${systemKey}`);
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  const body = await c.req.json();
+  const { email } = body;
+
+  if (!email) {
+    return c.json({ error: 'Email required' }, 400);
+  }
+
+  // Check if user already exists
+  let user = walletUsers.get(email);
+
+  if (!user) {
+    // Create new wallet user with mock API key
+    const apiKey = `mock-api-key-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    user = { email, apiKey };
+    walletUsers.set(email, user);
+    console.log(`[mock-webui] Created wallet user: ${email}`);
+    console.log(`  API Key: ${apiKey}`);
+  } else {
+    console.log(`[mock-webui] Found existing wallet user: ${email}`);
+  }
+
+  return c.json({
+    success: true,
+    email: user.email,
+    apiKey: user.apiKey,
+  });
+});
+
 // Endpoint to view credit adjustments (for debugging)
 mockWebUI.get('/api/admin/adjustments', (c) => {
   return c.json({ adjustments: creditAdjustments });

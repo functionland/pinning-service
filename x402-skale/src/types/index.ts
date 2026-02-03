@@ -22,6 +22,9 @@ export interface Env {
     // JWT user info (set by JWT validator)
     jwtUser?: JwtUserInfo;
 
+    // Auth mode (which authentication method was used)
+    authMode?: 'jwt' | 'x402';
+
     // Request metadata
     requestId: string;
     requestStartTime: number;

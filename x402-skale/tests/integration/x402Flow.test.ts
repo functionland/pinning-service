@@ -155,8 +155,8 @@ describe('x402 Flow Integration Tests', () => {
         return new Response('S3 Error', { status: 500 });
       }
 
-      // Pinning service
-      if (url.includes('pinning.test')) {
+      // Pinning service - credit adjustment
+      if (url.includes('pinning.test') && url.includes('/api/admin/adjust')) {
         if (pinningSuccess) {
           return new Response(JSON.stringify({
             success: true,
@@ -167,6 +167,18 @@ describe('x402 Flow Integration Tests', () => {
           });
         }
         return new Response('Pinning Error', { status: 500 });
+      }
+
+      // Pinning service - ensure user/key for x402-only mode
+      if (url.includes('pinning.test') && url.includes('/api/admin/ensure-user-key')) {
+        return new Response(JSON.stringify({
+          success: true,
+          email: '0x1234567890123456789012345678901234567890@walletpayment.fx.land',
+          apiKey: 'mock-wallet-user-api-key',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
       }
 
       return new Response('Not Found', { status: 404 });
@@ -415,7 +427,9 @@ describe('x402 Flow Integration Tests', () => {
   });
 
   describe('Error Handling', () => {
-    it('should return 401 when no JWT provided', async () => {
+    it('should allow x402-only upload without JWT (x402 standard compliance)', async () => {
+      setupMockFetch();
+
       const app = createTestApp();
 
       const res = await app.request('/mybucket/file.txt', {
@@ -424,6 +438,26 @@ describe('x402 Flow Integration Tests', () => {
           'Content-Length': '1048576',
           'Content-Type': 'application/octet-stream',
           'X-PAYMENT': createMockPaymentHeader(),
+        },
+        body: 'test',
+      });
+
+      // x402-only mode should succeed with auto-created user
+      expect(res.status).toBe(200);
+
+      // Verify ensure-user-key was called
+      const ensureUserCall = fetchCalls.find(c => c.url.includes('ensure-user-key'));
+      expect(ensureUserCall).toBeDefined();
+    });
+
+    it('should return 401 when neither JWT nor x402 payment provided', async () => {
+      const app = createTestApp();
+
+      const res = await app.request('/mybucket/file.txt', {
+        method: 'PUT',
+        headers: {
+          'Content-Length': '1048576',
+          'Content-Type': 'application/octet-stream',
         },
         body: 'test',
       });

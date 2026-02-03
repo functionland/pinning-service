@@ -74,6 +74,79 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
 });
 
 /**
+ * Middleware that accepts JWT OR x402 payment (for x402 standard compliance)
+ * - If JWT present: validate and use it (existing behavior)
+ * - If no JWT but x402 payment headers present: allow through with x402 mode
+ * - If neither: return 401
+ */
+export const x402OrJwtMiddleware = createMiddleware<Env>(async (c, next) => {
+  const authHeader = c.req.header('Authorization');
+  const hasX402Payment = c.req.header('X-PAYMENT') ||
+                         c.req.header('Payment-Authorization')?.startsWith('x402 ');
+
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    // JWT mode: validate JWT (same logic as jwtValidatorMiddleware)
+    const token = authHeader.slice(7);
+
+    try {
+      const decoded = jose.decodeJwt(token) as JwtPayload;
+
+      const userInfo: JwtUserInfo = {
+        email: decoded.email || decoded.sub || '',
+        wallet: decoded.wallet?.toLowerCase(),
+        sub: decoded.sub,
+        iat: decoded.iat,
+        exp: decoded.exp,
+      };
+
+      // Check expiration if present
+      if (decoded.exp && decoded.exp * 1000 < Date.now()) {
+        throw new HttpError(401, 'Token expired', 'TOKEN_EXPIRED');
+      }
+
+      // If JWT_SECRET is configured, verify the signature
+      if (config.jwtSecret) {
+        try {
+          const secret = new TextEncoder().encode(config.jwtSecret);
+          await jose.jwtVerify(token, secret);
+        } catch (verifyError) {
+          console.error('[jwt] Signature verification failed:', verifyError);
+          throw new HttpError(401, 'Invalid token signature', 'INVALID_SIGNATURE');
+        }
+      }
+
+      // Store user info and auth mode in context
+      c.set('jwtUser', userInfo);
+      c.set('authMode', 'jwt');
+
+      console.log(`[auth] JWT mode: ${userInfo.email || userInfo.sub}`);
+
+    } catch (error) {
+      if (error instanceof HttpError) {
+        throw error;
+      }
+      console.error('[jwt] Token decode error:', error);
+      throw new HttpError(401, 'Invalid token', 'INVALID_TOKEN');
+    }
+  } else if (hasX402Payment) {
+    // x402-only mode: payment will be validated by x402PaymentMiddleware
+    c.set('authMode', 'x402');
+    console.log('[auth] x402-only mode (no JWT)');
+  } else {
+    throw new HttpError(401, 'Missing Authorization header or x402 payment', 'MISSING_AUTH');
+  }
+
+  await next();
+});
+
+/**
+ * Get auth mode from context
+ */
+export function getAuthMode(c: { get: (key: 'authMode') => 'jwt' | 'x402' | undefined }): 'jwt' | 'x402' | undefined {
+  return c.get('authMode');
+}
+
+/**
  * Verify that the JWT wallet matches the x402 payer wallet
  */
 export const walletAssertionMiddleware = createMiddleware<Env>(async (c, next) => {

@@ -76,13 +76,15 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
 /**
  * Middleware that accepts JWT OR x402 payment (for x402 standard compliance)
  * - If JWT present: validate and use it (existing behavior)
- * - If no JWT but x402 payment headers present: allow through with x402 mode
- * - If neither: return 401
+ * - If no JWT: allow through in x402 mode (x402PaymentMiddleware will handle 402 response)
+ *
+ * Note: We don't check for X-PAYMENT header here because the x402 flow is:
+ * 1. Client sends request with no payment → gets 402 with requirements
+ * 2. Client signs payment and retries with X-PAYMENT → succeeds
+ * The x402PaymentMiddleware handles the 402 response for step 1.
  */
 export const x402OrJwtMiddleware = createMiddleware<Env>(async (c, next) => {
   const authHeader = c.req.header('Authorization');
-  const hasX402Payment = c.req.header('X-PAYMENT') ||
-                         c.req.header('Payment-Authorization')?.startsWith('x402 ');
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
     // JWT mode: validate JWT (same logic as jwtValidatorMiddleware)
@@ -128,12 +130,11 @@ export const x402OrJwtMiddleware = createMiddleware<Env>(async (c, next) => {
       console.error('[jwt] Token decode error:', error);
       throw new HttpError(401, 'Invalid token', 'INVALID_TOKEN');
     }
-  } else if (hasX402Payment) {
-    // x402-only mode: payment will be validated by x402PaymentMiddleware
-    c.set('authMode', 'x402');
-    console.log('[auth] x402-only mode (no JWT)');
   } else {
-    throw new HttpError(401, 'Missing Authorization header or x402 payment', 'MISSING_AUTH');
+    // x402-only mode: let x402PaymentMiddleware handle authentication
+    // It will return 402 if no payment, or validate payment if present
+    c.set('authMode', 'x402');
+    console.log('[auth] x402 mode (no JWT, payment handled by x402PaymentMiddleware)');
   }
 
   await next();

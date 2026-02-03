@@ -450,7 +450,9 @@ describe('x402 Flow Integration Tests', () => {
       expect(ensureUserCall).toBeDefined();
     });
 
-    it('should return 401 when neither JWT nor x402 payment provided', async () => {
+    it('should return 402 when neither JWT nor x402 payment provided', async () => {
+      // With x402-only mode, requests without JWT go to x402 flow
+      // and get 402 Payment Required (not 401) so they can learn payment requirements
       const app = createTestApp();
 
       const res = await app.request('/mybucket/file.txt', {
@@ -462,7 +464,10 @@ describe('x402 Flow Integration Tests', () => {
         body: 'test',
       });
 
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(402);
+      const body = await res.json();
+      expect(body.x402Version).toBe(1);
+      expect(body.accepts).toBeDefined();
     });
 
     it('should return 402 when facilitator verification fails', async () => {

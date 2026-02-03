@@ -220,14 +220,16 @@ async function getPaymentRequirements(
 ): Promise<{ requiredAmount: string; recipientAddress: string }> {
   console.log('\n[Step 1] Getting payment requirements...');
 
+  // Create a dummy body of the right size to get accurate pricing
+  const dummyBody = 'x'.repeat(contentLength);
+
   const response = await fetch(`${endpoint}/${bucket}/${key}`, {
     method: 'PUT',
     headers: {
-      'Content-Length': contentLength.toString(),
       'Content-Type': 'text/plain',
       'X-Fula-TTL': ttlSeconds.toString(),
     },
-    body: '', // Empty body for pricing request
+    body: dummyBody, // Body to get accurate pricing (will fail with 402)
   });
 
   if (response.status !== 402) {
@@ -409,9 +411,19 @@ async function main() {
 
   } catch (error) {
     console.error('\n  ERROR:', error instanceof Error ? error.message : error);
-    if (error instanceof Error && error.stack) {
-      console.error('\n  Stack:', error.stack);
+    if (error instanceof Error) {
+      // Show cause if available (Node.js fetch errors often have a cause)
+      const cause = (error as any).cause;
+      if (cause) {
+        console.error('  Cause:', cause.message || cause);
+        if (cause.code) console.error('  Code:', cause.code);
+      }
+      if (error.stack) {
+        console.error('\n  Stack:', error.stack);
+      }
     }
+    console.error('\n  TIP: If running in WSL, try running this script directly on the server,');
+    console.error('       or test with: curl -X PUT <endpoint>/<bucket>/<key> -H "Content-Length: 100"');
     process.exit(1);
   }
 }

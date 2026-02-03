@@ -28,8 +28,13 @@ const configSchema = z.object({
   facilitatorUrl: z.string().url().default('https://facilitator.dirtroad.dev'),
   receivingAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid Ethereum address'),
   networkChainId: z.coerce.number().default(324705682),
+  // Network name for facilitator (e.g., "skale-base", "base-sepolia")
+  // See https://docs.payai.network for supported networks
+  networkName: z.string().default('skale-base'),
   paymentTokenAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid token address'),
-  paymentTokenName: z.string().default('Bridged USDC (SKALE Bridge)'),
+  paymentTokenName: z.string().default('USD Coin'),
+  // Token version for EIP-712 domain (USDC is typically "2")
+  paymentTokenVersion: z.string().default('2'),
 
   // S3 Backend
   s3BackendUrl: z.string().url().default('http://127.0.0.1:9000'),
@@ -63,8 +68,10 @@ function loadConfig(): Config {
     facilitatorUrl: process.env.FACILITATOR_URL,
     receivingAddress: process.env.RECEIVING_ADDRESS,
     networkChainId: process.env.NETWORK_CHAIN_ID,
+    networkName: process.env.NETWORK_NAME,
     paymentTokenAddress: process.env.PAYMENT_TOKEN_ADDRESS,
     paymentTokenName: process.env.PAYMENT_TOKEN_NAME,
+    paymentTokenVersion: process.env.PAYMENT_TOKEN_VERSION,
     s3BackendUrl: process.env.S3_BACKEND_URL,
     s3AdminToken: process.env.S3_ADMIN_TOKEN,
     pinningWebuiUrl: process.env.PINNING_WEBUI_URL,
@@ -100,6 +107,7 @@ export function logConfig(): void {
   console.log(`  facilitatorUrl: ${config.facilitatorUrl}`);
   console.log(`  receivingAddress: ${config.receivingAddress}`);
   console.log(`  networkChainId: ${config.networkChainId}`);
+  console.log(`  networkName: ${config.networkName}`);
   console.log(`  paymentTokenAddress: ${config.paymentTokenAddress}`);
   console.log(`  s3BackendUrl: ${config.s3BackendUrl}`);
   console.log(`  s3AdminToken: ${config.s3AdminToken ? '****' : '(not set)'}`);
@@ -112,17 +120,18 @@ export function logConfig(): void {
 }
 
 /**
- * Get network identifier in CAIP-2 format
+ * Get network identifier for facilitator API
+ * Returns the network name string (e.g., "skale-base", "base-sepolia")
  */
 export function getNetworkIdentifier(): string {
-  return `eip155:${config.networkChainId}`;
+  return config.networkName;
 }
 
 /**
- * Get asset identifier in CAIP-19 format
+ * Get asset identifier (token contract address)
  */
 export function getAssetIdentifier(): string {
-  return `eip155:${config.networkChainId}/erc20:${config.paymentTokenAddress}`;
+  return config.paymentTokenAddress;
 }
 
 export default config;

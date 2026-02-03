@@ -173,7 +173,7 @@ function buildPaymentRequiredResponse(
         extra: {
           facilitatorUrl: config.facilitatorUrl,
           name: config.paymentTokenName,
-          version: '1',
+          version: config.paymentTokenVersion,
         },
       },
     ],
@@ -204,7 +204,7 @@ function buildPaymentRequirements(expectedAmount: string) {
     asset: getAssetIdentifier(),
     extra: {
       name: config.paymentTokenName,
-      version: '1',
+      version: config.paymentTokenVersion,
     },
   };
 }

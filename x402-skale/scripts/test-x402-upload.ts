@@ -19,11 +19,11 @@
  *   X402_ENDPOINT - Gateway URL (default: http://localhost:4002)
  *   X402_BUCKET - Bucket name (default: test-bucket)
  *   PRIVATE_KEY - Wallet private key
+ *   DEBUG - Set to "1" to show full payload details
  */
 
 import { privateKeyToAccount } from 'viem/accounts';
 import { createWalletClient, http, type Hex, encodePacked, keccak256 } from 'viem';
-import { skaleEuropaTestnet } from 'viem/chains';
 
 // ============================================
 // Configuration
@@ -36,6 +36,7 @@ interface Config {
   fileName: string;
   fileContent: string;
   ttlSeconds: number;
+  debug: boolean;
 }
 
 function parseArgs(): Config {
@@ -66,31 +67,13 @@ function parseArgs(): Config {
     fileName: `hello-world-${Date.now()}.txt`,
     fileContent: `Hello World from x402!\n\nTimestamp: ${new Date().toISOString()}\nThis file was uploaded using x402 payment only (no JWT required).`,
     ttlSeconds: 3600, // 1 hour
+    debug: process.env.DEBUG === '1' || args.includes('--debug'),
   };
 }
 
 // ============================================
 // x402 Payment Signing (EIP-712)
 // ============================================
-
-// SKALE Europa chain (used for x402 payments)
-const skaleEuropa = {
-  id: 2046399126,
-  name: 'SKALE Europa',
-  network: 'skale-europa',
-  nativeCurrency: { name: 'sFUEL', symbol: 'sFUEL', decimals: 18 },
-  rpcUrls: {
-    default: { http: ['https://mainnet.skalenodes.com/v1/elated-tan-skat'] },
-    public: { http: ['https://mainnet.skalenodes.com/v1/elated-tan-skat'] },
-  },
-};
-
-// EIP-712 Domain for x402 payments
-const EIP712_DOMAIN = {
-  name: 'Bridged USDC (SKALE Bridge)',
-  version: '1',
-  chainId: 2046399126, // SKALE Europa mainnet
-};
 
 // EIP-712 Types for x402 payment
 const PAYMENT_TYPES = {
@@ -121,19 +104,37 @@ interface PaymentPayload {
   };
 }
 
+interface PaymentRequirements {
+  requiredAmount: string;
+  recipientAddress: string;
+  chainId: number;
+  network: string;
+  tokenName: string;
+}
+
 /**
  * Sign an x402 payment using EIP-712
  */
 async function signX402Payment(
   privateKey: Hex,
-  recipientAddress: string,
-  amountMicroUsdc: string
-): Promise<string> {
+  requirements: PaymentRequirements,
+  debug: boolean = false
+): Promise<{ paymentHeader: string; paymentPayload: PaymentPayload }> {
   const account = privateKeyToAccount(privateKey);
+
+  // Create a custom chain definition for signing
+  const customChain = {
+    id: requirements.chainId,
+    name: `Chain ${requirements.chainId}`,
+    nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+    rpcUrls: {
+      default: { http: ['http://localhost:8545'] },
+    },
+  };
 
   const walletClient = createWalletClient({
     account,
-    chain: skaleEuropa as any,
+    chain: customChain as any,
     transport: http(),
   });
 
@@ -153,22 +154,31 @@ async function signX402Payment(
   // EIP-712 message
   const message = {
     from: account.address,
-    to: recipientAddress as Hex,
-    value: BigInt(amountMicroUsdc),
+    to: requirements.recipientAddress as Hex,
+    value: BigInt(requirements.requiredAmount),
     validAfter: BigInt(validAfter),
     validBefore: BigInt(validBefore),
     nonce: nonce as Hex,
   };
 
+  // EIP-712 Domain - dynamically set from server's 402 response
+  const domain = {
+    name: requirements.tokenName,
+    version: '1',
+    chainId: requirements.chainId,
+  };
+
   console.log('  Signing payment with EIP-712...');
   console.log(`  From: ${account.address}`);
-  console.log(`  To: ${recipientAddress}`);
-  console.log(`  Amount: ${amountMicroUsdc} microUSDC ($${(parseInt(amountMicroUsdc) / 1_000_000).toFixed(6)})`);
+  console.log(`  To: ${requirements.recipientAddress}`);
+  console.log(`  Amount: ${requirements.requiredAmount} microUSDC ($${(parseInt(requirements.requiredAmount) / 1_000_000).toFixed(6)})`);
+  console.log(`  Chain ID: ${requirements.chainId}`);
+  console.log(`  Token Name: ${requirements.tokenName}`);
 
   // Sign with EIP-712
   const signature = await walletClient.signTypedData({
     account,
-    domain: EIP712_DOMAIN,
+    domain,
     types: PAYMENT_TYPES,
     primaryType: 'TransferWithAuthorization',
     message,
@@ -178,13 +188,13 @@ async function signX402Payment(
   const paymentPayload: PaymentPayload = {
     x402Version: 1,
     scheme: 'exact',
-    network: `eip155:${EIP712_DOMAIN.chainId}`,
+    network: requirements.network,
     payload: {
       signature,
       authorization: {
         from: account.address,
-        to: recipientAddress,
-        value: amountMicroUsdc,
+        to: requirements.recipientAddress,
+        value: requirements.requiredAmount,
         validAfter: validAfter.toString(),
         validBefore: validBefore.toString(),
         nonce,
@@ -192,8 +202,25 @@ async function signX402Payment(
     },
   };
 
+  if (debug) {
+    console.log('\n  [DEBUG] EIP-712 Domain:');
+    console.log(JSON.stringify(domain, null, 2).split('\n').map(l => '    ' + l).join('\n'));
+    console.log('\n  [DEBUG] EIP-712 Message:');
+    console.log(JSON.stringify({
+      from: message.from,
+      to: message.to,
+      value: message.value.toString(),
+      validAfter: message.validAfter.toString(),
+      validBefore: message.validBefore.toString(),
+      nonce: message.nonce,
+    }, null, 2).split('\n').map(l => '    ' + l).join('\n'));
+    console.log('\n  [DEBUG] Payment Payload:');
+    console.log(JSON.stringify(paymentPayload, null, 2).split('\n').map(l => '    ' + l).join('\n'));
+  }
+
   // Base64 encode the payload
-  return Buffer.from(JSON.stringify(paymentPayload)).toString('base64');
+  const paymentHeader = Buffer.from(JSON.stringify(paymentPayload)).toString('base64');
+  return { paymentHeader, paymentPayload };
 }
 
 // ============================================
@@ -209,7 +236,7 @@ interface UploadResult {
 }
 
 /**
- * Step 1: Get pricing info (optional 402 response)
+ * Step 1: Get pricing info (402 response)
  */
 async function getPaymentRequirements(
   endpoint: string,
@@ -217,7 +244,7 @@ async function getPaymentRequirements(
   key: string,
   contentLength: number,
   ttlSeconds: number
-): Promise<{ requiredAmount: string; recipientAddress: string }> {
+): Promise<PaymentRequirements> {
   console.log('\n[Step 1] Getting payment requirements...');
 
   // Create a dummy body of the right size to get accurate pricing
@@ -229,11 +256,12 @@ async function getPaymentRequirements(
       'Content-Type': 'text/plain',
       'X-Fula-TTL': ttlSeconds.toString(),
     },
-    body: dummyBody, // Body to get accurate pricing (will fail with 402)
+    body: dummyBody,
   });
 
   if (response.status !== 402) {
-    throw new Error(`Expected 402 response, got ${response.status}`);
+    const text = await response.text();
+    throw new Error(`Expected 402 response, got ${response.status}: ${text}`);
   }
 
   const paymentRequired = await response.json() as {
@@ -243,18 +271,38 @@ async function getPaymentRequirements(
       payTo: string;
       network: string;
       asset: string;
+      extra?: {
+        name?: string;
+        version?: string;
+      };
     }>;
   };
 
   const accept = paymentRequired.accepts[0];
+
+  // Extract chain ID from network string (e.g., "eip155:1187947933" -> 1187947933)
+  const chainIdMatch = accept.network.match(/eip155:(\d+)/);
+  if (!chainIdMatch) {
+    throw new Error(`Invalid network format: ${accept.network}`);
+  }
+  const chainId = parseInt(chainIdMatch[1], 10);
+
+  // Get token name from extra field or use default
+  const tokenName = accept.extra?.name || 'USD Coin';
+
   console.log(`  Required: ${accept.maxAmountRequired} microUSDC`);
   console.log(`  Pay to: ${accept.payTo}`);
   console.log(`  Network: ${accept.network}`);
+  console.log(`  Chain ID: ${chainId}`);
   console.log(`  Asset: ${accept.asset}`);
+  console.log(`  Token Name: ${tokenName}`);
 
   return {
     requiredAmount: accept.maxAmountRequired,
     recipientAddress: accept.payTo,
+    chainId,
+    network: accept.network,
+    tokenName,
   };
 }
 
@@ -278,7 +326,6 @@ async function uploadWithPayment(
   const response = await fetch(`${endpoint}/${bucket}/${key}`, {
     method: 'PUT',
     headers: {
-      'Content-Length': content.length.toString(),
       'Content-Type': 'text/plain',
       'X-Fula-TTL': ttlSeconds.toString(),
       'X-PAYMENT': paymentHeader,
@@ -340,10 +387,18 @@ async function main() {
   console.log(`Bucket: ${config.bucket}`);
   console.log(`File: ${config.fileName}`);
   console.log(`Content length: ${config.fileContent.length} bytes`);
+  console.log(`Debug mode: ${config.debug ? 'ON' : 'OFF (use DEBUG=1 or --debug to enable)'}`);
+  if (config.debug) {
+    console.log('\n[DEBUG] Full configuration:');
+    console.log(`  Endpoint: ${config.endpoint}`);
+    console.log(`  Bucket: ${config.bucket}`);
+    console.log(`  File: ${config.fileName}`);
+    console.log(`  TTL: ${config.ttlSeconds} seconds`);
+  }
 
   try {
-    // Step 1: Get payment requirements
-    const { requiredAmount, recipientAddress } = await getPaymentRequirements(
+    // Step 1: Get payment requirements (includes chain ID)
+    const requirements = await getPaymentRequirements(
       config.endpoint,
       config.bucket,
       config.fileName,
@@ -351,14 +406,15 @@ async function main() {
       config.ttlSeconds
     );
 
-    // Step 2: Sign payment
+    // Step 2: Sign payment using chain ID from server
     console.log('\n[Step 2] Signing x402 payment...');
-    const paymentHeader = await signX402Payment(
-      config.privateKey,
-      recipientAddress,
-      requiredAmount
-    );
+    const { paymentHeader, paymentPayload } = await signX402Payment(config.privateKey, requirements, config.debug);
     console.log(`  Payment header created (${paymentHeader.length} chars)`);
+
+    if (config.debug) {
+      console.log('\n  [DEBUG] Base64 Encoded Payment Header:');
+      console.log(`    ${paymentHeader.substring(0, 100)}...`);
+    }
 
     // Step 3: Upload with payment
     const result = await uploadWithPayment(
@@ -406,6 +462,19 @@ async function main() {
       console.log(`User was auto-created with email: ${account.address.toLowerCase()}@walletpayment.fx.land`);
     } else {
       console.log('\nUpload failed. Check the error above.');
+
+      // Check for specific error patterns and provide helpful hints
+      const bodyStr = JSON.stringify(result.body || {});
+      if (bodyStr.includes('Facilitator verify failed') || bodyStr.includes('500')) {
+        console.log('\n[HINT] The facilitator returned an error. This could mean:');
+        console.log('  1. The chain ID might not be supported by the facilitator');
+        console.log('  2. The USDC token address might be incorrect for this chain');
+        console.log('  3. The facilitator service might be temporarily unavailable');
+        console.log('  4. The payment payload format might not match the facilitator\'s expectations');
+        console.log('\nTo debug, run with DEBUG=1 to see the exact payment payload being sent.');
+        console.log('You can also check the facilitator status at: https://facilitator.dirtroad.dev/health');
+      }
+
       process.exit(1);
     }
 

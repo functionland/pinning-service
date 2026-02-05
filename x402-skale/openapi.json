@@ -332,17 +332,14 @@
       },
       "delete": {
         "operationId": "deleteObject",
-        "summary": "Delete file with x402 payment",
-        "description": "Delete a file from storage. Requires x402 payment.",
+        "summary": "Delete file (free)",
+        "description": "Delete a file from storage. **No payment required.**",
         "tags": [
           "Storage"
         ],
         "security": [
+          {},
           {
-            "x402Payment": []
-          },
-          {
-            "x402Payment": [],
             "bearerAuth": []
           }
         ],
@@ -367,27 +364,10 @@
         "responses": {
           "200": {
             "description": "Delete successful",
-            "headers": {
-              "X-PAYMENT-RESPONSE": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeleteResponse"
-                }
-              }
-            }
-          },
-          "402": {
-            "description": "Payment required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PaymentRequired"
                 }
               }
             }

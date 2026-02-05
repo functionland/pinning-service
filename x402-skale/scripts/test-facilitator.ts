@@ -1,18 +1,29 @@
 #!/usr/bin/env npx tsx
 /**
- * Facilitator Diagnostic Script
+ * Facilitator Diagnostic Script (RelAI x402 Facilitator)
  *
- * Directly tests the facilitator endpoint to diagnose 500 errors.
- * This bypasses the gateway and calls the facilitator /verify endpoint directly.
+ * Directly tests the RelAI facilitator endpoints to diagnose payment issues.
+ * This bypasses the gateway and calls the facilitator endpoints directly.
+ *
+ * API Documentation: https://docs.x402.fi
+ * Facilitator URL: https://facilitator.x402.fi
+ *
+ * Endpoints tested:
+ *   GET  /supported - Query supported payment schemes and networks
+ *   POST /accepts   - Enrich payment requirements with facilitator-specific details
+ *   POST /verify    - Validate payment proofs without executing blockchain transactions
+ *
+ * Note: This script uses EIP-3009 (TransferWithAuthorization) for signing.
+ * RelAI supports both EIP-3009 and EIP-2612 (Permit) methods.
  *
  * Usage:
- *   npx tsx scripts/test-facilitator.ts <private-key> <receiving-address> [chain-id] [token-address] [facilitator-url]
- *
- * Example (SKALE Calypso):
- *   npx tsx scripts/test-facilitator.ts 0xac0974... 0xYourReceivingAddress 1187947933 0x7F5373AE26c3E8FfC4c77b7255DF7eC1A9aF52a6
+ *   npx tsx scripts/test-facilitator.ts <private-key> [receiving-address] [chain-id] [token-address] [facilitator-url]
  *
  * Example (Base Sepolia - default x402 test chain):
- *   npx tsx scripts/test-facilitator.ts 0xac0974... 0xYourReceivingAddress 84532 0x036CbD53842c5426634e7929541eC2318f3dCF7e
+ *   npx tsx scripts/test-facilitator.ts 0xac0974... 0xYourReceivingAddress 84532
+ *
+ * Example (SKALE Calypso):
+ *   npx tsx scripts/test-facilitator.ts 0xac0974... 0xYourReceivingAddress 1187947933
  */
 
 import { privateKeyToAccount } from 'viem/accounts';
@@ -20,6 +31,7 @@ import { createWalletClient, http, type Hex, encodePacked, keccak256 } from 'vie
 
 // Known chain configurations
 // Network names must match facilitator's supported networks
+// RelAI uses EIP-155 format for SKALE: eip155:<chainId>
 // Token names must match the token contract's name() function for EIP-712
 const KNOWN_CHAINS: Record<number, { networkName: string; tokenName: string; tokenVersion: string; tokenAddress: string }> = {
   // Base Sepolia (x402 default test network)
@@ -29,20 +41,28 @@ const KNOWN_CHAINS: Record<number, { networkName: string; tokenName: string; tok
     tokenVersion: '2',
     tokenAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
   },
-  // SKALE Base (mainnet) - Chain ID 1187947933
-  // Bridged USDC using FiatTokenV2_2 implementation
+  // Base Mainnet
+  8453: {
+    networkName: 'base',
+    tokenName: 'USD Coin',
+    tokenVersion: '2',
+    tokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  },
+  // SKALE Calypso (mainnet) - Chain ID 1187947933
+  // RelAI uses EIP-155 format: eip155:1187947933
   1187947933: {
-    networkName: 'skale-base',
-    tokenName: 'Bridged USDC (SKALE Bridge)',
+    networkName: 'eip155:1187947933',
+    tokenName: 'USDC',
     tokenVersion: '1',
     tokenAddress: '0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20',
   },
-  // SKALE Base Spolia (testnet) - Chain ID 324705682
+  // SKALE Calypso Testnet - Chain ID 324705682
+  // RelAI uses EIP-155 format: eip155:324705682
   324705682: {
-    networkName: 'skale-base-spolia',
+    networkName: 'eip155:324705682',
     tokenName: 'USDC',
     tokenVersion: '1',
-    tokenAddress: '0x7F5373AE26c3E8FfC4c77b7255DF7eC1A9aF52a6',
+    tokenAddress: '0x2e08028E3C4c2356572E096d8EF835cD5C6030bD',
   },
 };
 
@@ -52,32 +72,36 @@ async function main() {
   // Parse arguments
   let privateKey = args[0];
   const receivingAddress = args[1] || '0xc2dc75e756029fe7b70f6d13160a436345ea91db';
-  const chainId = parseInt(args[2] || '1187947933', 10);
-  const tokenAddress = args[3] || KNOWN_CHAINS[chainId]?.tokenAddress || '0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20';
+  const chainId = parseInt(args[2] || '84532', 10); // Default to Base Sepolia (supported by Corbits)
+  const tokenAddress = args[3] || KNOWN_CHAINS[chainId]?.tokenAddress || '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
   const tokenName = args[4] || KNOWN_CHAINS[chainId]?.tokenName || 'USD Coin';
   const tokenVersion = args[5] || KNOWN_CHAINS[chainId]?.tokenVersion || '2';
-  const networkName = KNOWN_CHAINS[chainId]?.networkName || 'skale-base';
-  const facilitatorUrl = args[6] || 'https://facilitator.payai.network';
+  // Default to EIP-155 format for unknown chains (e.g., eip155:12345)
+  const networkName = args[6] || KNOWN_CHAINS[chainId]?.networkName || `eip155:${chainId}`;
+  const facilitatorUrl = args[7] || 'https://facilitator.x402.fi';
 
   if (!privateKey) {
-    console.error('Facilitator Diagnostic Script');
+    console.error('Facilitator Diagnostic Script (RelAI x402)');
     console.error('');
     console.error('Usage:');
-    console.error('  npx tsx scripts/test-facilitator.ts <private-key> <receiving-address> [chain-id] [token-address] [facilitator-url]');
+    console.error('  npx tsx scripts/test-facilitator.ts <private-key> [receiving-address] [chain-id] [token-address] [token-name] [token-version] [network-name] [facilitator-url]');
     console.error('');
     console.error('Arguments:');
     console.error('  private-key       Your wallet private key (for signing test payment)');
-    console.error('  receiving-address Your server RECEIVING_ADDRESS from .env');
-    console.error('  chain-id          Chain ID (default: 1187947933 = SKALE Calypso)');
-    console.error('  token-address     USDC token address on that chain');
-    console.error('  facilitator-url   Facilitator URL (default: https://facilitator.dirtroad.dev)');
+    console.error('  receiving-address Your server RECEIVING_ADDRESS (default: 0xc2dc75e756029fe7b70f6d13160a436345ea91db)');
+    console.error('  chain-id          Chain ID (default: 84532 = Base Sepolia)');
+    console.error('  token-address     USDC token address');
+    console.error('  token-name        Token name for EIP-712 domain');
+    console.error('  token-version     Token version for EIP-712 domain');
+    console.error('  network-name      Network identifier (default: base-sepolia or eip155:<chainId>)');
+    console.error('  facilitator-url   Facilitator URL (default: https://facilitator.x402.fi)');
     console.error('');
     console.error('Examples:');
-    console.error('  # SKALE Calypso (chain 1187947933)');
+    console.error('  # Base Sepolia (chain 84532) - default, supported by RelAI');
     console.error('  npx tsx scripts/test-facilitator.ts 0xYourPrivateKey 0xYourReceivingAddress');
     console.error('');
-    console.error('  # Base Sepolia (chain 84532) - standard x402 test chain');
-    console.error('  npx tsx scripts/test-facilitator.ts 0xYourPrivateKey 0xYourReceivingAddress 84532');
+    console.error('  # SKALE Calypso (chain 1187947933)');
+    console.error('  npx tsx scripts/test-facilitator.ts 0xYourPrivateKey 0xYourReceivingAddress 1187947933');
     process.exit(1);
   }
 
@@ -88,7 +112,7 @@ async function main() {
   const amount = '10000'; // 0.01 USDC in microUSDC
 
   console.log('='.repeat(60));
-  console.log('Facilitator Diagnostic Test');
+  console.log('RelAI x402 Facilitator Diagnostic Test');
   console.log('='.repeat(60));
 
   // Create wallet
@@ -101,41 +125,106 @@ async function main() {
   console.log(`Token Address: ${tokenAddress}`);
   console.log(`Receiving Address: ${receivingAddress}`);
 
-  // Step 1: Check facilitator health
-  console.log('\n[Step 1] Checking facilitator health...');
+  // Step 1: Check supported networks via GET /supported
+  console.log('\n[Step 1] Checking supported networks (GET /supported)...');
+  let networkSupported = false;
   try {
-    const healthResponse = await fetch(`${facilitatorUrl}/health`);
-    console.log(`  Status: ${healthResponse.status}`);
-    if (healthResponse.ok) {
-      const healthText = await healthResponse.text();
-      console.log(`  Response: ${healthText}`);
+    const supportedResponse = await fetch(`${facilitatorUrl}/supported`);
+    console.log(`  Status: ${supportedResponse.status}`);
+    if (supportedResponse.ok) {
+      const supportedData = await supportedResponse.json() as { kinds: Array<{ scheme: string; network: string; x402Version: number }> };
+      console.log(`  Supported configurations:`);
+      for (const kind of supportedData.kinds || []) {
+        const isMatch = kind.network === networkName;
+        console.log(`    - ${kind.scheme} on ${kind.network} (v${kind.x402Version})${isMatch ? ' ✓ MATCH' : ''}`);
+        if (isMatch) networkSupported = true;
+      }
+      if (!networkSupported) {
+        console.log(`\n  ⚠ WARNING: Network '${networkName}' is NOT in the supported list!`);
+        console.log(`  The facilitator may not be able to process payments for this network.`);
+      }
     } else {
-      console.log(`  Health check failed!`);
+      console.log(`  Failed to get supported networks`);
     }
   } catch (error) {
-    console.log(`  Health check error: ${error instanceof Error ? error.message : error}`);
+    console.log(`  Error: ${error instanceof Error ? error.message : error}`);
   }
 
-  // Step 2: Check if facilitator supports our chain
-  console.log('\n[Step 2] Checking facilitator capabilities...');
+  // Step 2: Get enriched payment requirements via POST /accepts
+  console.log('\n[Step 2] Getting enriched requirements (POST /accepts)...');
+  let enrichedRequirements: any = null;
+  const acceptsBody = {
+    x402Version: 2,
+    accepts: [{
+      scheme: 'exact',
+      network: networkName,
+      maxAmountRequired: amount,
+      resource: 'https://cloud.fx.land/test',
+      description: 'Test payment',
+      mimeType: 'application/octet-stream',
+      payTo: receivingAddress,
+      maxTimeoutSeconds: 300,
+      asset: tokenAddress,
+      extra: {
+        assetTransferMethod: 'eip3009',
+        name: tokenName,
+        version: tokenVersion,
+      },
+    }],
+    extensions: {},
+  };
+
+  console.log('  Request body:');
+  console.log(JSON.stringify(acceptsBody, null, 2).split('\n').map(l => '    ' + l).join('\n'));
+
   try {
-    const infoResponse = await fetch(`${facilitatorUrl}/`);
-    if (infoResponse.ok) {
-      const infoText = await infoResponse.text();
-      console.log(`  Root response: ${infoText.substring(0, 200)}...`);
+    const acceptsResponse = await fetch(`${facilitatorUrl}/accepts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(acceptsBody),
+    });
+    console.log(`\n  Status: ${acceptsResponse.status}`);
+
+    const acceptsText = await acceptsResponse.text();
+    try {
+      const acceptsJson = JSON.parse(acceptsText);
+      console.log('  Response:');
+      console.log(JSON.stringify(acceptsJson, null, 2).split('\n').map(l => '    ' + l).join('\n'));
+
+      if (acceptsJson.accepts && acceptsJson.accepts[0]) {
+        enrichedRequirements = acceptsJson.accepts[0];
+        console.log('\n  ✓ Got enriched requirements from facilitator');
+        if (enrichedRequirements.extra) {
+          console.log(`    EIP-712 Domain: name=${enrichedRequirements.extra.name}, version=${enrichedRequirements.extra.version}, chainId=${enrichedRequirements.extra.chainId}`);
+        }
+      }
+    } catch {
+      console.log(`  Response (raw): ${acceptsText}`);
     }
   } catch (error) {
-    console.log(`  Info check: ${error instanceof Error ? error.message : 'Not available'}`);
+    console.log(`  Error: ${error instanceof Error ? error.message : error}`);
   }
 
   // Step 3: Create and sign a test payment
   console.log('\n[Step 3] Creating test payment...');
 
+  // Use enriched requirements from /accepts if available, otherwise fall back to defaults
+  const effectiveTokenName = enrichedRequirements?.extra?.name || tokenName;
+  const effectiveTokenVersion = enrichedRequirements?.extra?.version || tokenVersion;
+  const effectiveChainId = enrichedRequirements?.extra?.chainId || chainId;
+  const effectiveVerifyingContract = enrichedRequirements?.extra?.verifyingContract || tokenAddress;
+
+  console.log(`  Using EIP-712 domain:`);
+  console.log(`    name: ${effectiveTokenName}`);
+  console.log(`    version: ${effectiveTokenVersion}`);
+  console.log(`    chainId: ${effectiveChainId}`);
+  console.log(`    verifyingContract: ${effectiveVerifyingContract}`);
+
   const customChain = {
-    id: chainId,
-    name: `Chain ${chainId}`,
+    id: effectiveChainId,
+    name: `Chain ${effectiveChainId}`,
     nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
-    rpcUrls: { default: { http: ['http://localhost:8545'] } },
+    rpcUrls: { default: { http: ['https://rpc.placeholder.local'] } },
   };
 
   const walletClient = createWalletClient({
@@ -162,12 +251,12 @@ async function main() {
   };
 
   // EIP-712 domain for EIP-3009 transferWithAuthorization
-  // Must include verifyingContract (the token address)
+  // Use values from enriched requirements if available
   const domain = {
-    name: tokenName,
-    version: tokenVersion,
-    chainId: chainId,
-    verifyingContract: tokenAddress as Hex,
+    name: effectiveTokenName,
+    version: effectiveTokenVersion,
+    chainId: effectiveChainId,
+    verifyingContract: effectiveVerifyingContract as Hex,
   };
 
   const PAYMENT_TYPES = {
@@ -190,10 +279,24 @@ async function main() {
     message,
   });
 
+  // Build v2 payment payload with 'accepted' field containing payment details
   const paymentPayload = {
-    x402Version: 1,
+    x402Version: 2,
     scheme: 'exact',
     network: networkName,
+    // v2 format includes 'accepted' with payment option details
+    accepted: {
+      scheme: 'exact',
+      network: networkName,
+      amount: amount,
+      asset: effectiveVerifyingContract,
+      payTo: receivingAddress,
+      extra: {
+        assetTransferMethod: 'eip3009',
+        name: effectiveTokenName,
+        version: effectiveTokenVersion,
+      },
+    },
     payload: {
       signature,
       authorization: {
@@ -217,27 +320,31 @@ async function main() {
   console.log('\n  Payment Payload (decoded):');
   console.log(JSON.stringify(paymentPayload, null, 2).split('\n').map(l => '    ' + l).join('\n'));
 
-  // Step 4: Call facilitator /verify endpoint
-  console.log('\n[Step 4] Calling facilitator /verify...');
+  // Step 4: Call facilitator /verify endpoint (POST /verify)
+  console.log('\n[Step 4] Validating payment (POST /verify)...');
 
-  const paymentRequirements = {
+  // Use enriched requirements if available, otherwise construct from params
+  const paymentRequirements = enrichedRequirements || {
     scheme: 'exact',
     network: networkName,
     maxAmountRequired: amount,
-    resource: '*',
+    resource: 'https://cloud.fx.land/test',
     description: 'Test payment',
     mimeType: 'application/octet-stream',
     payTo: receivingAddress,
     maxTimeoutSeconds: 300,
     asset: tokenAddress,
     extra: {
-      name: tokenName,
-      version: tokenVersion,
+      name: effectiveTokenName,
+      version: effectiveTokenVersion,
+      chainId: effectiveChainId,
+      verifyingContract: effectiveVerifyingContract,
     },
   };
 
-  // x402 spec: paymentPayload should be the JSON object, not base64
+  // RelAI API format: x402Version at top level, paymentPayload as object
   const verifyBody = {
+    x402Version: 2,
     paymentPayload: paymentPayload,
     paymentRequirements,
   };
@@ -261,25 +368,34 @@ async function main() {
     const responseText = await response.text();
     console.log('\n  Response Body:');
     try {
-      const responseJson = JSON.parse(responseText);
+      const responseJson = JSON.parse(responseText) as { isValid?: boolean; invalidReason?: string };
       console.log(JSON.stringify(responseJson, null, 2).split('\n').map(l => '    ' + l).join('\n'));
+
+      // RelAI returns { isValid: true/false, invalidReason?: string }
+      if (responseJson.isValid === true) {
+        console.log('\n  ✓ Payment validation SUCCESSFUL!');
+        console.log('  The payment proof is valid and would be accepted by the facilitator.');
+      } else if (responseJson.isValid === false) {
+        console.log('\n  ✗ Payment validation FAILED');
+        console.log(`  Reason: ${responseJson.invalidReason || 'Unknown'}`);
+      }
     } catch {
       console.log(`    ${responseText}`);
     }
 
     if (!response.ok) {
-      console.log('\n[DIAGNOSIS] The facilitator returned an error.');
+      console.log('\n[DIAGNOSIS] The facilitator returned an HTTP error.');
       console.log('  Possible causes:');
-      console.log(`  1. Chain ${chainId} might not be supported by this facilitator`);
-      console.log('  2. The token address might be incorrect');
+      console.log(`  1. Network '${networkName}' might not be supported by this facilitator`);
+      console.log('  2. The token address might be incorrect for this network');
       console.log('  3. The payment format might not match what the facilitator expects');
-      console.log('  4. The facilitator might require specific setup for SKALE chains');
+      console.log('  4. Missing or incorrect EIP-712 domain parameters');
 
       console.log('\n  Suggested actions:');
-      console.log('  - Try testing with Base Sepolia (chain 84532) to see if facilitator works at all');
-      console.log('  - Check if the facilitator supports your chain');
-      console.log('  - Consider using a different facilitator or self-hosting one');
-      console.log('  - Check the x402 facilitator documentation: https://github.com/coinbase/x402');
+      console.log('  - Check Step 1 output to see which networks are supported');
+      console.log('  - Try testing with Base Sepolia (chain 84532) which is commonly supported');
+      console.log('  - Verify the token contract supports EIP-3009 transferWithAuthorization');
+      console.log('  - Check the RelAI documentation: https://docs.x402.fi');
     }
 
   } catch (error) {

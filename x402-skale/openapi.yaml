@@ -1,0 +1,464 @@
+openapi: 3.1.0
+info:
+  title: x402 Storage Gateway
+  description: |
+    IPFS-backed storage service with x402 cryptocurrency payment protocol.
+
+    ## Payment Flow
+    1. Send PUT request without payment → receive 402 with payment requirements
+    2. Sign payment with wallet → retry PUT with X-PAYMENT header
+    3. File uploaded, payment settled on-chain
+    4. Download via GET (free) or IPFS gateway using returned CID
+
+    ## Authentication
+    - **Upload/Delete**: Requires x402 payment (JWT optional)
+    - **Download**: Free, no auth required (JWT optional for private buckets)
+  version: 1.0.0
+  contact:
+    name: Fula Network
+    url: https://fx.land
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://cloud.fx.land
+    description: Production server
+
+# Default security (can be overridden per operation)
+security: []
+
+tags:
+  - name: Storage
+    description: File storage operations with x402 payment
+  - name: Health
+    description: Service health checks
+
+paths:
+  /{bucket}/{key}:
+    put:
+      operationId: uploadObject
+      summary: Upload file with x402 payment
+      description: |
+        Upload a file to IPFS-backed storage. Requires x402 cryptocurrency payment.
+
+        **Payment Flow:**
+        1. First request without X-PAYMENT header returns 402 with payment requirements
+        2. Client signs payment using EIP-3009 or EIP-2612
+        3. Retry request with X-PAYMENT header containing signed payment
+        4. Server verifies payment, uploads file, settles on-chain
+
+        **Pricing:** $0.01 per MB-hour (10,000 microUSDC)
+      tags:
+        - Storage
+      security:
+        - x402Payment: []
+        - x402Payment: []
+          bearerAuth: []
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          description: Storage bucket name
+          schema:
+            type: string
+            example: myfiles
+        - name: key
+          in: path
+          required: true
+          description: Object key (filename with optional path)
+          schema:
+            type: string
+            example: documents/report.pdf
+        - name: X-PAYMENT
+          in: header
+          required: false
+          description: Base64-encoded x402 payment signature. Required for upload to succeed.
+          schema:
+            type: string
+            example: eyJ4NDAyVmVyc2lvbiI6Mn0=
+        - name: X-Fula-TTL
+          in: header
+          required: false
+          description: Storage duration in seconds (default 3600, max 2592000)
+          schema:
+            type: integer
+            minimum: 60
+            maximum: 2592000
+            default: 3600
+            example: 86400
+        - name: Authorization
+          in: header
+          required: false
+          description: Optional JWT Bearer token for user identification
+          schema:
+            type: string
+            example: Bearer eyJhbGciOiJIUzI1NiJ9...
+      requestBody:
+        required: true
+        description: File content to upload
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          '*/*':
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Upload successful, payment settled
+          headers:
+            X-PAYMENT-RESPONSE:
+              description: Base64-encoded settlement response with transaction hash
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+              example:
+                success: true
+                cid: QmXyz123abcdefghijklmnopqrstuvwxyz
+                bucket: myfiles
+                key: documents/report.pdf
+                size_bytes: 1048576
+                expires_at: "2026-01-09T12:00:00Z"
+                tx_hash: "0xabc123def456..."
+                gateway_url: "https://ipfs.io/ipfs/QmXyz123abcdefghijklmnopqrstuvwxyz"
+        '402':
+          description: Payment required - includes payment requirements
+          headers:
+            X-PAYMENT-REQUIRED:
+              description: Base64-encoded payment requirements
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentRequired'
+              example:
+                x402Version: 2
+                accepts:
+                  - scheme: exact
+                    network: eip155:1187947933
+                    maxAmountRequired: "100000"
+                    payTo: "0x..."
+                    asset: "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20"
+                    description: "Storage: 1.00 MB for 24 hours"
+                    extra:
+                      facilitatorUrl: "https://facilitator.x402.fi"
+                      name: "USDC"
+                      version: "1"
+                      assetTransferMethod: "eip3009"
+                extensions: {}
+                error: Payment Required
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    get:
+      operationId: downloadObject
+      summary: Download file (free)
+      description: |
+        Download a file from storage. **No payment required.**
+
+        Files can also be accessed via IPFS gateway using the CID returned from upload.
+      tags:
+        - Storage
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: File content
+          headers:
+            Content-Type:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+            ETag:
+              schema:
+                type: string
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Object not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    head:
+      operationId: headObject
+      summary: Check file existence (free)
+      description: Check if file exists and get metadata without downloading.
+      tags:
+        - Storage
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Object exists
+          headers:
+            Content-Type:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+            ETag:
+              schema:
+                type: string
+        '404':
+          description: Object not found
+
+    delete:
+      operationId: deleteObject
+      summary: Delete file with x402 payment
+      description: Delete a file from storage. Requires x402 payment.
+      tags:
+        - Storage
+      security:
+        - x402Payment: []
+        - x402Payment: []
+          bearerAuth: []
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Delete successful
+          headers:
+            X-PAYMENT-RESPONSE:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '402':
+          description: Payment required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentRequired'
+        '404':
+          description: Object not found
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    UploadResponse:
+      type: object
+      required:
+        - success
+        - cid
+        - bucket
+        - key
+      properties:
+        success:
+          type: boolean
+          example: true
+        cid:
+          type: string
+          description: IPFS Content Identifier
+          example: QmXyz123abcdefghijklmnopqrstuvwxyz
+        bucket:
+          type: string
+          example: myfiles
+        key:
+          type: string
+          example: documents/report.pdf
+        size_bytes:
+          type: integer
+          example: 1048576
+        expires_at:
+          type: string
+          format: date-time
+          description: When storage expires (file may be garbage collected after this)
+          example: "2026-01-09T12:00:00Z"
+        tx_hash:
+          type: string
+          description: On-chain payment transaction hash
+          example: "0xabc123..."
+        gateway_url:
+          type: string
+          format: uri
+          description: Direct IPFS gateway URL for downloading
+          example: "https://ipfs.io/ipfs/QmXyz123..."
+
+    DeleteResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        bucket:
+          type: string
+        key:
+          type: string
+
+    PaymentRequired:
+      type: object
+      required:
+        - x402Version
+        - accepts
+      properties:
+        x402Version:
+          type: integer
+          example: 2
+        accepts:
+          type: array
+          items:
+            $ref: '#/components/schemas/PaymentOption'
+        extensions:
+          type: object
+          description: x402 v2 extensions (empty for now)
+        error:
+          type: string
+          example: Payment Required
+
+    PaymentOption:
+      type: object
+      properties:
+        scheme:
+          type: string
+          enum: [exact]
+        network:
+          type: string
+          description: Network in CAIP-2 format
+          example: eip155:1187947933
+        maxAmountRequired:
+          type: string
+          description: Amount in smallest unit (microUSDC)
+          example: "100000"
+        payTo:
+          type: string
+          description: Recipient wallet address
+        asset:
+          type: string
+          description: Token contract address
+        description:
+          type: string
+          example: "Storage: 1.00 MB for 24 hours"
+        mimeType:
+          type: string
+        maxTimeoutSeconds:
+          type: integer
+        resource:
+          type: string
+        extra:
+          type: object
+          properties:
+            facilitatorUrl:
+              type: string
+              format: uri
+            name:
+              type: string
+            version:
+              type: string
+            assetTransferMethod:
+              type: string
+              enum: [eip3009, permit2]
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+        uptime:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+        details:
+          type: object
+
+  securitySchemes:
+    x402Payment:
+      type: apiKey
+      in: header
+      name: X-PAYMENT
+      description: Base64-encoded x402 payment signature
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Optional JWT for user identification

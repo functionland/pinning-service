@@ -29,8 +29,10 @@ vi.mock('../../src/config/index.js', () => ({
     facilitatorUrl: 'https://facilitator.test',
     receivingAddress: '0xReceiverAddress1234567890123456789012',
     networkChainId: 324705682,
+    networkName: 'skale-base-spolia',
     paymentTokenAddress: '0x2e08028E3C4c2356572E096d8EF835cD5C6030bD',
     paymentTokenName: 'Bridged USDC (SKALE Bridge)',
+    paymentTokenVersion: '2',
     s3BackendUrl: 'http://s3.test:9000',
     pinningWebuiUrl: 'http://pinning.test:3001',
     pinningSystemKey: 'test-system-key',
@@ -39,9 +41,11 @@ vi.mock('../../src/config/index.js', () => ({
     minPaymentMicroUsdc: 1000,
     fulaExchangeRate: 1.0,
     jwtSecret: undefined,
+    x402Version: 2,
+    assetTransferMethod: 'eip3009',
   },
-  getNetworkIdentifier: () => 'eip155:324705682',
-  getAssetIdentifier: () => 'eip155:324705682/erc20:0x2e08028E3C4c2356572E096d8EF835cD5C6030bD',
+  getNetworkIdentifier: () => 'skale-base-spolia',
+  getAssetIdentifier: () => '0x2e08028E3C4c2356572E096d8EF835cD5C6030bD',
 }));
 
 // Mock database
@@ -299,10 +303,10 @@ describe('x402 Flow Integration Tests', () => {
       expect(verifyCall!.method).toBe('POST');
       expect(verifyCall!.headers['Content-Type']).toBe('application/json');
 
-      // Verify request body structure
+      // Verify request body structure (x402 standard format)
       const verifyBody = verifyCall!.body as {
-        payload: string;
-        details: {
+        paymentPayload: unknown;
+        paymentRequirements: {
           scheme: string;
           network: string;
           maxAmountRequired: string;
@@ -311,13 +315,14 @@ describe('x402 Flow Integration Tests', () => {
         };
       };
 
-      expect(verifyBody.payload).toBeDefined();
-      expect(verifyBody.details.scheme).toBe('exact');
-      expect(verifyBody.details.network).toBe('eip155:324705682');
-      expect(verifyBody.details.payTo).toBe('0xReceiverAddress1234567890123456789012');
-      expect(verifyBody.details.asset).toBe('eip155:324705682/erc20:0x2e08028E3C4c2356572E096d8EF835cD5C6030bD');
+      expect(verifyBody.paymentPayload).toBeDefined();
+      expect(typeof verifyBody.paymentPayload).toBe('object');
+      expect(verifyBody.paymentRequirements.scheme).toBe('exact');
+      expect(verifyBody.paymentRequirements.network).toBe('skale-base-spolia');
+      expect(verifyBody.paymentRequirements.payTo).toBe('0xReceiverAddress1234567890123456789012');
+      expect(verifyBody.paymentRequirements.asset).toBe('0x2e08028E3C4c2356572E096d8EF835cD5C6030bD');
       // 10 MB × 1 hour × $0.01 = $0.10 = 100000 µUSDC
-      expect(verifyBody.details.maxAmountRequired).toBe('100000');
+      expect(verifyBody.paymentRequirements.maxAmountRequired).toBe('100000');
     });
 
     it('should send correct settle request to facilitator', async () => {
@@ -342,8 +347,10 @@ describe('x402 Flow Integration Tests', () => {
       expect(settleCall).toBeDefined();
       expect(settleCall!.method).toBe('POST');
 
-      const settleBody = settleCall!.body as { payload: string };
-      expect(settleBody.payload).toBeDefined();
+      const settleBody = settleCall!.body as { paymentPayload: unknown; paymentRequirements: unknown };
+      expect(settleBody.paymentPayload).toBeDefined();
+      expect(typeof settleBody.paymentPayload).toBe('object');
+      expect(settleBody.paymentRequirements).toBeDefined();
     });
   });
 
@@ -388,16 +395,16 @@ describe('x402 Flow Integration Tests', () => {
         }>;
       }>(paymentRequiredHeader!);
 
-      // Verify structure matches x402 standard
-      expect(paymentRequired.x402Version).toBe(1);
+      // Verify structure matches x402 v2 standard
+      expect(paymentRequired.x402Version).toBe(2);
       expect(paymentRequired.accepts).toHaveLength(1);
 
       const accept = paymentRequired.accepts[0];
       expect(accept.scheme).toBe('exact');
-      expect(accept.network).toBe('eip155:324705682');
+      expect(accept.network).toBe('skale-base-spolia');
       expect(accept.maxAmountRequired).toBe('100000'); // 10 MB × 1 hour
       expect(accept.payTo).toBe('0xReceiverAddress1234567890123456789012');
-      expect(accept.asset).toContain('eip155:324705682/erc20:');
+      expect(accept.asset).toBe('0x2e08028E3C4c2356572E096d8EF835cD5C6030bD');
       expect(accept.description).toContain('Storage');
       expect(accept.extra.facilitatorUrl).toBe('https://facilitator.test');
     });
@@ -420,7 +427,7 @@ describe('x402 Flow Integration Tests', () => {
       expect(res.status).toBe(402);
 
       const body = await res.json();
-      expect(body.x402Version).toBe(1);
+      expect(body.x402Version).toBe(2);
       expect(body.accepts).toBeDefined();
       expect(body.error).toBe('Payment Required');
     });
@@ -466,7 +473,7 @@ describe('x402 Flow Integration Tests', () => {
 
       expect(res.status).toBe(402);
       const body = await res.json();
-      expect(body.x402Version).toBe(1);
+      expect(body.x402Version).toBe(2);
       expect(body.accepts).toBeDefined();
     });
 

@@ -25,16 +25,20 @@ const configSchema = z.object({
   nodeEnv: z.enum(['development', 'production', 'test']).default('development'),
 
   // x402 Payment
-  facilitatorUrl: z.string().url().default('https://facilitator.dirtroad.dev'),
+  facilitatorUrl: z.string().url().default('https://facilitator.x402.fi'),
   receivingAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid Ethereum address'),
   networkChainId: z.coerce.number().default(324705682),
   // Network name for facilitator (e.g., "skale-base", "base-sepolia")
-  // See https://docs.payai.network for supported networks
+  // See https://docs.x402.fi for supported networks
   networkName: z.string().default('skale-base'),
   paymentTokenAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid token address'),
   paymentTokenName: z.string().default('USD Coin'),
   // Token version for EIP-712 domain (USDC is typically "2")
   paymentTokenVersion: z.string().default('2'),
+  // x402 protocol version (1 = legacy Corbits, 2 = RelAI)
+  x402Version: z.coerce.number().default(2),
+  // Asset transfer method: eip3009 (TransferWithAuthorization) or permit2 (EIP-2612)
+  assetTransferMethod: z.enum(['eip3009', 'permit2']).default('eip3009'),
 
   // S3 Backend
   s3BackendUrl: z.string().url().default('http://127.0.0.1:9000'),
@@ -72,6 +76,8 @@ function loadConfig(): Config {
     paymentTokenAddress: process.env.PAYMENT_TOKEN_ADDRESS,
     paymentTokenName: process.env.PAYMENT_TOKEN_NAME,
     paymentTokenVersion: process.env.PAYMENT_TOKEN_VERSION,
+    x402Version: process.env.X402_VERSION,
+    assetTransferMethod: process.env.ASSET_TRANSFER_METHOD,
     s3BackendUrl: process.env.S3_BACKEND_URL,
     s3AdminToken: process.env.S3_ADMIN_TOKEN,
     pinningWebuiUrl: process.env.PINNING_WEBUI_URL,
@@ -105,6 +111,8 @@ export function logConfig(): void {
   console.log(`  port: ${config.port}`);
   console.log(`  nodeEnv: ${config.nodeEnv}`);
   console.log(`  facilitatorUrl: ${config.facilitatorUrl}`);
+  console.log(`  x402Version: ${config.x402Version}`);
+  console.log(`  assetTransferMethod: ${config.assetTransferMethod}`);
   console.log(`  receivingAddress: ${config.receivingAddress}`);
   console.log(`  networkChainId: ${config.networkChainId}`);
   console.log(`  networkName: ${config.networkName}`);

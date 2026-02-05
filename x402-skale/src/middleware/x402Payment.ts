@@ -50,12 +50,15 @@ const PAYMENT_TIMEOUT_SECONDS = 300;    // 5 minutes to complete payment
  *
  * This is the standard x402 response format sent in the X-PAYMENT-REQUIRED header.
  * Also included in response body for convenience.
+ * Supports both v1 (legacy) and v2 (RelAI) formats.
  */
 export interface X402PaymentRequired {
-  /** Unique identifier for this payment request */
-  x402Version: 1;
+  /** x402 protocol version (1 = legacy, 2 = RelAI) */
+  x402Version: number;
   /** Accepted payment options */
   accepts: X402PaymentOption[];
+  /** Extensions for v2 protocol (empty object for now, Zauth goes here later) */
+  extensions?: Record<string, unknown>;
   /** Human-readable error message */
   error?: string;
 }
@@ -72,7 +75,7 @@ export interface X402PaymentOption {
   maxAmountRequired: string;
   /** Recipient address */
   payTo: string;
-  /** Asset in CAIP-19 format */
+  /** Asset in CAIP-19 format or contract address */
   asset: string;
   /** Human-readable description */
   description?: string;
@@ -90,6 +93,8 @@ export interface X402PaymentOption {
     name?: string;
     /** Token version for EIP-712 */
     version?: string;
+    /** Asset transfer method: eip3009 (TransferWithAuthorization) or permit2 */
+    assetTransferMethod?: 'eip3009' | 'permit2';
   };
 }
 
@@ -147,6 +152,7 @@ function parseTtl(c: Context): number {
 
 /**
  * Build 402 Payment Required response
+ * Supports both v1 (legacy) and v2 (RelAI) formats based on config.x402Version
  */
 function buildPaymentRequiredResponse(
   c: Context,
@@ -158,7 +164,7 @@ function buildPaymentRequiredResponse(
   const hours = Math.ceil(ttlSeconds / 3600);
 
   const paymentRequired: X402PaymentRequired = {
-    x402Version: 1,
+    x402Version: config.x402Version,
     accepts: [
       {
         scheme: 'exact',
@@ -174,11 +180,17 @@ function buildPaymentRequiredResponse(
           facilitatorUrl: config.facilitatorUrl,
           name: config.paymentTokenName,
           version: config.paymentTokenVersion,
+          assetTransferMethod: config.assetTransferMethod,
         },
       },
     ],
     error: 'Payment Required',
   };
+
+  // Add extensions for v2 (empty for now, Zauth can be added later)
+  if (config.x402Version >= 2) {
+    paymentRequired.extensions = {};
+  }
 
   // Encode for header
   const headerValue = encodeHeader(paymentRequired);
@@ -190,6 +202,7 @@ function buildPaymentRequiredResponse(
 
 /**
  * Build payment requirements object (used for both verify and settle)
+ * Supports both v1 (legacy) and v2 (RelAI) formats
  */
 function buildPaymentRequirements(expectedAmount: string) {
   return {
@@ -205,6 +218,7 @@ function buildPaymentRequirements(expectedAmount: string) {
     extra: {
       name: config.paymentTokenName,
       version: config.paymentTokenVersion,
+      assetTransferMethod: config.assetTransferMethod,
     },
   };
 }
@@ -219,23 +233,32 @@ async function verifyWithFacilitator(
 ): Promise<FacilitatorVerifyResponse> {
   const paymentRequirements = buildPaymentRequirements(expectedAmount);
 
+  // Decode the base64 payment header to JSON object
+  // The facilitator expects paymentPayload as JSON, not base64
+  let decodedPaymentPayload: unknown;
+  try {
+    decodedPaymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
+  } catch (e) {
+    throw new Error('Invalid payment header: could not decode base64 JSON');
+  }
+
+  console.log(`[x402] Calling facilitator: ${config.facilitatorUrl}/verify`);
+
   const response = await fetch(`${config.facilitatorUrl}/verify`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      // Standard x402 format
-      paymentPayload: paymentHeader,
+      // x402 format: paymentPayload should be JSON object
+      paymentPayload: decodedPaymentPayload,
       paymentRequirements,
-      // Legacy format (for backwards compatibility)
-      payload: paymentHeader,
-      details: paymentRequirements,
     }),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
+    console.error(`[x402] Facilitator error: ${response.status} ${errorText}`);
     throw new Error(`Facilitator verify failed: ${response.status} ${errorText}`);
   }
 
@@ -266,17 +289,23 @@ async function settleWithFacilitator(
 ): Promise<FacilitatorSettleResponse> {
   const paymentRequirements = buildPaymentRequirements(expectedAmount);
 
+  // Decode the base64 payment header to JSON object
+  let decodedPaymentPayload: unknown;
+  try {
+    decodedPaymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
+  } catch (e) {
+    throw new Error('Invalid payment header: could not decode base64 JSON');
+  }
+
   const response = await fetch(`${config.facilitatorUrl}/settle`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      // Standard x402 format
-      paymentPayload: paymentHeader,
+      // x402 format: paymentPayload should be JSON object
+      paymentPayload: decodedPaymentPayload,
       paymentRequirements,
-      // Legacy format (for backwards compatibility)
-      payload: paymentHeader,
     }),
   });
 

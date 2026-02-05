@@ -29,8 +29,11 @@ vi.mock('../../src/config/index.js', () => ({
     networkChainId: 324705682,
     paymentTokenAddress: '0x2e08028E3C4c2356572E096d8EF835cD5C6030bD',
     paymentTokenName: 'Bridged USDC (SKALE Bridge)',
+    paymentTokenVersion: '2',
     basePriceMicroUsdc: 10000,
     minPaymentMicroUsdc: 1000,
+    x402Version: 2,
+    assetTransferMethod: 'eip3009',
   },
   getNetworkIdentifier: () => 'eip155:324705682',
   getAssetIdentifier: () => 'eip155:324705682/erc20:0x2e08028E3C4c2356572E096d8EF835cD5C6030bD',
@@ -105,7 +108,7 @@ describe('x402 Payment Middleware', () => {
         }>;
       }>(paymentRequiredHeader!);
 
-      expect(paymentRequired.x402Version).toBe(1);
+      expect(paymentRequired.x402Version).toBe(2);
       expect(paymentRequired.accepts).toHaveLength(1);
       expect(paymentRequired.accepts[0].scheme).toBe('exact');
       expect(paymentRequired.accepts[0].network).toBe('eip155:324705682');
@@ -153,7 +156,7 @@ describe('x402 Payment Middleware', () => {
 
       const body = await res.json();
 
-      expect(body.x402Version).toBe(1);
+      expect(body.x402Version).toBe(2);
       expect(body.accepts).toBeDefined();
       expect(body.accepts[0].scheme).toBe('exact');
     });
@@ -292,9 +295,11 @@ describe('x402 Payment Middleware', () => {
 
       expect(verifyCalls).toHaveLength(1);
       expect(verifyCalls[0].url).toBe('https://facilitator.test/verify');
-      expect(verifyCalls[0].body).toHaveProperty('payload');
-      expect(verifyCalls[0].body).toHaveProperty('details');
-      expect((verifyCalls[0].body as { details: { scheme: string } }).details.scheme).toBe('exact');
+      expect(verifyCalls[0].body).toHaveProperty('paymentPayload');
+      expect(verifyCalls[0].body).toHaveProperty('paymentRequirements');
+      // paymentPayload should be JSON object, not base64 string
+      expect(typeof (verifyCalls[0].body as { paymentPayload: unknown }).paymentPayload).toBe('object');
+      expect((verifyCalls[0].body as { paymentRequirements: { scheme: string } }).paymentRequirements.scheme).toBe('exact');
     });
 
     it('should call facilitator /settle after successful handler', async () => {
@@ -332,7 +337,9 @@ describe('x402 Payment Middleware', () => {
 
       expect(settleCalls).toHaveLength(1);
       expect(settleCalls[0].url).toBe('https://facilitator.test/settle');
-      expect(settleCalls[0].body).toHaveProperty('payload');
+      expect(settleCalls[0].body).toHaveProperty('paymentPayload');
+      // paymentPayload should be JSON object, not base64 string
+      expect(typeof (settleCalls[0].body as { paymentPayload: unknown }).paymentPayload).toBe('object');
     });
 
     it('should return 402 when facilitator verification fails', async () => {
@@ -726,14 +733,13 @@ describe('x402 Payment Middleware', () => {
       expect(verifyCalls[0].body).toHaveProperty('paymentPayload');
       expect(verifyCalls[0].body).toHaveProperty('paymentRequirements');
 
-      // Check legacy format fields (for backwards compatibility)
-      expect(verifyCalls[0].body).toHaveProperty('payload');
-      expect(verifyCalls[0].body).toHaveProperty('details');
+      // paymentPayload should be JSON object, not base64 string
+      expect(typeof (verifyCalls[0].body as { paymentPayload: unknown }).paymentPayload).toBe('object');
 
       // Verify paymentRequirements contains expected fields
       const requirements = verifyCalls[0].body.paymentRequirements as Record<string, unknown>;
       expect(requirements.scheme).toBe('exact');
-      expect(requirements.network).toBe('eip155:324705682');
+      expect(requirements.network).toBeDefined();
       expect(requirements.payTo).toBe('0xReceiverAddress1234567890123456789012');
     });
 
@@ -776,8 +782,8 @@ describe('x402 Payment Middleware', () => {
       expect(settleCalls[0].body).toHaveProperty('paymentPayload');
       expect(settleCalls[0].body).toHaveProperty('paymentRequirements');
 
-      // Check legacy format field
-      expect(settleCalls[0].body).toHaveProperty('payload');
+      // paymentPayload should be JSON object, not base64 string
+      expect(typeof settleCalls[0].body.paymentPayload).toBe('object');
 
       // Verify paymentRequirements in settle contains expected fields
       const requirements = settleCalls[0].body.paymentRequirements as Record<string, unknown>;

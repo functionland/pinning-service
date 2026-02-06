@@ -71,9 +71,13 @@ export async function proxyToS3(
     // Prepare request headers
     const proxyHeaders: Record<string, string> = {
       ...headers,
-      'Authorization': authHeader,
       'Host': new URL(config.s3BackendUrl).host,
     };
+
+    // Only include Authorization if non-empty (S3 rejects empty auth headers)
+    if (authHeader) {
+      proxyHeaders['Authorization'] = authHeader;
+    }
 
     // Make the request
     let response = await fetch(url, {

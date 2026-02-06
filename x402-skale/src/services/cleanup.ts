@@ -1,12 +1,16 @@
 /**
  * Cleanup Cron Service
  *
- * Periodically cleans up expired ephemeral objects by deleting users from S3.
- * When a user's TTL expires, we delete the entire user via S3 admin API,
- * which cascades and deletes all their CIDs automatically.
+ * Periodically cleans up expired ephemeral objects by deleting individual
+ * objects from S3 using the admin token.
+ *
+ * Two-phase cleanup:
+ * - Phase 1: Aggressive cleanup of unpaid objects (objects where payment was never settled)
+ * - Phase 2: Normal TTL-based cleanup for paid objects whose TTL has expired
  */
 
-import { getExpiredObjects, getUnpaidExpiredObjects, markObjectDeleted, markAllUserObjectsDeleted } from '../database/repositories/ephemeralObjects.js';
+import { getExpiredObjects, getUnpaidExpiredObjects, markObjectDeleted } from '../database/repositories/ephemeralObjects.js';
+import { deleteObject } from './s3Proxy.js';
 import { config } from '../config/index.js';
 
 // Cleanup interval (60 seconds)
@@ -50,36 +54,22 @@ export function stopCleanupCron(): void {
 }
 
 /**
- * Delete user from S3 admin API
- * This deletes the user AND all their CIDs automatically (cascading delete)
- *
- * @param userId - The user's identity (JWT sub claim, typically email like user@example.com)
+ * Delete a single object from S3 using admin token
  */
-async function deleteUserFromS3(userId: string): Promise<boolean> {
-  // userId is the JWT sub claim (e.g., ehsan6sha@gmail.com)
-  // URL encode it because @ becomes %40
+async function deleteObjectFromS3(bucket: string, key: string): Promise<boolean> {
   try {
-    const url = `${config.s3BackendUrl}/admin/users/${encodeURIComponent(userId)}`;
-    console.log(`[cleanup] Deleting user: ${userId}`);
+    console.log(`[cleanup] Deleting object: ${bucket}/${key}`);
+    const success = await deleteObject(bucket, key, `Bearer ${config.s3AdminToken}`);
 
-    const response = await fetch(url, {
-      method: 'DELETE',
-      headers: {
-        'Authorization': `Bearer ${config.s3AdminToken}`,
-      },
-    });
-
-    // 200/204 = deleted, 404 = already gone (success either way)
-    if (response.ok || response.status === 404) {
-      console.log(`[cleanup] User deleted successfully: ${userId}`);
-      return true;
+    if (success) {
+      console.log(`[cleanup] Object deleted: ${bucket}/${key}`);
+    } else {
+      console.error(`[cleanup] Failed to delete object: ${bucket}/${key}`);
     }
 
-    const errorText = await response.text();
-    console.error(`[cleanup] S3 admin delete failed: ${response.status} ${errorText}`);
-    return false;
+    return success;
   } catch (error) {
-    console.error(`[cleanup] S3 delete user error for ${userId}:`, error);
+    console.error(`[cleanup] Error deleting object ${bucket}/${key}:`, error);
     return false;
   }
 }
@@ -110,22 +100,22 @@ async function runCleanup(): Promise<void> {
     );
 
     if (unpaidObjects.length > 0) {
-      const unpaidUserIds = [...new Set(unpaidObjects.map(obj => obj.wallet))];
-      console.log(`[cleanup] Phase 1: Processing ${unpaidUserIds.length} users with ${unpaidObjects.length} unpaid objects (>${config.cleanupUnpaidThresholdMinutes}min old)`);
+      console.log(`[cleanup] Phase 1: Processing ${unpaidObjects.length} unpaid objects (>${config.cleanupUnpaidThresholdMinutes}min old)`);
 
-      for (const userId of unpaidUserIds) {
+      for (const obj of unpaidObjects) {
         try {
-          const success = await deleteUserFromS3(userId);
+          const success = await deleteObjectFromS3(obj.bucket, obj.object_key);
           if (success) {
-            await markAllUserObjectsDeleted(userId);
+            await markObjectDeleted(obj.id);
             deleted++;
-            console.log(`[cleanup] Cleaned up unpaid user: ${userId}`);
           } else {
+            await markObjectDeleted(obj.id, 'S3 delete failed');
             errors++;
           }
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-          console.error(`[cleanup] Error cleaning up unpaid user ${userId}:`, errorMsg);
+          console.error(`[cleanup] Error cleaning up unpaid object ${obj.bucket}/${obj.object_key}:`, errorMsg);
+          await markObjectDeleted(obj.id, errorMsg).catch(() => {});
           errors++;
         }
       }
@@ -135,26 +125,22 @@ async function runCleanup(): Promise<void> {
     const expiredObjects = await getExpiredObjects(CLEANUP_BATCH_SIZE);
 
     if (expiredObjects.length > 0) {
-      // Group by user ID to delete users (not individual objects)
-      // wallet field stores the user_id (JWT sub claim, e.g., email)
-      const userIds = [...new Set(expiredObjects.map(obj => obj.wallet))];
-      console.log(`[cleanup] Phase 2: Processing ${userIds.length} users with ${expiredObjects.length} expired objects`);
+      console.log(`[cleanup] Phase 2: Processing ${expiredObjects.length} expired objects`);
 
-      for (const userId of userIds) {
+      for (const obj of expiredObjects) {
         try {
-          const success = await deleteUserFromS3(userId);
-
+          const success = await deleteObjectFromS3(obj.bucket, obj.object_key);
           if (success) {
-            // Mark ALL objects for this user as deleted in our database
-            await markAllUserObjectsDeleted(userId);
+            await markObjectDeleted(obj.id);
             deleted++;
-            console.log(`[cleanup] Cleaned up user: ${userId}`);
           } else {
+            await markObjectDeleted(obj.id, 'S3 delete failed');
             errors++;
           }
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-          console.error(`[cleanup] Error cleaning up user ${userId}:`, errorMsg);
+          console.error(`[cleanup] Error cleaning up expired object ${obj.bucket}/${obj.object_key}:`, errorMsg);
+          await markObjectDeleted(obj.id, errorMsg).catch(() => {});
           errors++;
         }
       }
@@ -168,7 +154,7 @@ async function runCleanup(): Promise<void> {
 
   const duration = Date.now() - startTime;
   if (deleted > 0 || errors > 0) {
-    console.log(`[cleanup] Completed in ${duration}ms: ${deleted} users deleted, ${errors} errors`);
+    console.log(`[cleanup] Completed in ${duration}ms: ${deleted} objects deleted, ${errors} errors`);
   }
 }
 
@@ -186,16 +172,14 @@ export async function triggerCleanup(): Promise<{
 
   const expiredObjects = await getExpiredObjects(100);
 
-  // Group by user ID (stored in wallet field)
-  const userIds = [...new Set(expiredObjects.map(obj => obj.wallet))];
-
-  for (const userId of userIds) {
+  for (const obj of expiredObjects) {
     try {
-      const success = await deleteUserFromS3(userId);
+      const success = await deleteObjectFromS3(obj.bucket, obj.object_key);
       if (success) {
-        await markAllUserObjectsDeleted(userId);
+        await markObjectDeleted(obj.id);
         deleted++;
       } else {
+        await markObjectDeleted(obj.id, 'S3 delete failed');
         errors++;
       }
     } catch (error) {

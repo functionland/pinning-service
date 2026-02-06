@@ -9,6 +9,7 @@ import type { Env, HealthResponse } from '../types/index.js';
 import { query } from '../database/index.js';
 import { getPricingInfo, getPricingConfig } from '../services/pricing.js';
 import { getCleanupStats } from '../database/repositories/ephemeralObjects.js';
+import { triggerCleanup } from '../services/cleanup.js';
 
 const startTime = Date.now();
 
@@ -77,6 +78,25 @@ healthRoutes.get('/pricing', (c) => {
   return c.json({
     ...getPricingConfig(),
     ...getPricingInfo(),
+  });
+});
+
+/**
+ * POST /health/cleanup
+ *
+ * Manually trigger cleanup of expired objects (for testing).
+ * Protected by admin token.
+ */
+healthRoutes.post('/cleanup', async (c) => {
+  const auth = c.req.header('Authorization');
+  if (!auth || !auth.includes(process.env.S3_ADMIN_TOKEN || '__never_match__')) {
+    return c.json({ error: 'Admin token required' }, 403);
+  }
+
+  const result = await triggerCleanup();
+  return c.json({
+    ...result,
+    timestamp: new Date().toISOString(),
   });
 });
 

@@ -9,6 +9,47 @@ import { config } from '../config/index.js';
 import type { S3ProxyRequest, S3ProxyResponse } from '../types/index.js';
 
 /**
+ * Create an S3 bucket
+ * Uses the admin token to create buckets since regular users may not have permission.
+ */
+async function createBucket(bucket: string, authHeader: string): Promise<boolean> {
+  const url = `${config.s3BackendUrl}/${bucket}`;
+  try {
+    // Try with the provided auth header first
+    let response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': authHeader,
+        'Host': new URL(config.s3BackendUrl).host,
+      },
+    });
+
+    // If forbidden, try with admin token
+    if (!response.ok && config.s3AdminToken) {
+      response = await fetch(url, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${config.s3AdminToken}`,
+          'Host': new URL(config.s3BackendUrl).host,
+        },
+      });
+    }
+
+    if (response.ok) {
+      console.log(`[s3-proxy] Bucket '${bucket}' created successfully`);
+      return true;
+    }
+
+    const errorText = await response.text();
+    console.error(`[s3-proxy] Failed to create bucket '${bucket}': ${response.status} ${errorText}`);
+    return false;
+  } catch (error) {
+    console.error(`[s3-proxy] Error creating bucket '${bucket}':`, error);
+    return false;
+  }
+}
+
+/**
  * Proxy a request to the S3 backend
  *
  * @param request - The proxy request parameters
@@ -35,13 +76,57 @@ export async function proxyToS3(
     };
 
     // Make the request
-    const response = await fetch(url, {
+    let response = await fetch(url, {
       method,
       headers: proxyHeaders,
       body: body instanceof Buffer ? body : (body as RequestInit['body']),
       // @ts-ignore - duplex is needed for streaming bodies
       duplex: body ? 'half' : undefined,
     });
+
+    // Auto-create bucket on NoSuchBucket error (PUT only)
+    if (!response.ok && method === 'PUT') {
+      const errorText = await response.text();
+      if (errorText.includes('NoSuchBucket')) {
+        console.log(`[s3-proxy] Bucket '${bucket}' not found, auto-creating...`);
+        const created = await createBucket(bucket, authHeader);
+        if (created) {
+          console.log(`[s3-proxy] Bucket '${bucket}' created, retrying upload...`);
+          response = await fetch(url, {
+            method,
+            headers: proxyHeaders,
+            body: body instanceof Buffer ? body : (body as RequestInit['body']),
+            // @ts-ignore
+            duplex: body ? 'half' : undefined,
+          });
+        } else {
+          // Bucket creation failed, return original error
+          const responseHeaders: Record<string, string> = {};
+          response.headers.forEach((value, name) => {
+            responseHeaders[name.toLowerCase()] = value;
+          });
+          return {
+            success: false,
+            status: response.status,
+            error: errorText || `S3 error: ${response.status}`,
+            headers: responseHeaders,
+          };
+        }
+      } else {
+        // Non-bucket error on PUT
+        console.error(`[s3-proxy] Error ${response.status}: ${errorText}`);
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((value, name) => {
+          responseHeaders[name.toLowerCase()] = value;
+        });
+        return {
+          success: false,
+          status: response.status,
+          error: errorText || `S3 error: ${response.status}`,
+          headers: responseHeaders,
+        };
+      }
+    }
 
     // Extract response headers
     const responseHeaders: Record<string, string> = {};

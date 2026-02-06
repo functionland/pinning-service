@@ -204,12 +204,12 @@ function buildPaymentRequiredResponse(
  * Build payment requirements object (used for both verify and settle)
  * Supports both v1 (legacy) and v2 (RelAI) formats
  */
-function buildPaymentRequirements(expectedAmount: string) {
+function buildPaymentRequirements(expectedAmount: string, resource: string) {
   return {
     scheme: 'exact' as const,
     network: getNetworkIdentifier(),
     maxAmountRequired: expectedAmount,
-    resource: '*', // Accept any resource
+    resource,
     description: 'x402-skale storage payment',
     mimeType: 'application/octet-stream',
     payTo: config.receivingAddress,
@@ -229,9 +229,10 @@ function buildPaymentRequirements(expectedAmount: string) {
  */
 async function verifyWithFacilitator(
   paymentHeader: string,
-  expectedAmount: string
+  expectedAmount: string,
+  resource: string
 ): Promise<FacilitatorVerifyResponse> {
-  const paymentRequirements = buildPaymentRequirements(expectedAmount);
+  const paymentRequirements = buildPaymentRequirements(expectedAmount, resource);
 
   console.log(`[x402] Calling facilitator: ${config.facilitatorUrl}/verify`);
 
@@ -295,9 +296,10 @@ async function verifyWithFacilitator(
  */
 async function settleWithFacilitator(
   paymentHeader: string,
-  expectedAmount: string
+  expectedAmount: string,
+  resource: string
 ): Promise<FacilitatorSettleResponse> {
-  const paymentRequirements = buildPaymentRequirements(expectedAmount);
+  const paymentRequirements = buildPaymentRequirements(expectedAmount, resource);
 
   let requestBody: Record<string, unknown>;
 
@@ -386,7 +388,8 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
 
     const verification = await verifyWithFacilitator(
       paymentHeader,
-      requiredMicroUsdc.toString()
+      requiredMicroUsdc.toString(),
+      c.req.url
     );
 
     if (!verification.valid) {
@@ -439,7 +442,7 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
       console.log(`[x402] Settling payment ${paymentInfo.paymentId}...`);
 
       const expectedAmount = c.get('x402ExpectedAmount') || requiredMicroUsdc.toString();
-      const settlement = await settleWithFacilitator(paymentHeader, expectedAmount);
+      const settlement = await settleWithFacilitator(paymentHeader, expectedAmount, c.req.url);
 
       if (settlement.success) {
         console.log(`[x402] Payment settled: ${paymentInfo.paymentId}, tx: ${settlement.txHash}`);

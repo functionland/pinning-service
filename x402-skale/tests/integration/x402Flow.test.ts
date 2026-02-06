@@ -21,7 +21,7 @@ import {
   decodeBase64,
 } from '../mocks/facilitator.js';
 
-// Mock config
+// Mock config - v1 (Corbits) format
 vi.mock('../../src/config/index.js', () => ({
   config: {
     port: 4002,
@@ -41,7 +41,7 @@ vi.mock('../../src/config/index.js', () => ({
     minPaymentMicroUsdc: 1000,
     fulaExchangeRate: 1.0,
     jwtSecret: undefined,
-    x402Version: 2,
+    x402Version: 1,
     assetTransferMethod: 'eip3009',
   },
   getNetworkIdentifier: () => 'skale-base-spolia',
@@ -303,9 +303,10 @@ describe('x402 Flow Integration Tests', () => {
       expect(verifyCall!.method).toBe('POST');
       expect(verifyCall!.headers['Content-Type']).toBe('application/json');
 
-      // Verify request body structure (x402 standard format)
+      // Verify request body structure (x402 v1 format)
       const verifyBody = verifyCall!.body as {
-        paymentPayload: unknown;
+        x402Version: number;
+        paymentHeader: string;
         paymentRequirements: {
           scheme: string;
           network: string;
@@ -315,8 +316,9 @@ describe('x402 Flow Integration Tests', () => {
         };
       };
 
-      expect(verifyBody.paymentPayload).toBeDefined();
-      expect(typeof verifyBody.paymentPayload).toBe('object');
+      expect(verifyBody.x402Version).toBe(1);
+      expect(verifyBody.paymentHeader).toBeDefined();
+      expect(typeof verifyBody.paymentHeader).toBe('string'); // base64 string in v1
       expect(verifyBody.paymentRequirements.scheme).toBe('exact');
       expect(verifyBody.paymentRequirements.network).toBe('skale-base-spolia');
       expect(verifyBody.paymentRequirements.payTo).toBe('0xReceiverAddress1234567890123456789012');
@@ -347,9 +349,10 @@ describe('x402 Flow Integration Tests', () => {
       expect(settleCall).toBeDefined();
       expect(settleCall!.method).toBe('POST');
 
-      const settleBody = settleCall!.body as { paymentPayload: unknown; paymentRequirements: unknown };
-      expect(settleBody.paymentPayload).toBeDefined();
-      expect(typeof settleBody.paymentPayload).toBe('object');
+      const settleBody = settleCall!.body as { x402Version: number; paymentHeader: string; paymentRequirements: unknown };
+      expect(settleBody.x402Version).toBe(1);
+      expect(settleBody.paymentHeader).toBeDefined();
+      expect(typeof settleBody.paymentHeader).toBe('string'); // base64 string in v1
       expect(settleBody.paymentRequirements).toBeDefined();
     });
   });
@@ -395,8 +398,8 @@ describe('x402 Flow Integration Tests', () => {
         }>;
       }>(paymentRequiredHeader!);
 
-      // Verify structure matches x402 v2 standard
-      expect(paymentRequired.x402Version).toBe(2);
+      // Verify structure matches x402 v1 format
+      expect(paymentRequired.x402Version).toBe(1);
       expect(paymentRequired.accepts).toHaveLength(1);
 
       const accept = paymentRequired.accepts[0];
@@ -427,7 +430,7 @@ describe('x402 Flow Integration Tests', () => {
       expect(res.status).toBe(402);
 
       const body = await res.json();
-      expect(body.x402Version).toBe(2);
+      expect(body.x402Version).toBe(1);
       expect(body.accepts).toBeDefined();
       expect(body.error).toBe('Payment Required');
     });
@@ -473,7 +476,7 @@ describe('x402 Flow Integration Tests', () => {
 
       expect(res.status).toBe(402);
       const body = await res.json();
-      expect(body.x402Version).toBe(2);
+      expect(body.x402Version).toBe(1);
       expect(body.accepts).toBeDefined();
     });
 

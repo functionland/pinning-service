@@ -6,7 +6,7 @@
  * 1. Creating a "Hello World" file
  * 2. Signing an x402 payment with a real wallet
  * 3. Uploading the file using only x402 (no JWT)
- * 4. Displaying the result
+ * 4. Downloading the file and verifying content
  *
  * Usage:
  *   npx tsx scripts/test-x402-upload.ts <private-key> [endpoint] [bucket]
@@ -24,6 +24,15 @@
 
 import { privateKeyToAccount } from 'viem/accounts';
 import { createWalletClient, http, type Hex, encodePacked, keccak256 } from 'viem';
+
+// Known network name → chain ID lookup
+const KNOWN_NETWORKS: Record<string, number> = {
+  'skale-base': 1187947933,
+  'skale-base-testnet': 324705682,
+  'skale-base-spolia': 324705682,
+  'base-sepolia': 84532,
+  'base': 8453,
+};
 
 // ============================================
 // Configuration
@@ -110,6 +119,8 @@ interface PaymentRequirements {
   chainId: number;
   network: string;
   tokenName: string;
+  tokenVersion: string;
+  tokenAddress: string;
 }
 
 /**
@@ -164,8 +175,9 @@ async function signX402Payment(
   // EIP-712 Domain - dynamically set from server's 402 response
   const domain = {
     name: requirements.tokenName,
-    version: '1',
+    version: requirements.tokenVersion,
     chainId: requirements.chainId,
+    verifyingContract: requirements.tokenAddress as Hex,
   };
 
   console.log('  Signing payment with EIP-712...');
@@ -174,6 +186,8 @@ async function signX402Payment(
   console.log(`  Amount: ${requirements.requiredAmount} microUSDC ($${(parseInt(requirements.requiredAmount) / 1_000_000).toFixed(6)})`);
   console.log(`  Chain ID: ${requirements.chainId}`);
   console.log(`  Token Name: ${requirements.tokenName}`);
+  console.log(`  Token Version: ${requirements.tokenVersion}`);
+  console.log(`  Verifying Contract: ${requirements.tokenAddress}`);
 
   // Sign with EIP-712
   const signature = await walletClient.signTypedData({
@@ -274,21 +288,49 @@ async function getPaymentRequirements(
       extra?: {
         name?: string;
         version?: string;
+        chainId?: number;
       };
     }>;
   };
 
   const accept = paymentRequired.accepts[0];
 
-  // Extract chain ID from network string (e.g., "eip155:1187947933" -> 1187947933)
-  const chainIdMatch = accept.network.match(/eip155:(\d+)/);
-  if (!chainIdMatch) {
-    throw new Error(`Invalid network format: ${accept.network}`);
-  }
-  const chainId = parseInt(chainIdMatch[1], 10);
+  // Multi-strategy chain ID resolution
+  let chainId: number | undefined;
 
-  // Get token name from extra field or use default
+  // Strategy 1: CAIP-2 format (eip155:<chainId>)
+  const chainIdMatch = accept.network.match(/eip155:(\d+)/);
+  if (chainIdMatch) {
+    chainId = parseInt(chainIdMatch[1], 10);
+  }
+
+  // Strategy 2: Known network name lookup
+  if (!chainId) {
+    chainId = KNOWN_NETWORKS[accept.network];
+  }
+
+  // Strategy 3: extra.chainId from server response
+  if (!chainId && accept.extra?.chainId) {
+    chainId = accept.extra.chainId;
+  }
+
+  // Strategy 4: Environment variable fallback
+  if (!chainId && process.env.NETWORK_CHAIN_ID) {
+    chainId = parseInt(process.env.NETWORK_CHAIN_ID, 10);
+  }
+
+  if (!chainId) {
+    throw new Error(
+      `Could not resolve chain ID from network "${accept.network}". ` +
+      `Not a CAIP-2 format, not in known networks (${Object.keys(KNOWN_NETWORKS).join(', ')}), ` +
+      `no extra.chainId in response, and NETWORK_CHAIN_ID env var not set.`
+    );
+  }
+
+  // Get token name and version from extra field or use defaults
   const tokenName = accept.extra?.name || 'USD Coin';
+  const tokenVersion = accept.extra?.version || '2';
+  const tokenAddress = accept.asset;
 
   console.log(`  Required: ${accept.maxAmountRequired} microUSDC`);
   console.log(`  Pay to: ${accept.payTo}`);
@@ -296,6 +338,7 @@ async function getPaymentRequirements(
   console.log(`  Chain ID: ${chainId}`);
   console.log(`  Asset: ${accept.asset}`);
   console.log(`  Token Name: ${tokenName}`);
+  console.log(`  Token Version: ${tokenVersion}`);
 
   return {
     requiredAmount: accept.maxAmountRequired,
@@ -303,11 +346,13 @@ async function getPaymentRequirements(
     chainId,
     network: accept.network,
     tokenName,
+    tokenVersion,
+    tokenAddress,
   };
 }
 
 /**
- * Step 2: Upload with x402 payment
+ * Step 3: Upload with x402 payment
  */
 async function uploadWithPayment(
   endpoint: string,
@@ -369,6 +414,48 @@ async function uploadWithPayment(
   };
 }
 
+/**
+ * Step 4: Download and verify uploaded content
+ */
+async function downloadAndVerify(
+  endpoint: string,
+  bucket: string,
+  key: string,
+  expectedContent: string
+): Promise<{ success: boolean; status: number; contentMatch: boolean; downloadedContent?: string }> {
+  console.log('\n[Step 4] Downloading and verifying content...');
+  console.log(`  GET ${endpoint}/${bucket}/${key}`);
+
+  const response = await fetch(`${endpoint}/${bucket}/${key}`, {
+    method: 'GET',
+  });
+
+  console.log(`  Status: ${response.status}`);
+
+  if (response.status !== 200) {
+    const text = await response.text();
+    console.log(`  Error: ${text}`);
+    return { success: false, status: response.status, contentMatch: false };
+  }
+
+  const downloadedContent = await response.text();
+  const contentMatch = downloadedContent === expectedContent;
+
+  console.log(`  Content length: ${downloadedContent.length} bytes`);
+  console.log(`  Content match: ${contentMatch ? 'YES' : 'NO'}`);
+
+  if (contentMatch) {
+    const preview = downloadedContent.substring(0, 80);
+    console.log(`  Preview: "${preview}${downloadedContent.length > 80 ? '...' : ''}"`);
+  } else {
+    console.log(`  Expected length: ${expectedContent.length}, Got: ${downloadedContent.length}`);
+    console.log(`  Expected preview: "${expectedContent.substring(0, 60)}..."`);
+    console.log(`  Got preview:      "${downloadedContent.substring(0, 60)}..."`);
+  }
+
+  return { success: true, status: response.status, contentMatch, downloadedContent };
+}
+
 // ============================================
 // Main
 // ============================================
@@ -426,15 +513,26 @@ async function main() {
       paymentHeader
     );
 
+    // Step 4: Download and verify (only if upload succeeded)
+    let downloadResult: { success: boolean; status: number; contentMatch: boolean } | undefined;
+    if (result.success) {
+      downloadResult = await downloadAndVerify(
+        config.endpoint,
+        config.bucket,
+        config.fileName,
+        config.fileContent
+      );
+    }
+
     // Display results
     console.log('\n' + '='.repeat(60));
     console.log('RESULT');
     console.log('='.repeat(60));
 
     if (result.success) {
-      console.log('\n  STATUS: SUCCESS');
+      console.log('\n  UPLOAD: SUCCESS');
     } else {
-      console.log('\n  STATUS: FAILED');
+      console.log('\n  UPLOAD: FAILED');
     }
 
     console.log(`  HTTP Status: ${result.status}`);
@@ -447,6 +545,11 @@ async function main() {
       console.log(JSON.stringify(result.paymentResponse, null, 4).split('\n').map(l => '    ' + l).join('\n'));
     }
 
+    if (downloadResult) {
+      console.log(`\n  DOWNLOAD: ${downloadResult.success ? 'SUCCESS' : 'FAILED'} (HTTP ${downloadResult.status})`);
+      console.log(`  CONTENT VERIFIED: ${downloadResult.contentMatch ? 'YES' : 'NO'}`);
+    }
+
     console.log('\n' + '='.repeat(60));
 
     if (result.success) {
@@ -457,6 +560,9 @@ async function main() {
       }
       if (body.cid) {
         console.log(`CID: ${body.cid}`);
+      }
+      if (downloadResult?.contentMatch) {
+        console.log(`Download verified: content matches uploaded data.`);
       }
       console.log(`\nThe file was uploaded using x402 payment only (no JWT).`);
       console.log(`User was auto-created with email: ${account.address.toLowerCase()}@walletpayment.fx.land`);
@@ -472,7 +578,7 @@ async function main() {
         console.log('  3. The facilitator service might be temporarily unavailable');
         console.log('  4. The payment payload format might not match the facilitator\'s expectations');
         console.log('\nTo debug, run with DEBUG=1 to see the exact payment payload being sent.');
-        console.log('You can also check the facilitator status at: https://facilitator.dirtroad.dev/health');
+        console.log('You can also check the facilitator status at: https://facilitator.corbits.dev/health');
       }
 
       process.exit(1);

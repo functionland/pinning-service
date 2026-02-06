@@ -6,7 +6,7 @@
  * which cascades and deletes all their CIDs automatically.
  */
 
-import { getExpiredObjects, markObjectDeleted, markAllUserObjectsDeleted } from '../database/repositories/ephemeralObjects.js';
+import { getExpiredObjects, getUnpaidExpiredObjects, markObjectDeleted, markAllUserObjectsDeleted } from '../database/repositories/ephemeralObjects.js';
 import { config } from '../config/index.js';
 
 // Cleanup interval (60 seconds)
@@ -87,9 +87,8 @@ async function deleteUserFromS3(userId: string): Promise<boolean> {
 /**
  * Run a single cleanup cycle
  *
- * 1. Get wallets with expired objects
- * 2. Delete each user via S3 admin API (cascades to all CIDs)
- * 3. Mark all user's objects as deleted in database
+ * Phase 1: Aggressive cleanup of unpaid objects (configurable threshold, default 30 min)
+ * Phase 2: Normal TTL-based cleanup for paid/settled objects
  */
 async function runCleanup(): Promise<void> {
   if (isRunning) {
@@ -103,35 +102,61 @@ async function runCleanup(): Promise<void> {
   let errors = 0;
 
   try {
-    // Get expired objects (async)
-    const expiredObjects = await getExpiredObjects(CLEANUP_BATCH_SIZE);
+    // Phase 1: Aggressive cleanup of unpaid objects
+    // These are objects where payment was never completed (no payment log, or pending/failed)
+    const unpaidObjects = await getUnpaidExpiredObjects(
+      config.cleanupUnpaidThresholdMinutes,
+      CLEANUP_BATCH_SIZE
+    );
 
-    if (expiredObjects.length === 0) {
-      isRunning = false;
-      return;
-    }
+    if (unpaidObjects.length > 0) {
+      const unpaidUserIds = [...new Set(unpaidObjects.map(obj => obj.wallet))];
+      console.log(`[cleanup] Phase 1: Processing ${unpaidUserIds.length} users with ${unpaidObjects.length} unpaid objects (>${config.cleanupUnpaidThresholdMinutes}min old)`);
 
-    // Group by user ID to delete users (not individual objects)
-    // wallet field stores the user_id (JWT sub claim, e.g., email)
-    const userIds = [...new Set(expiredObjects.map(obj => obj.wallet))];
-    console.log(`[cleanup] Processing ${userIds.length} users with ${expiredObjects.length} expired objects`);
-
-    for (const userId of userIds) {
-      try {
-        const success = await deleteUserFromS3(userId);
-
-        if (success) {
-          // Mark ALL objects for this user as deleted in our database
-          await markAllUserObjectsDeleted(userId);
-          deleted++;
-          console.log(`[cleanup] Cleaned up user: ${userId}`);
-        } else {
+      for (const userId of unpaidUserIds) {
+        try {
+          const success = await deleteUserFromS3(userId);
+          if (success) {
+            await markAllUserObjectsDeleted(userId);
+            deleted++;
+            console.log(`[cleanup] Cleaned up unpaid user: ${userId}`);
+          } else {
+            errors++;
+          }
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+          console.error(`[cleanup] Error cleaning up unpaid user ${userId}:`, errorMsg);
           errors++;
         }
-      } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-        console.error(`[cleanup] Error cleaning up user ${userId}:`, errorMsg);
-        errors++;
+      }
+    }
+
+    // Phase 2: Normal TTL-based cleanup for paid/settled objects
+    const expiredObjects = await getExpiredObjects(CLEANUP_BATCH_SIZE);
+
+    if (expiredObjects.length > 0) {
+      // Group by user ID to delete users (not individual objects)
+      // wallet field stores the user_id (JWT sub claim, e.g., email)
+      const userIds = [...new Set(expiredObjects.map(obj => obj.wallet))];
+      console.log(`[cleanup] Phase 2: Processing ${userIds.length} users with ${expiredObjects.length} expired objects`);
+
+      for (const userId of userIds) {
+        try {
+          const success = await deleteUserFromS3(userId);
+
+          if (success) {
+            // Mark ALL objects for this user as deleted in our database
+            await markAllUserObjectsDeleted(userId);
+            deleted++;
+            console.log(`[cleanup] Cleaned up user: ${userId}`);
+          } else {
+            errors++;
+          }
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+          console.error(`[cleanup] Error cleaning up user ${userId}:`, errorMsg);
+          errors++;
+        }
       }
     }
 

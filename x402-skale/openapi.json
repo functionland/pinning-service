@@ -166,7 +166,7 @@
                   "$ref": "#/components/schemas/PaymentRequired"
                 },
                 "example": {
-                  "x402Version": 2,
+                  "x402Version": 1,
                   "accepts": [
                     {
                       "scheme": "exact",
@@ -176,14 +176,13 @@
                       "asset": "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20",
                       "description": "Storage: 1.00 MB for 24 hours",
                       "extra": {
-                        "facilitatorUrl": "https://facilitator.x402.fi",
+                        "facilitatorUrl": "https://facilitator.corbits.dev",
                         "name": "USDC",
                         "version": "1",
                         "assetTransferMethod": "eip3009"
                       }
                     }
                   ],
-                  "extensions": {},
                   "error": "Payment Required"
                 }
               }
@@ -495,7 +494,7 @@
         "properties": {
           "x402Version": {
             "type": "integer",
-            "example": 2
+            "example": 1
           },
           "accepts": {
             "type": "array",
@@ -505,7 +504,7 @@
           },
           "extensions": {
             "type": "object",
-            "description": "x402 v2 extensions (empty for now)"
+            "description": "x402 v2 extensions (only present for v2, omitted for v1)"
           },
           "error": {
             "type": "string",

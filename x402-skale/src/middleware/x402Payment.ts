@@ -225,7 +225,7 @@ function buildPaymentRequirements(expectedAmount: string) {
 
 /**
  * Verify payment with facilitator
- * Supports both standard x402 format (paymentPayload/isValid) and legacy format (payload/valid)
+ * Supports both v1 (Corbits - paymentHeader as base64) and v2 (RelAI - paymentPayload as JSON)
  */
 async function verifyWithFacilitator(
   paymentHeader: string,
@@ -233,27 +233,37 @@ async function verifyWithFacilitator(
 ): Promise<FacilitatorVerifyResponse> {
   const paymentRequirements = buildPaymentRequirements(expectedAmount);
 
-  // Decode the base64 payment header to JSON object
-  // The facilitator expects paymentPayload as JSON, not base64
-  let decodedPaymentPayload: unknown;
-  try {
-    decodedPaymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
-  } catch (e) {
-    throw new Error('Invalid payment header: could not decode base64 JSON');
-  }
-
   console.log(`[x402] Calling facilitator: ${config.facilitatorUrl}/verify`);
+
+  let requestBody: Record<string, unknown>;
+
+  if (config.x402Version === 1) {
+    // v1 (Corbits): Send paymentHeader as base64 string
+    requestBody = {
+      x402Version: 1,
+      paymentHeader: paymentHeader,
+      paymentRequirements,
+    };
+  } else {
+    // v2 (RelAI): Decode and send paymentPayload as JSON object
+    let decodedPaymentPayload: unknown;
+    try {
+      decodedPaymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
+    } catch (e) {
+      throw new Error('Invalid payment header: could not decode base64 JSON');
+    }
+    requestBody = {
+      paymentPayload: decodedPaymentPayload,
+      paymentRequirements,
+    };
+  }
 
   const response = await fetch(`${config.facilitatorUrl}/verify`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      // x402 format: paymentPayload should be JSON object
-      paymentPayload: decodedPaymentPayload,
-      paymentRequirements,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
@@ -281,7 +291,7 @@ async function verifyWithFacilitator(
 
 /**
  * Settle payment with facilitator
- * Supports both standard x402 format (paymentPayload/paymentRequirements) and legacy format
+ * Supports both v1 (Corbits - paymentHeader as base64) and v2 (RelAI - paymentPayload as JSON)
  */
 async function settleWithFacilitator(
   paymentHeader: string,
@@ -289,12 +299,27 @@ async function settleWithFacilitator(
 ): Promise<FacilitatorSettleResponse> {
   const paymentRequirements = buildPaymentRequirements(expectedAmount);
 
-  // Decode the base64 payment header to JSON object
-  let decodedPaymentPayload: unknown;
-  try {
-    decodedPaymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
-  } catch (e) {
-    throw new Error('Invalid payment header: could not decode base64 JSON');
+  let requestBody: Record<string, unknown>;
+
+  if (config.x402Version === 1) {
+    // v1 (Corbits): Send paymentHeader as base64 string
+    requestBody = {
+      x402Version: 1,
+      paymentHeader: paymentHeader,
+      paymentRequirements,
+    };
+  } else {
+    // v2 (RelAI): Decode and send paymentPayload as JSON object
+    let decodedPaymentPayload: unknown;
+    try {
+      decodedPaymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
+    } catch (e) {
+      throw new Error('Invalid payment header: could not decode base64 JSON');
+    }
+    requestBody = {
+      paymentPayload: decodedPaymentPayload,
+      paymentRequirements,
+    };
   }
 
   const response = await fetch(`${config.facilitatorUrl}/settle`, {
@@ -302,11 +327,7 @@ async function settleWithFacilitator(
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      // x402 format: paymentPayload should be JSON object
-      paymentPayload: decodedPaymentPayload,
-      paymentRequirements,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
@@ -316,11 +337,11 @@ async function settleWithFacilitator(
 
   const result = await response.json() as Record<string, unknown>;
 
-  // Normalize response to support both standard and legacy formats
+  // Normalize response to support both v1 (txHash) and v2 (transaction) formats
   return {
     success: result.success as boolean,
-    // Standard uses transaction, legacy uses txHash
-    txHash: (result.transaction ?? result.txHash) as string | undefined,
+    // v2 uses transaction, v1 uses txHash
+    txHash: (result.txHash ?? result.transaction) as string | undefined,
     network: result.network as string | undefined,
     error: result.error as string | undefined,
   };

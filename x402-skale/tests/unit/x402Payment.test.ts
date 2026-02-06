@@ -21,7 +21,7 @@ import {
   decodeBase64,
 } from '../mocks/facilitator.js';
 
-// Mock config
+// Mock config - v1 (Corbits) format
 vi.mock('../../src/config/index.js', () => ({
   config: {
     facilitatorUrl: 'https://facilitator.test',
@@ -32,7 +32,7 @@ vi.mock('../../src/config/index.js', () => ({
     paymentTokenVersion: '2',
     basePriceMicroUsdc: 10000,
     minPaymentMicroUsdc: 1000,
-    x402Version: 2,
+    x402Version: 1,
     assetTransferMethod: 'eip3009',
   },
   getNetworkIdentifier: () => 'eip155:324705682',
@@ -108,7 +108,7 @@ describe('x402 Payment Middleware', () => {
         }>;
       }>(paymentRequiredHeader!);
 
-      expect(paymentRequired.x402Version).toBe(2);
+      expect(paymentRequired.x402Version).toBe(1);
       expect(paymentRequired.accepts).toHaveLength(1);
       expect(paymentRequired.accepts[0].scheme).toBe('exact');
       expect(paymentRequired.accepts[0].network).toBe('eip155:324705682');
@@ -156,7 +156,7 @@ describe('x402 Payment Middleware', () => {
 
       const body = await res.json();
 
-      expect(body.x402Version).toBe(2);
+      expect(body.x402Version).toBe(1);
       expect(body.accepts).toBeDefined();
       expect(body.accepts[0].scheme).toBe('exact');
     });
@@ -295,10 +295,12 @@ describe('x402 Payment Middleware', () => {
 
       expect(verifyCalls).toHaveLength(1);
       expect(verifyCalls[0].url).toBe('https://facilitator.test/verify');
-      expect(verifyCalls[0].body).toHaveProperty('paymentPayload');
+      // v1 format: paymentHeader as base64 string
+      expect(verifyCalls[0].body).toHaveProperty('x402Version', 1);
+      expect(verifyCalls[0].body).toHaveProperty('paymentHeader');
       expect(verifyCalls[0].body).toHaveProperty('paymentRequirements');
-      // paymentPayload should be JSON object, not base64 string
-      expect(typeof (verifyCalls[0].body as { paymentPayload: unknown }).paymentPayload).toBe('object');
+      // paymentHeader should be base64 string in v1
+      expect(typeof (verifyCalls[0].body as { paymentHeader: unknown }).paymentHeader).toBe('string');
       expect((verifyCalls[0].body as { paymentRequirements: { scheme: string } }).paymentRequirements.scheme).toBe('exact');
     });
 
@@ -337,9 +339,11 @@ describe('x402 Payment Middleware', () => {
 
       expect(settleCalls).toHaveLength(1);
       expect(settleCalls[0].url).toBe('https://facilitator.test/settle');
-      expect(settleCalls[0].body).toHaveProperty('paymentPayload');
-      // paymentPayload should be JSON object, not base64 string
-      expect(typeof (settleCalls[0].body as { paymentPayload: unknown }).paymentPayload).toBe('object');
+      // v1 format: paymentHeader as base64 string
+      expect(settleCalls[0].body).toHaveProperty('x402Version', 1);
+      expect(settleCalls[0].body).toHaveProperty('paymentHeader');
+      // paymentHeader should be base64 string in v1
+      expect(typeof (settleCalls[0].body as { paymentHeader: unknown }).paymentHeader).toBe('string');
     });
 
     it('should return 402 when facilitator verification fails', async () => {
@@ -729,12 +733,13 @@ describe('x402 Payment Middleware', () => {
 
       expect(verifyCalls).toHaveLength(1);
 
-      // Check standard format fields
-      expect(verifyCalls[0].body).toHaveProperty('paymentPayload');
+      // Check v1 format fields
+      expect(verifyCalls[0].body).toHaveProperty('x402Version', 1);
+      expect(verifyCalls[0].body).toHaveProperty('paymentHeader');
       expect(verifyCalls[0].body).toHaveProperty('paymentRequirements');
 
-      // paymentPayload should be JSON object, not base64 string
-      expect(typeof (verifyCalls[0].body as { paymentPayload: unknown }).paymentPayload).toBe('object');
+      // paymentHeader should be base64 string in v1
+      expect(typeof (verifyCalls[0].body as { paymentHeader: unknown }).paymentHeader).toBe('string');
 
       // Verify paymentRequirements contains expected fields
       const requirements = verifyCalls[0].body.paymentRequirements as Record<string, unknown>;
@@ -778,12 +783,13 @@ describe('x402 Payment Middleware', () => {
 
       expect(settleCalls).toHaveLength(1);
 
-      // Check standard format fields
-      expect(settleCalls[0].body).toHaveProperty('paymentPayload');
+      // Check v1 format fields
+      expect(settleCalls[0].body).toHaveProperty('x402Version', 1);
+      expect(settleCalls[0].body).toHaveProperty('paymentHeader');
       expect(settleCalls[0].body).toHaveProperty('paymentRequirements');
 
-      // paymentPayload should be JSON object, not base64 string
-      expect(typeof settleCalls[0].body.paymentPayload).toBe('object');
+      // paymentHeader should be base64 string in v1
+      expect(typeof settleCalls[0].body.paymentHeader).toBe('string');
 
       // Verify paymentRequirements in settle contains expected fields
       const requirements = settleCalls[0].body.paymentRequirements as Record<string, unknown>;

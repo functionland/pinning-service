@@ -60,6 +60,29 @@ export async function getExpiredObjects(limit = 100): Promise<EphemeralObject[]>
 }
 
 /**
+ * Get unpaid expired objects for aggressive cleanup
+ * These are objects where payment was never settled (pending/failed or no payment log)
+ * and they've been sitting around longer than the threshold
+ */
+export async function getUnpaidExpiredObjects(
+  maxAgeMinutes: number = 30,
+  limit: number = 100
+): Promise<EphemeralObject[]> {
+  const result = await query<EphemeralObject>(
+    `SELECT e.*
+     FROM x402_ephemeral_objects e
+     LEFT JOIN x402_payment_logs p ON e.payment_id = p.payment_id
+     WHERE e.deleted = 0
+       AND e.created_at < NOW() - INTERVAL '1 minute' * $1
+       AND (p.status IS NULL OR p.status IN ('pending', 'failed'))
+     ORDER BY e.created_at ASC
+     LIMIT $2`,
+    [maxAgeMinutes, limit]
+  );
+  return result.rows;
+}
+
+/**
  * Mark an object as deleted
  */
 export async function markObjectDeleted(id: number, error?: string): Promise<void> {

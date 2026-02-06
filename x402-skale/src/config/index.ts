@@ -25,7 +25,7 @@ const configSchema = z.object({
   nodeEnv: z.enum(['development', 'production', 'test']).default('development'),
 
   // x402 Payment
-  facilitatorUrl: z.string().url().default('https://facilitator.x402.fi'),
+  facilitatorUrl: z.string().url().default('https://facilitator.corbits.dev'),
   receivingAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid Ethereum address'),
   networkChainId: z.coerce.number().default(324705682),
   // Network name for facilitator (e.g., "skale-base", "base-sepolia")
@@ -35,8 +35,8 @@ const configSchema = z.object({
   paymentTokenName: z.string().default('USD Coin'),
   // Token version for EIP-712 domain (USDC is typically "2")
   paymentTokenVersion: z.string().default('2'),
-  // x402 protocol version (1 = legacy Corbits, 2 = RelAI)
-  x402Version: z.coerce.number().default(2),
+  // x402 protocol version (1 = Corbits, 2 = RelAI)
+  x402Version: z.coerce.number().default(1),
   // Asset transfer method: eip3009 (TransferWithAuthorization) or permit2 (EIP-2612)
   assetTransferMethod: z.enum(['eip3009', 'permit2']).default('eip3009'),
 
@@ -58,6 +58,9 @@ const configSchema = z.object({
 
   // JWT
   jwtSecret: z.string().optional(),
+
+  // Cleanup thresholds
+  cleanupUnpaidThresholdMinutes: z.coerce.number().default(30),
 });
 
 export type Config = z.infer<typeof configSchema>;

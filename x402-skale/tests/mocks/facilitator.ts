@@ -10,6 +10,8 @@ export interface MockPayment {
   amount: string;
   asset: string;
   network: string;
+  chainId?: number;
+  payTo?: string;
 }
 
 export interface MockFacilitatorOptions {
@@ -36,6 +38,8 @@ export const DEFAULT_MOCK_PAYMENT: MockPayment = {
   amount: '10000',
   asset: 'eip155:324705682/erc20:0x2e08028E3C4c2356572E096d8EF835cD5C6030bD',
   network: 'eip155:324705682',
+  chainId: 324705682,
+  payTo: '0xReceiverAddress1234567890123456789012',
 };
 
 /**
@@ -137,7 +141,7 @@ export function createStandardSettleResponse(options: MockFacilitatorOptions & {
 }
 
 /**
- * Create a valid mock X-PAYMENT header (base64 encoded)
+ * Create a valid mock X-PAYMENT header (base64 encoded) - v2 format
  */
 export function createMockPaymentHeader(payment: MockPayment = DEFAULT_MOCK_PAYMENT): string {
   // This is a simplified mock - real headers would contain a signature
@@ -148,6 +152,31 @@ export function createMockPaymentHeader(payment: MockPayment = DEFAULT_MOCK_PAYM
     asset: payment.asset,
     network: payment.network,
     signature: 'mock-signature',
+  };
+  return Buffer.from(JSON.stringify(payload)).toString('base64');
+}
+
+/**
+ * Create a mock X-PAYMENT header for v1 (Corbits) format
+ * v1 uses a different payload structure with authorization details
+ */
+export function createMockPaymentHeaderV1(payment: MockPayment = DEFAULT_MOCK_PAYMENT): string {
+  const payload = {
+    x402Version: 1,
+    scheme: 'exact',
+    network: `eip155:${payment.chainId || 324705682}`,
+    asset: payment.asset,
+    payload: {
+      signature: '0xmocksignature1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12345678',
+      authorization: {
+        from: payment.payer,
+        to: payment.payTo || '0xReceiverAddress1234567890123456789012',
+        value: payment.amount,
+        validAfter: String(Math.floor(Date.now() / 1000) - 60),
+        validBefore: String(Math.floor(Date.now() / 1000) + 300),
+        nonce: '0xmocknonce1234567890abcdef1234567890abcdef1234567890abcdef12345678',
+      },
+    },
   };
   return Buffer.from(JSON.stringify(payload)).toString('base64');
 }

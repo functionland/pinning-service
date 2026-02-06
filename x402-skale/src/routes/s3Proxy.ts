@@ -27,7 +27,8 @@
  * 6. Credits assigned to user email
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
+import { verifyTypedData, type Hex } from 'viem';
 import type { Env, UploadResponse } from '../types/index.js';
 import { x402PaymentMiddleware, getPaymentInfo } from '../middleware/x402Payment.js';
 import { x402OrJwtMiddleware, getJwtUser, getAuthMode } from '../middleware/jwtValidator.js';
@@ -38,7 +39,97 @@ import { HttpError } from '../middleware/errorHandler.js';
 import { config } from '../config/index.js';
 import { ensureWalletUserAndGetApiKey } from '../services/walletUser.js';
 
+// EIP-712 types for TransferWithAuthorization (EIP-3009)
+const TRANSFER_WITH_AUTHORIZATION_TYPES = {
+  TransferWithAuthorization: [
+    { name: 'from', type: 'address' },
+    { name: 'to', type: 'address' },
+    { name: 'value', type: 'uint256' },
+    { name: 'validAfter', type: 'uint256' },
+    { name: 'validBefore', type: 'uint256' },
+    { name: 'nonce', type: 'bytes32' },
+  ],
+} as const;
+
 export const s3ProxyRoutes = new Hono<Env>();
+
+/**
+ * Resolve auth header for read-only requests (GET/HEAD).
+ * No payment charged — verifies wallet identity via EIP-712 signature.
+ *
+ * Priority:
+ * 1. Authorization header (JWT) — passed through as-is
+ * 2. X-PAYMENT header — verify EIP-712 signature, look up wallet's API key
+ * 3. No auth — returns empty string (S3 decides access)
+ */
+async function resolveReadAuth(c: Context<Env>): Promise<string> {
+  // 1. JWT takes priority
+  const jwt = c.req.header('Authorization');
+  if (jwt) return jwt;
+
+  // 2. X-PAYMENT header — verify EIP-712 signature, extract wallet, look up API key
+  const paymentHeader = c.req.header('X-PAYMENT');
+  if (paymentHeader) {
+    try {
+      const decoded = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
+      const auth = decoded?.payload?.authorization;
+      const signature = decoded?.payload?.signature as Hex | undefined;
+      const claimedWallet = auth?.from as string | undefined;
+
+      if (!claimedWallet || !signature || !auth) {
+        console.warn('[download] X-PAYMENT missing wallet, signature, or authorization');
+        return '';
+      }
+
+      // Verify the EIP-712 signature matches the claimed wallet
+      const domain = {
+        name: config.paymentTokenName,
+        version: config.paymentTokenVersion,
+        chainId: config.networkChainId,
+        verifyingContract: config.paymentTokenAddress as Hex,
+      };
+
+      const message = {
+        from: auth.from as Hex,
+        to: auth.to as Hex,
+        value: BigInt(auth.value),
+        validAfter: BigInt(auth.validAfter),
+        validBefore: BigInt(auth.validBefore),
+        nonce: auth.nonce as Hex,
+      };
+
+      const valid = await verifyTypedData({
+        address: claimedWallet as Hex,
+        domain,
+        types: TRANSFER_WITH_AUTHORIZATION_TYPES,
+        primaryType: 'TransferWithAuthorization',
+        message,
+        signature,
+      });
+
+      if (!valid) {
+        console.warn(`[download] EIP-712 signature verification failed for ${claimedWallet}`);
+        return '';
+      }
+
+      // Check time validity
+      const now = Math.floor(Date.now() / 1000);
+      if (now < Number(message.validAfter) || now > Number(message.validBefore)) {
+        console.warn(`[download] X-PAYMENT signature expired for ${claimedWallet}`);
+        return '';
+      }
+
+      // Signature verified — look up wallet's API key
+      const walletUser = await ensureWalletUserAndGetApiKey(claimedWallet);
+      console.log(`[download] Verified wallet auth: ${walletUser.email}`);
+      return `Bearer ${walletUser.apiKey}`;
+    } catch (err) {
+      console.warn('[download] Failed to verify X-PAYMENT header:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  return '';
+}
 
 /**
  * PUT /:bucket/:key
@@ -171,14 +262,12 @@ s3ProxyRoutes.put(
 /**
  * GET /:bucket/:key
  *
- * Download an object.
- * For public objects, no auth required.
- * For private objects, include Authorization header.
+ * Download an object (free, no payment charged).
+ * Requires wallet identity verification via X-PAYMENT header or JWT.
  *
  * Headers:
- * - Authorization: Bearer <JWT> (optional - passed through to S3 if provided)
- *
- * Pass-through to S3 backend which handles access control.
+ * - Authorization: Bearer <JWT> (option 1 - passed through to S3)
+ * - X-PAYMENT: Base64-encoded EIP-712 signed payload (option 2 - verified locally, free)
  */
 s3ProxyRoutes.get('/:bucket/:key{.+}', async (c) => {
   const bucket = c.req.param('bucket');
@@ -186,9 +275,8 @@ s3ProxyRoutes.get('/:bucket/:key{.+}', async (c) => {
 
   console.log(`[download] GET ${bucket}/${key}`);
 
-  // Pass through auth header if provided (for private objects)
-  // S3 backend handles access control
-  const authHeader = c.req.header('Authorization') || '';
+  // Resolve auth from JWT or X-PAYMENT wallet (free, no payment charged)
+  const authHeader = await resolveReadAuth(c);
   const result = await proxyToS3(
     { method: 'GET', bucket, key },
     authHeader
@@ -218,17 +306,15 @@ s3ProxyRoutes.get('/:bucket/:key{.+}', async (c) => {
 /**
  * HEAD /:bucket/:key
  *
- * Check if an object exists.
- *
- * Headers:
- * - Authorization: Bearer <JWT> (optional - passed through to S3 if provided)
+ * Check if an object exists (free, no payment charged).
+ * Same auth model as GET — JWT or X-PAYMENT with verified EIP-712 signature.
  */
 s3ProxyRoutes.on('HEAD', '/:bucket/:key{.+}', async (c) => {
   const bucket = c.req.param('bucket');
   const key = c.req.param('key');
 
-  // Pass through auth header if provided
-  const authHeader = c.req.header('Authorization') || '';
+  // Resolve auth from JWT or X-PAYMENT wallet (free, no payment charged)
+  const authHeader = await resolveReadAuth(c);
   const result = await proxyToS3(
     { method: 'HEAD', bucket, key },
     authHeader

@@ -419,18 +419,23 @@ async function uploadWithPayment(
 
 /**
  * Step 4: Download and verify uploaded content
+ * Passes X-PAYMENT header so the gateway can identify the wallet (free, no charge)
  */
 async function downloadAndVerify(
   endpoint: string,
   bucket: string,
   key: string,
-  expectedContent: string
+  expectedContent: string,
+  paymentHeader: string
 ): Promise<{ success: boolean; status: number; contentMatch: boolean; downloadedContent?: string }> {
   console.log('\n[Step 4] Downloading and verifying content...');
   console.log(`  GET ${endpoint}/${bucket}/${key}`);
 
   const response = await fetch(`${endpoint}/${bucket}/${key}`, {
     method: 'GET',
+    headers: {
+      'X-PAYMENT': paymentHeader,
+    },
   });
 
   console.log(`  Status: ${response.status}`);
@@ -517,13 +522,15 @@ async function main() {
     );
 
     // Step 4: Download and verify (only if upload succeeded)
+    // Passes X-PAYMENT so the gateway can identify the wallet (free, no charge)
     let downloadResult: { success: boolean; status: number; contentMatch: boolean } | undefined;
     if (result.success) {
       downloadResult = await downloadAndVerify(
         config.endpoint,
         config.bucket,
         config.fileName,
-        config.fileContent
+        config.fileContent,
+        paymentHeader
       );
     }
 

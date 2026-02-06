@@ -28,9 +28,9 @@ const configSchema = z.object({
   facilitatorUrl: z.string().url().default('https://facilitator.corbits.dev'),
   receivingAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid Ethereum address'),
   networkChainId: z.coerce.number().default(324705682),
-  // Network name for facilitator (e.g., "skale-base", "base-sepolia")
-  // See https://docs.x402.fi for supported networks
-  networkName: z.string().default('skale-base'),
+  // Network name for facilitator (must match facilitator's /supported list)
+  // Corbits uses EIP-155 format for SKALE: eip155:<chainId>
+  networkName: z.string().default('eip155:1187947933'),
   paymentTokenAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid token address'),
   paymentTokenName: z.string().default('USD Coin'),
   // Token version for EIP-712 domain (USDC is typically "2")

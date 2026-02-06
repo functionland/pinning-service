@@ -10,10 +10,11 @@
  *
  * Endpoints tested:
  *   GET  /supported - Query supported payment schemes and networks
+ *   POST /accepts   - Enrich payment requirements with facilitator-specific details
  *   POST /verify    - Validate payment proofs without executing blockchain transactions
  *
  * Note: This script uses EIP-3009 (TransferWithAuthorization) for signing.
- * The Corbits v1 facilitator uses base64-encoded paymentHeader format.
+ * The Corbits v1 facilitator uses x402Version: 1 and paymentPayload as JSON.
  *
  * Usage:
  *   npx tsx scripts/test-facilitator.ts <private-key> [receiving-address] [chain-id] [token-address] [facilitator-url]
@@ -30,7 +31,7 @@ import { createWalletClient, http, type Hex, encodePacked, keccak256 } from 'vie
 
 // Known chain configurations
 // Network names must match facilitator's supported networks
-// Corbits v1 uses plain network names (not EIP-155 format)
+// Corbits uses EIP-155 format for SKALE chains: eip155:<chainId>
 // Token names must match the token contract's name() function for EIP-712
 const KNOWN_CHAINS: Record<number, { networkName: string; tokenName: string; tokenVersion: string; tokenAddress: string }> = {
   // Base Sepolia (x402 default test network)
@@ -48,15 +49,17 @@ const KNOWN_CHAINS: Record<number, { networkName: string; tokenName: string; tok
     tokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
   },
   // SKALE Calypso (mainnet) - Chain ID 1187947933
+  // Corbits uses EIP-155 format: eip155:1187947933
   1187947933: {
-    networkName: 'skale-base',
+    networkName: 'eip155:1187947933',
     tokenName: 'USDC',
     tokenVersion: '1',
     tokenAddress: '0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20',
   },
   // SKALE Calypso Testnet - Chain ID 324705682
+  // Corbits uses EIP-155 format: eip155:324705682
   324705682: {
-    networkName: 'skale-base-testnet',
+    networkName: 'eip155:324705682',
     tokenName: 'USDC',
     tokenVersion: '1',
     tokenAddress: '0x2e08028E3C4c2356572E096d8EF835cD5C6030bD',
@@ -73,6 +76,7 @@ async function main() {
   const tokenAddress = args[3] || KNOWN_CHAINS[chainId]?.tokenAddress || '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
   const tokenName = args[4] || KNOWN_CHAINS[chainId]?.tokenName || 'USD Coin';
   const tokenVersion = args[5] || KNOWN_CHAINS[chainId]?.tokenVersion || '2';
+  // Default to EIP-155 format for unknown chains (e.g., eip155:12345)
   const networkName = args[6] || KNOWN_CHAINS[chainId]?.networkName || `eip155:${chainId}`;
   const facilitatorUrl = args[7] || 'https://facilitator.corbits.dev';
 
@@ -146,21 +150,73 @@ async function main() {
     console.log(`  Error: ${error instanceof Error ? error.message : error}`);
   }
 
-  // Step 2: Skipping /accepts (v2-only endpoint, not available on v1 facilitators)
-  console.log('\n[Step 2] Skipping /accepts (v2-only endpoint, not available on Corbits v1)');
+  // Step 2: Get enriched payment requirements via POST /accepts
+  console.log('\n[Step 2] Getting enriched requirements (POST /accepts)...');
+  let enrichedRequirements: any = null;
+  const acceptsBody = {
+    x402Version: 1,
+    accepts: [{
+      scheme: 'exact',
+      network: networkName,
+      maxAmountRequired: amount,
+      resource: 'https://cloud.fx.land/test',
+      description: 'Test payment',
+      mimeType: 'application/octet-stream',
+      payTo: receivingAddress,
+      maxTimeoutSeconds: 300,
+      asset: tokenAddress,
+    }],
+  };
+
+  console.log('  Request body:');
+  console.log(JSON.stringify(acceptsBody, null, 2).split('\n').map(l => '    ' + l).join('\n'));
+
+  try {
+    const acceptsResponse = await fetch(`${facilitatorUrl}/accepts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(acceptsBody),
+    });
+    console.log(`\n  Status: ${acceptsResponse.status}`);
+
+    const acceptsText = await acceptsResponse.text();
+    try {
+      const acceptsJson = JSON.parse(acceptsText);
+      console.log('  Response:');
+      console.log(JSON.stringify(acceptsJson, null, 2).split('\n').map(l => '    ' + l).join('\n'));
+
+      if (acceptsJson.accepts && acceptsJson.accepts[0]) {
+        enrichedRequirements = acceptsJson.accepts[0];
+        console.log('\n  Got enriched requirements from facilitator');
+        if (enrichedRequirements.extra) {
+          console.log(`    EIP-712 Domain: name=${enrichedRequirements.extra.name}, version=${enrichedRequirements.extra.version}, chainId=${enrichedRequirements.extra.chainId}`);
+        }
+      }
+    } catch {
+      console.log(`  Response (raw): ${acceptsText}`);
+    }
+  } catch (error) {
+    console.log(`  Error: ${error instanceof Error ? error.message : error}`);
+  }
 
   // Step 3: Create and sign a test payment
   console.log('\n[Step 3] Creating test payment...');
 
+  // Use enriched requirements from /accepts if available, otherwise fall back to defaults
+  const effectiveTokenName = enrichedRequirements?.extra?.name || tokenName;
+  const effectiveTokenVersion = enrichedRequirements?.extra?.version || tokenVersion;
+  const effectiveChainId = enrichedRequirements?.extra?.chainId || chainId;
+  const effectiveVerifyingContract = enrichedRequirements?.extra?.verifyingContract || tokenAddress;
+
   console.log(`  Using EIP-712 domain:`);
-  console.log(`    name: ${tokenName}`);
-  console.log(`    version: ${tokenVersion}`);
-  console.log(`    chainId: ${chainId}`);
-  console.log(`    verifyingContract: ${tokenAddress}`);
+  console.log(`    name: ${effectiveTokenName}`);
+  console.log(`    version: ${effectiveTokenVersion}`);
+  console.log(`    chainId: ${effectiveChainId}`);
+  console.log(`    verifyingContract: ${effectiveVerifyingContract}`);
 
   const customChain = {
-    id: chainId,
-    name: `Chain ${chainId}`,
+    id: effectiveChainId,
+    name: `Chain ${effectiveChainId}`,
     nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
     rpcUrls: { default: { http: ['https://rpc.placeholder.local'] } },
   };
@@ -189,11 +245,12 @@ async function main() {
   };
 
   // EIP-712 domain for EIP-3009 transferWithAuthorization
+  // Use values from enriched requirements if available
   const domain = {
-    name: tokenName,
-    version: tokenVersion,
-    chainId: chainId,
-    verifyingContract: tokenAddress as Hex,
+    name: effectiveTokenName,
+    version: effectiveTokenVersion,
+    chainId: effectiveChainId,
+    verifyingContract: effectiveVerifyingContract as Hex,
   };
 
   const PAYMENT_TYPES = {
@@ -234,9 +291,6 @@ async function main() {
     },
   };
 
-  // Base64 encode (v1 format: paymentHeader is base64-encoded JSON)
-  const paymentHeader = Buffer.from(JSON.stringify(paymentPayload)).toString('base64');
-
   console.log('  Payment created successfully');
   console.log(`  From: ${account.address}`);
   console.log(`  To: ${receivingAddress}`);
@@ -248,8 +302,8 @@ async function main() {
   // Step 4: Call facilitator /verify endpoint (POST /verify)
   console.log('\n[Step 4] Validating payment (POST /verify)...');
 
-  // Build paymentRequirements for verification
-  const paymentRequirements = {
+  // Use enriched requirements if available, otherwise construct from params
+  const paymentRequirements = enrichedRequirements || {
     scheme: 'exact',
     network: networkName,
     maxAmountRequired: amount,
@@ -260,17 +314,17 @@ async function main() {
     maxTimeoutSeconds: 300,
     asset: tokenAddress,
     extra: {
-      name: tokenName,
-      version: tokenVersion,
-      chainId: chainId,
-      verifyingContract: tokenAddress,
+      name: effectiveTokenName,
+      version: effectiveTokenVersion,
+      chainId: effectiveChainId,
+      verifyingContract: effectiveVerifyingContract,
     },
   };
 
-  // v1 format: paymentHeader as base64 string (not JSON object)
+  // v1 format: paymentPayload as JSON object
   const verifyBody = {
     x402Version: 1,
-    paymentHeader,
+    paymentPayload,
     paymentRequirements,
   };
 

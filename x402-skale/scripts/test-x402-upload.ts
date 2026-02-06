@@ -26,9 +26,12 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { createWalletClient, http, type Hex, encodePacked, keccak256 } from 'viem';
 
 // Known network name → chain ID lookup
+// Includes both plain names (from server config) and EIP-155 format (from facilitator)
 const KNOWN_NETWORKS: Record<string, number> = {
   'skale-base': 1187947933,
+  'eip155:1187947933': 1187947933,
   'skale-base-testnet': 324705682,
+  'eip155:324705682': 324705682,
   'skale-base-spolia': 324705682,
   'base-sepolia': 84532,
   'base': 8453,

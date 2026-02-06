@@ -236,6 +236,14 @@ async function verifyWithFacilitator(
 
   console.log(`[x402] Calling facilitator: ${config.facilitatorUrl}/verify`);
 
+  // Decode payment header to extract payer info (needed when facilitator doesn't return it)
+  let decodedPayload: Record<string, any> = {};
+  try {
+    decodedPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
+  } catch {
+    throw new Error('Invalid payment header: could not decode base64 JSON');
+  }
+
   let requestBody: Record<string, unknown>;
 
   if (config.x402Version === 1) {
@@ -246,15 +254,9 @@ async function verifyWithFacilitator(
       paymentRequirements,
     };
   } else {
-    // v2 (RelAI): Decode and send paymentPayload as JSON object
-    let decodedPaymentPayload: unknown;
-    try {
-      decodedPaymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
-    } catch (e) {
-      throw new Error('Invalid payment header: could not decode base64 JSON');
-    }
+    // v2 (RelAI): Send paymentPayload as JSON object
     requestBody = {
-      paymentPayload: decodedPaymentPayload,
+      paymentPayload: decodedPayload,
       paymentRequirements,
     };
   }
@@ -275,15 +277,19 @@ async function verifyWithFacilitator(
 
   const result = await response.json() as Record<string, unknown>;
 
+  // Extract payer from the decoded payment header (Corbits v1 doesn't return it)
+  const payerFromHeader = decodedPayload?.payload?.authorization?.from as string || '';
+  const nonce = decodedPayload?.payload?.authorization?.nonce as string || '';
+
   // Normalize response to support both standard and legacy formats
   return {
     // Standard uses isValid, legacy uses valid
     valid: (result.isValid ?? result.valid) as boolean,
     // Standard uses invalidReason, legacy uses error
     error: (result.invalidReason ?? result.error) as string | undefined,
-    // These fields may not be present in standard format
-    paymentId: (result.paymentId ?? result.id ?? '') as string,
-    payer: (result.payer ?? result.from ?? '') as string,
+    // Fall back to payment header fields when facilitator doesn't return them
+    paymentId: (result.paymentId ?? result.id ?? nonce) as string,
+    payer: (result.payer ?? result.from ?? payerFromHeader) as string,
     amount: (result.amount ?? expectedAmount) as string,
     asset: (result.asset ?? getAssetIdentifier()) as string,
     network: (result.network ?? getNetworkIdentifier()) as string,

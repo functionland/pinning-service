@@ -2,17 +2,30 @@ openapi: 3.1.0
 info:
   title: x402 Storage Gateway
   description: |
-    IPFS-backed storage service with x402 cryptocurrency payment protocol.
+    IPFS-backed storage service with x402 cryptocurrency payment protocol on SKALE Network.
 
     ## Payment Flow
     1. Send PUT request without payment → receive 402 with payment requirements
-    2. Sign payment with wallet → retry PUT with X-PAYMENT header
+    2. Sign payment with wallet (EIP-712 / EIP-3009) → retry PUT with X-PAYMENT header
     3. File uploaded, payment settled on-chain
-    4. Download via GET (free) or IPFS gateway using returned CID
+    4. Download via GET using wallet identity verification (free)
 
     ## Authentication
-    - **Upload/Delete**: Requires x402 payment (JWT optional)
-    - **Download**: Free, no auth required (JWT optional for private buckets)
+    - **Upload**: Requires x402 payment (JWT optional — "Gift Model" allows any wallet to pay for any user)
+    - **Download/HEAD**: Free, requires wallet identity via X-PAYMENT header (EIP-712 signature verified locally) or JWT
+    - **Delete**: Free, requires wallet identity via X-PAYMENT or JWT
+    - **Credit top-up**: Requires x402 payment (JWT optional)
+
+    ## Pricing
+    - **Formula**: `ceil(sizeMB × hours × basePriceMicroUsdc)`
+    - **Base rate**: $0.01 per MB-hour (10,000 microUSDC), configurable
+    - **Minimum payment**: $0.001 (1,000 microUSDC)
+    - **TTL range**: 60 seconds – 30 days
+    - **FULA rate**: Fetched dynamically from pinning-webui every 5 minutes
+
+    ## Automatic Cleanup
+    - Expired objects (TTL elapsed) are deleted automatically every 60 seconds
+    - Unpaid/abandoned uploads are cleaned up after 30 minutes
   version: 1.0.0
   contact:
     name: Fula Network
@@ -25,16 +38,118 @@ servers:
   - url: https://cloud.fx.land
     description: Production server
 
-# Default security (can be overridden per operation)
 security: []
 
 tags:
   - name: Storage
     description: File storage operations with x402 payment
+  - name: Credits
+    description: FULA credit top-up via x402 payment
   - name: Health
-    description: Service health checks
+    description: Service health checks and admin operations
 
 paths:
+  /:
+    get:
+      operationId: root
+      summary: Service info
+      description: Returns basic service information and links.
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Service info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceInfo'
+              example:
+                service: x402-skale-gateway
+                version: "1.0.0"
+                docs: /health/pricing
+                status: running
+
+  /credit:
+    post:
+      operationId: creditTopUp
+      summary: Top up FULA credits with x402 payment
+      description: |
+        Add FULA credits to your account by paying via x402. No file upload involved.
+
+        **Payment Flow:**
+        1. POST /credit without X-PAYMENT → receive 402 with minimum payment amount
+        2. Sign payment for desired amount (>= minimum)
+        3. Retry POST /credit with X-PAYMENT → credits added to account
+
+        **Conversion:** USDC is converted to FULA credits using the dynamic
+        `fulaPerGBMonth` rate fetched from pinning-webui.
+      tags:
+        - Credits
+      security:
+        - x402Payment: []
+        - x402Payment: []
+          bearerAuth: []
+      parameters:
+        - name: X-PAYMENT
+          in: header
+          required: false
+          description: Base64-encoded x402 payment signature. Omit to get 402 with payment requirements.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: Optional JWT Bearer token for user identification (Gift Model)
+          schema:
+            type: string
+            example: Bearer eyJhbGciOiJIUzI1NiJ9...
+      responses:
+        '200':
+          description: Credits added successfully
+          headers:
+            X-PAYMENT-RESPONSE:
+              description: Base64-encoded settlement response with transaction hash
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreditResponse'
+              example:
+                success: true
+                creditsAdded: 0.001
+                newBalance: 1.234
+                amountPaidUsdc: 0.001
+                tx_hash: "0xabc123def456..."
+                userEmail: "0x129c7adfb6d2a316d77b2e8c1f4aeea334786670@walletpayment.fx.land"
+        '402':
+          description: Payment required — includes minimum payment amount
+          headers:
+            X-PAYMENT-REQUIRED:
+              description: Base64-encoded payment requirements
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentRequired'
+              example:
+                x402Version: 1
+                accepts:
+                  - scheme: exact
+                    network: eip155:1187947933
+                    maxAmountRequired: "1000"
+                    payTo: "0x..."
+                    asset: "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20"
+                    description: "Credit top-up (minimum 0.001000 USDC)"
+                    extra:
+                      facilitatorUrl: "https://facilitator.corbits.dev"
+                      name: "Bridged USDC (SKALE Bridge)"
+                      version: "2"
+                      assetTransferMethod: eip3009
+                error: Payment Required
+
   /{bucket}/{key}:
     put:
       operationId: uploadObject
@@ -44,11 +159,15 @@ paths:
 
         **Payment Flow:**
         1. First request without X-PAYMENT header returns 402 with payment requirements
-        2. Client signs payment using EIP-3009 or EIP-2612
+        2. Client signs payment using EIP-3009 (TransferWithAuthorization)
         3. Retry request with X-PAYMENT header containing signed payment
         4. Server verifies payment, uploads file, settles on-chain
 
-        **Pricing:** $0.01 per MB-hour (10,000 microUSDC)
+        **Pricing:** `ceil(sizeMB × hours × $0.01)` — price scales with file size and TTL.
+
+        **Auth modes:**
+        - **x402-only**: No JWT needed. User auto-created from wallet address.
+        - **JWT + x402 (Gift Model)**: JWT identifies user, any wallet can pay.
       tags:
         - Storage
       security:
@@ -73,14 +192,13 @@ paths:
         - name: X-PAYMENT
           in: header
           required: false
-          description: Base64-encoded x402 payment signature. Required for upload to succeed.
+          description: Base64-encoded x402 payment signature. Omit to get 402 with payment requirements.
           schema:
             type: string
-            example: eyJ4NDAyVmVyc2lvbiI6Mn0=
         - name: X-Fula-TTL
           in: header
           required: false
-          description: Storage duration in seconds (default 3600, max 2592000)
+          description: Storage duration in seconds (default 3600, min 60, max 2592000). Longer TTL = higher price.
           schema:
             type: integer
             minimum: 60
@@ -90,7 +208,7 @@ paths:
         - name: Authorization
           in: header
           required: false
-          description: Optional JWT Bearer token for user identification
+          description: Optional JWT Bearer token for user identification (Gift Model)
           schema:
             type: string
             example: Bearer eyJhbGciOiJIUzI1NiJ9...
@@ -120,15 +238,15 @@ paths:
                 $ref: '#/components/schemas/UploadResponse'
               example:
                 success: true
-                cid: QmXyz123abcdefghijklmnopqrstuvwxyz
+                cid: bafkr4igmgaakpvvgnfiaaysq5agxey74zzkltevxmtj5vldme7v2xkyoia
                 bucket: myfiles
                 key: documents/report.pdf
                 size_bytes: 1048576
-                expires_at: "2026-01-09T12:00:00Z"
+                expires_at: "2026-02-07T12:00:00.000Z"
                 tx_hash: "0xabc123def456..."
-                gateway_url: "https://ipfs.io/ipfs/QmXyz123abcdefghijklmnopqrstuvwxyz"
+                gateway_url: "https://ipfs.io/ipfs/bafkr4igmgaakpvvgnfiaaysq5agxey74zzkltevxmtj5vldme7v2xkyoia"
         '402':
-          description: Payment required - includes payment requirements
+          description: Payment required — includes payment requirements with calculated price
           headers:
             X-PAYMENT-REQUIRED:
               description: Base64-encoded payment requirements
@@ -146,12 +264,12 @@ paths:
                     maxAmountRequired: "100000"
                     payTo: "0x..."
                     asset: "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20"
-                    description: "Storage: 1.00 MB for 24 hours"
+                    description: "Storage: 10.00 MB for 1 hour"
                     extra:
                       facilitatorUrl: "https://facilitator.corbits.dev"
-                      name: "USDC"
-                      version: "1"
-                      assetTransferMethod: "eip3009"
+                      name: "Bridged USDC (SKALE Bridge)"
+                      version: "2"
+                      assetTransferMethod: eip3009
                 error: Payment Required
         '500':
           description: Server error
@@ -162,15 +280,20 @@ paths:
 
     get:
       operationId: downloadObject
-      summary: Download file (free)
+      summary: Download file (free, wallet identity required)
       description: |
-        Download a file from storage. **No payment required.**
+        Download a file from storage. **No payment charged.**
 
-        Files can also be accessed via IPFS gateway using the CID returned from upload.
+        Requires wallet identity verification via one of:
+        - **X-PAYMENT header**: EIP-712 signed payload (verified locally, value=0)
+        - **Authorization header**: JWT Bearer token
+
+        The gateway verifies the signature, looks up the wallet's S3 credentials,
+        and proxies the request. Each wallet can only access its own files.
       tags:
         - Storage
       security:
-        - {}
+        - x402Payment: []
         - bearerAuth: []
       parameters:
         - name: bucket
@@ -181,6 +304,18 @@ paths:
         - name: key
           in: path
           required: true
+          schema:
+            type: string
+        - name: X-PAYMENT
+          in: header
+          required: false
+          description: Base64-encoded EIP-712 signed payload for wallet identity verification (value=0, free)
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: JWT Bearer token (alternative to X-PAYMENT)
           schema:
             type: string
       responses:
@@ -202,7 +337,7 @@ paths:
                 type: string
                 format: binary
         '404':
-          description: Object not found
+          description: Object or bucket not found
           content:
             application/json:
               schema:
@@ -210,12 +345,14 @@ paths:
 
     head:
       operationId: headObject
-      summary: Check file existence (free)
-      description: Check if file exists and get metadata without downloading.
+      summary: Check file existence (free, wallet identity required)
+      description: |
+        Check if file exists and get metadata without downloading.
+        Same auth model as GET — requires X-PAYMENT or JWT.
       tags:
         - Storage
       security:
-        - {}
+        - x402Payment: []
         - bearerAuth: []
       parameters:
         - name: bucket
@@ -226,6 +363,17 @@ paths:
         - name: key
           in: path
           required: true
+          schema:
+            type: string
+        - name: X-PAYMENT
+          in: header
+          required: false
+          description: Base64-encoded EIP-712 signed payload for wallet identity verification
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
           schema:
             type: string
       responses:
@@ -246,12 +394,14 @@ paths:
 
     delete:
       operationId: deleteObject
-      summary: Delete file (free)
-      description: Delete a file from storage. **No payment required.**
+      summary: Delete file (free, wallet identity required)
+      description: |
+        Delete a file from storage. **No payment charged.**
+        Requires wallet identity via X-PAYMENT or JWT. Returns 401 if neither is provided.
       tags:
         - Storage
       security:
-        - {}
+        - x402Payment: []
         - bearerAuth: []
       parameters:
         - name: bucket
@@ -264,6 +414,17 @@ paths:
           required: true
           schema:
             type: string
+        - name: X-PAYMENT
+          in: header
+          required: false
+          description: Base64-encoded EIP-712 signed payload for wallet identity verification
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          schema:
+            type: string
       responses:
         '200':
           description: Delete successful
@@ -271,6 +432,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DeleteResponse'
+        '401':
+          description: Wallet verification required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Wallet verification required. Send X-PAYMENT header with EIP-712 signature."
+                code: AUTH_REQUIRED
         '404':
           description: Object not found
 
@@ -278,6 +448,7 @@ paths:
     get:
       operationId: healthCheck
       summary: Health check
+      description: Basic health check — reports service status and database connectivity.
       tags:
         - Health
       security: []
@@ -288,28 +459,155 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
-        '429':
-          description: Rate limit exceeded
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+              example:
+                status: ok
+                version: "1.0.0"
+                uptime: 3600
+                database: connected
+                timestamp: "2026-02-06T12:00:00.000Z"
         '503':
-          description: Service unavailable
+          description: Service unhealthy (database disconnected)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /health/detailed:
+    get:
+      operationId: healthDetailed
+      summary: Detailed health check
+      description: Detailed health check including cleanup statistics and ephemeral object counts.
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Detailed health info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedHealthResponse'
+              example:
+                status: ok
+                version: "1.0.0"
+                uptime: 3600
+                uptimeFormatted: "1h 0m 0s"
+                database: connected
+                timestamp: "2026-02-06T12:00:00.000Z"
+                ephemeralObjects:
+                  total_active: 42
+                  total_expired: 3
+                  total_deleted: 150
+                  total_bytes_active: 104857600
+
+  /health/pricing:
+    get:
+      operationId: healthPricing
+      summary: Pricing information
+      description: |
+        Returns current pricing configuration and example calculations.
+        The `fulaPerGbMonth` value is fetched dynamically from pinning-webui
+        and refreshed every 5 minutes.
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Pricing information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PricingResponse'
+              example:
+                basePriceMicroUsdc: 10000
+                basePriceUsdc: 0.01
+                minPaymentMicroUsdc: 1000
+                minPaymentUsdc: 0.001
+                fulaPerGbMonth: 8
+                network: eip155:1187947933
+                tokenAddress: "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20"
+                tokenName: "Bridged USDC (SKALE Bridge)"
+                basePricePerMbHour: "$0.010000 USDC"
+                minimumPayment: "$0.001000 USDC"
+                examples:
+                  - size: "1 MB"
+                    duration: "1 hour"
+                    price: "$0.010000 USDC"
+                  - size: "10 MB"
+                    duration: "1 hour"
+                    price: "$0.100000 USDC"
+                  - size: "100 MB"
+                    duration: "24 hours"
+                    price: "$24.000000 USDC"
+                  - size: "1 GB"
+                    duration: "7 days"
+                    price: "$1720.320000 USDC"
+
+  /health/cleanup:
+    post:
+      operationId: triggerCleanup
+      summary: Trigger manual cleanup (admin)
+      description: |
+        Manually trigger cleanup of expired ephemeral objects.
+        Protected by admin token — requires the S3_ADMIN_TOKEN in the Authorization header.
+      tags:
+        - Health
+      security:
+        - adminToken: []
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          description: Admin token (must contain S3_ADMIN_TOKEN value)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Cleanup completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CleanupResponse'
+              example:
+                deleted: 5
+                errors: 0
+                duration: 234
+                timestamp: "2026-02-06T12:00:00.000Z"
+        '403':
+          description: Admin token required
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+              example:
+                error: Admin token required
 
 components:
   schemas:
+    ServiceInfo:
+      type: object
+      properties:
+        service:
+          type: string
+          example: x402-skale-gateway
+        version:
+          type: string
+          example: "1.0.0"
+        docs:
+          type: string
+          example: /health/pricing
+        status:
+          type: string
+          example: running
+
     UploadResponse:
       type: object
       required:
         - success
-        - cid
         - bucket
         - key
+        - size_bytes
+        - expires_at
       properties:
         success:
           type: boolean
@@ -317,7 +615,7 @@ components:
         cid:
           type: string
           description: IPFS Content Identifier
-          example: QmXyz123abcdefghijklmnopqrstuvwxyz
+          example: bafkr4igmgaakpvvgnfiaaysq5agxey74zzkltevxmtj5vldme7v2xkyoia
         bucket:
           type: string
           example: myfiles
@@ -330,8 +628,8 @@ components:
         expires_at:
           type: string
           format: date-time
-          description: When storage expires (file may be garbage collected after this)
-          example: "2026-01-09T12:00:00Z"
+          description: When storage expires (file auto-deleted by cleanup cron after this)
+          example: "2026-02-07T12:00:00.000Z"
         tx_hash:
           type: string
           description: On-chain payment transaction hash
@@ -340,13 +638,46 @@ components:
           type: string
           format: uri
           description: Direct IPFS gateway URL for downloading
-          example: "https://ipfs.io/ipfs/QmXyz123..."
+          example: "https://ipfs.io/ipfs/bafkr4i..."
+
+    CreditResponse:
+      type: object
+      required:
+        - success
+        - creditsAdded
+        - amountPaidUsdc
+        - userEmail
+      properties:
+        success:
+          type: boolean
+          example: true
+        creditsAdded:
+          type: number
+          description: FULA credits added (converted from USDC via dynamic rate)
+          example: 0.001
+        newBalance:
+          type: number
+          description: New FULA credit balance after top-up
+          example: 1.234
+        amountPaidUsdc:
+          type: number
+          description: USDC amount paid
+          example: 0.001
+        tx_hash:
+          type: string
+          description: On-chain transaction hash
+          example: "0xabc123..."
+        userEmail:
+          type: string
+          description: User email (wallet-derived or from JWT)
+          example: "0x129c7adf...@walletpayment.fx.land"
 
     DeleteResponse:
       type: object
       properties:
         success:
           type: boolean
+          example: true
         bucket:
           type: string
         key:
@@ -360,6 +691,7 @@ components:
       properties:
         x402Version:
           type: integer
+          description: x402 protocol version (1 = Corbits facilitator)
           example: 1
         accepts:
           type: array
@@ -380,51 +712,170 @@ components:
           enum: [exact]
         network:
           type: string
-          description: Network in CAIP-2 format
+          description: Network in CAIP-2 format (EIP-155)
           example: eip155:1187947933
         maxAmountRequired:
           type: string
-          description: Amount in smallest unit (microUSDC)
+          description: Required amount in microUSDC (smallest unit, 6 decimals)
           example: "100000"
         payTo:
           type: string
           description: Recipient wallet address
         asset:
           type: string
-          description: Token contract address
+          description: Token contract address (USDC on SKALE)
         description:
           type: string
-          example: "Storage: 1.00 MB for 24 hours"
+          example: "Storage: 10.00 MB for 1 hour"
         mimeType:
           type: string
         maxTimeoutSeconds:
           type: integer
+          description: Maximum time to complete payment (default 300s)
         resource:
           type: string
+          description: URL of the resource being purchased
         extra:
           type: object
           properties:
             facilitatorUrl:
               type: string
               format: uri
+              description: Facilitator URL for payment verification/settlement
             name:
               type: string
+              description: Token name for EIP-712 domain
             version:
               type: string
+              description: Token version for EIP-712 domain
             assetTransferMethod:
               type: string
               enum: [eip3009, permit2]
+              description: Payment method (EIP-3009 TransferWithAuthorization or EIP-2612 Permit2)
 
     HealthResponse:
       type: object
       properties:
         status:
           type: string
+          enum: [ok, error]
           example: ok
+        version:
+          type: string
+          example: "1.0.0"
+        uptime:
+          type: integer
+          description: Uptime in seconds
+        database:
+          type: string
+          enum: [connected, disconnected]
+        timestamp:
+          type: string
+          format: date-time
+
+    DetailedHealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
         version:
           type: string
         uptime:
           type: integer
+        uptimeFormatted:
+          type: string
+          description: Human-readable uptime (e.g., "2d 5h 30m")
+        database:
+          type: string
+          enum: [connected, disconnected]
+        timestamp:
+          type: string
+          format: date-time
+        ephemeralObjects:
+          type: object
+          nullable: true
+          description: Cleanup statistics (null if database disconnected)
+          properties:
+            total_active:
+              type: integer
+              description: Objects with active (non-expired) TTL
+            total_expired:
+              type: integer
+              description: Objects whose TTL has elapsed but not yet cleaned up
+            total_deleted:
+              type: integer
+              description: Objects that have been cleaned up
+            total_bytes_active:
+              type: integer
+              description: Total bytes of active objects
+
+    PricingResponse:
+      type: object
+      properties:
+        basePriceMicroUsdc:
+          type: integer
+          description: Base price per MB-hour in microUSDC
+          example: 10000
+        basePriceUsdc:
+          type: number
+          description: Base price per MB-hour in USDC
+          example: 0.01
+        minPaymentMicroUsdc:
+          type: integer
+          description: Minimum payment in microUSDC
+          example: 1000
+        minPaymentUsdc:
+          type: number
+          description: Minimum payment in USDC
+          example: 0.001
+        fulaPerGbMonth:
+          type: number
+          description: FULA credits per GB per month (fetched dynamically from pinning-webui, refreshed every 5 min)
+          example: 8
+        network:
+          type: string
+          description: Network identifier in CAIP-2 format
+          example: eip155:1187947933
+        tokenAddress:
+          type: string
+          description: USDC token contract address
+        tokenName:
+          type: string
+          description: Token name
+          example: "Bridged USDC (SKALE Bridge)"
+        basePricePerMbHour:
+          type: string
+          description: Formatted base price
+          example: "$0.010000 USDC"
+        minimumPayment:
+          type: string
+          description: Formatted minimum payment
+          example: "$0.001000 USDC"
+        examples:
+          type: array
+          items:
+            type: object
+            properties:
+              size:
+                type: string
+              duration:
+                type: string
+              price:
+                type: string
+
+    CleanupResponse:
+      type: object
+      properties:
+        deleted:
+          type: integer
+          description: Number of objects deleted
+        errors:
+          type: integer
+          description: Number of delete errors
+        duration:
+          type: integer
+          description: Cleanup duration in milliseconds
         timestamp:
           type: string
           format: date-time
@@ -444,9 +895,17 @@ components:
       type: apiKey
       in: header
       name: X-PAYMENT
-      description: Base64-encoded x402 payment signature
+      description: |
+        Base64-encoded x402 payment signature (EIP-712 / EIP-3009).
+        For uploads and credit top-ups, the signed value must cover the required amount.
+        For downloads, deletes, and HEAD requests, value=0 is sufficient (identity proof only).
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Optional JWT for user identification
+      description: Optional JWT for user identification. When used with x402 payment, enables the "Gift Model" where any wallet can pay for the JWT user.
+    adminToken:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Admin token (S3_ADMIN_TOKEN) required for admin operations

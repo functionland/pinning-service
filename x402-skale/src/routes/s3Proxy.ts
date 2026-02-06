@@ -289,11 +289,16 @@ s3ProxyRoutes.get('/:bucket/:key{.+}', async (c) => {
     );
   }
 
-  // Stream the response
+  // Stream the response, stripping hop-by-hop and encoding headers.
+  // Node.js fetch auto-decompresses gzip, so the body is already plain —
+  // passing through content-encoding would cause clients to double-decompress.
+  const hopByHopHeaders = new Set([
+    'content-encoding', 'transfer-encoding', 'connection', 'keep-alive',
+  ]);
   const headers = new Headers();
   if (result.headers) {
     for (const [name, value] of Object.entries(result.headers)) {
-      if (value) headers.set(name, value);
+      if (value && !hopByHopHeaders.has(name)) headers.set(name, value);
     }
   }
 

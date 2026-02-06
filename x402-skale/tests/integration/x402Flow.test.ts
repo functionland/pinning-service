@@ -21,6 +21,11 @@ import {
   decodeBase64,
 } from '../mocks/facilitator.js';
 
+// Mock pricingCache
+vi.mock('../../src/services/pricingCache.js', () => ({
+  getFulaPerGbMonth: () => 3,
+}));
+
 // Mock config - v1 (Corbits) format
 vi.mock('../../src/config/index.js', () => ({
   config: {
@@ -39,7 +44,7 @@ vi.mock('../../src/config/index.js', () => ({
     databasePath: ':memory:',
     basePriceMicroUsdc: 10000,
     minPaymentMicroUsdc: 1000,
-    fulaExchangeRate: 1.0,
+    fulaPerGbMonth: 3,
     jwtSecret: undefined,
     x402Version: 1,
     assetTransferMethod: 'eip3009',
@@ -58,6 +63,7 @@ vi.mock('../../src/database/repositories/paymentLogs.js', () => ({
 
 vi.mock('../../src/database/repositories/ephemeralObjects.js', () => ({
   trackEphemeralObject: vi.fn(),
+  markObjectDeletedByKey: vi.fn(),
 }));
 
 // Import after mocking
@@ -655,7 +661,7 @@ describe('x402 Flow Integration Tests', () => {
   });
 
   describe('DELETE Requests', () => {
-    it('should require JWT and payment for DELETE', async () => {
+    it('should allow DELETE with JWT (free, no payment required)', async () => {
       setupMockFetch();
 
       const app = createTestApp();
@@ -666,8 +672,6 @@ describe('x402 Flow Integration Tests', () => {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${jwt}`,
-          'X-PAYMENT': createMockPaymentHeader(),
-          'Content-Length': '0', // Required for x402 middleware to calculate price
         },
       });
 
@@ -676,19 +680,14 @@ describe('x402 Flow Integration Tests', () => {
       expect(body.success).toBe(true);
     });
 
-    it('should return 402 for DELETE without payment', async () => {
+    it('should return 401 for DELETE without auth', async () => {
       const app = createTestApp();
-
-      const jwt = createMockJwt();
 
       const res = await app.request('/mybucket/file.txt', {
         method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${jwt}`,
-        },
       });
 
-      expect(res.status).toBe(402);
+      expect(res.status).toBe(401);
     });
   });
 });

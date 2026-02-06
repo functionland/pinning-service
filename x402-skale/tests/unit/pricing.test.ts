@@ -6,12 +6,17 @@
 
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
+// Mock pricingCache before importing pricing module
+vi.mock('../../src/services/pricingCache.js', () => ({
+  getFulaPerGbMonth: () => 3,
+}));
+
 // Mock config before importing pricing module
 vi.mock('../../src/config/index.js', () => ({
   config: {
     basePriceMicroUsdc: 10000,  // $0.01 per MB-hour
     minPaymentMicroUsdc: 1000,  // $0.001 minimum
-    fulaExchangeRate: 1.0,
+    fulaPerGbMonth: 3,
   },
 }));
 
@@ -132,10 +137,23 @@ describe('Pricing Utilities', () => {
   });
 
   describe('usdcToFula', () => {
-    it('should convert USDC to FULA at 1:1 rate', () => {
-      expect(usdcToFula(1)).toBe(1);
-      expect(usdcToFula(10)).toBe(10);
-      expect(usdcToFula(0.01)).toBe(0.01);
+    it('should convert USDC to FULA using MB-hours formula', () => {
+      // $1.00 USDC → 100 MB-hours → 100/240000 = 0.000417 FULA (ceil to 6dp)
+      expect(usdcToFula(1)).toBe(0.001); // ceil(0.000417*1e6)/1e6 = 0.001, but min is 0.001
+      // $10.00 USDC → 1000 MB-hours → 1000/240000 ≈ 0.004167 FULA
+      expect(usdcToFula(10)).toBe(0.004167);
+      // $0.01 USDC → 1 MB-hour → 1/240000 ≈ tiny → min 0.001
+      expect(usdcToFula(0.01)).toBe(0.001);
+    });
+
+    it('should enforce minimum of 0.001 FULA', () => {
+      expect(usdcToFula(0.001)).toBe(0.001);
+    });
+
+    it('should accept custom fulaPerGbMonth rate', () => {
+      // With rate=6: mbHoursPerFula = (1000*720)/6 = 120000
+      // $10 → 1000 MB-hours → 1000/120000 ≈ 0.008334
+      expect(usdcToFula(10, 6)).toBe(0.008334);
     });
   });
 
@@ -207,7 +225,7 @@ describe('Pricing Utilities', () => {
 
       expect(info.basePricePerMbHour).toBe('$0.010000 USDC');
       expect(info.minimumPayment).toBe('$0.001000 USDC');
-      expect(info.fulaExchangeRate).toBe(1.0);
+      expect(info.fulaPerGbMonth).toBe(3);
       expect(info.examples).toHaveLength(4);
     });
 

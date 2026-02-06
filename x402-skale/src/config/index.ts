@@ -54,7 +54,8 @@ const configSchema = z.object({
   // Pricing (in microUSDC - 6 decimals)
   basePriceMicroUsdc: z.coerce.number().default(10000),   // $0.01
   minPaymentMicroUsdc: z.coerce.number().default(1000),   // $0.001
-  fulaExchangeRate: z.coerce.number().default(1.0),
+  // Fallback if /api/credits/pricing fetch fails (overridden by pricingCache at runtime)
+  fulaPerGbMonth: z.coerce.number().default(3),
 
   // JWT
   jwtSecret: z.string().optional(),
@@ -88,7 +89,7 @@ function loadConfig(): Config {
     databasePath: process.env.DATABASE_PATH,
     basePriceMicroUsdc: process.env.BASE_PRICE_MICRO_USDC,
     minPaymentMicroUsdc: process.env.MIN_PAYMENT_MICRO_USDC,
-    fulaExchangeRate: process.env.FULA_EXCHANGE_RATE,
+    fulaPerGbMonth: process.env.FULA_PER_GB_MONTH,
     jwtSecret: process.env.JWT_SECRET,
   };
 
@@ -127,7 +128,7 @@ export function logConfig(): void {
   console.log(`  databasePath: ${config.databasePath}`);
   console.log(`  basePriceMicroUsdc: ${config.basePriceMicroUsdc}`);
   console.log(`  minPaymentMicroUsdc: ${config.minPaymentMicroUsdc}`);
-  console.log(`  fulaExchangeRate: ${config.fulaExchangeRate}`);
+  console.log(`  fulaPerGbMonth: ${config.fulaPerGbMonth}`);
 }
 
 /**

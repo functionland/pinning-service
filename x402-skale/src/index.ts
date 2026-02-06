@@ -9,6 +9,7 @@ import { app } from './app.js';
 import { config, logConfig } from './config/index.js';
 import { initializeDatabase, closeDatabase } from './database/index.js';
 import { startCleanupCron, stopCleanupCron } from './services/cleanup.js';
+import { initPricingCache, stopPricingCache } from './services/pricingCache.js';
 
 // ASCII art banner
 const banner = `
@@ -27,6 +28,10 @@ async function main() {
   // Initialize database (async)
   console.log('\n[startup] Initializing database...');
   await initializeDatabase();
+
+  // Fetch dynamic pricing from pinning-webui (cached, refreshes every 5 min)
+  console.log('[startup] Initializing pricing cache...');
+  await initPricingCache();
 
   // Start cleanup cron
   console.log('[startup] Starting cleanup cron...');
@@ -64,6 +69,7 @@ async function main() {
     console.log('\n[shutdown] Shutting down...');
 
     stopCleanupCron();
+    stopPricingCache();
 
     // Close server
     server.close(() => {

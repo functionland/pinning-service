@@ -35,6 +35,7 @@ import { x402OrJwtMiddleware, getJwtUser, getAuthMode } from '../middleware/jwtV
 import { proxyToS3, buildGatewayUrl } from '../services/s3Proxy.js';
 import { adjustPinningCredits } from '../services/pinningIntegration.js';
 import { trackEphemeralObject } from '../database/repositories/ephemeralObjects.js';
+import { usdcToFula } from '../utils/pricing.js';
 import { HttpError } from '../middleware/errorHandler.js';
 import { config } from '../config/index.js';
 import { ensureWalletUserAndGetApiKey } from '../services/walletUser.js';
@@ -345,56 +346,97 @@ s3ProxyRoutes.on('HEAD', '/:bucket/:key{.+}', async (c) => {
 /**
  * DELETE /:bucket/:key
  *
- * Delete an object.
- * Requires x402 payment (and optionally JWT for S3 access).
+ * Delete an object (free, no payment charged).
+ * Same auth model as GET — wallet identity verified via EIP-712 signature or JWT.
  *
  * Headers:
- * - Authorization: Bearer <JWT> (optional - if absent, x402 payment alone is used)
- * - X-PAYMENT: Base64-encoded payment payload (standard x402)
+ * - Authorization: Bearer <JWT> (option 1 - passed through to S3)
+ * - X-PAYMENT: Base64-encoded EIP-712 signed payload (option 2 - verified locally, free)
  */
-s3ProxyRoutes.delete(
-  '/:bucket/:key{.+}',
-  x402OrJwtMiddleware,         // First: Accept JWT OR x402 payment
-  x402PaymentMiddleware,       // Second: Verify x402 payment
-  async (c) => {
-    const bucket = c.req.param('bucket');
-    const key = c.req.param('key');
+s3ProxyRoutes.delete('/:bucket/:key{.+}', async (c) => {
+  const bucket = c.req.param('bucket');
+  const key = c.req.param('key');
 
+  console.log(`[delete] DELETE ${bucket}/${key}`);
+
+  // Same wallet verification as GET — free, no payment charged
+  const authHeader = await resolveReadAuth(c);
+  if (!authHeader) {
+    throw new HttpError(401, 'Wallet verification required. Send X-PAYMENT header with EIP-712 signature.', 'AUTH_REQUIRED');
+  }
+
+  const result = await proxyToS3(
+    { method: 'DELETE', bucket, key },
+    authHeader
+  );
+
+  if (!result.success) {
+    return c.json(
+      { error: result.error || 'Delete failed' },
+      (result.status || 500) as 500
+    );
+  }
+
+  // Mark object as deleted in ephemeral tracking (best effort)
+  try {
+    const { markObjectDeletedByKey } = await import('../database/repositories/ephemeralObjects.js');
+    await markObjectDeletedByKey(bucket, key);
+  } catch { /* best effort */ }
+
+  return c.json({ success: true, bucket, key }, 200);
+});
+
+/**
+ * POST /credit
+ *
+ * Add FULA credits to account by paying via x402 (no file upload).
+ * User pays any amount >= minimum; FULA credits are calculated and added.
+ *
+ * Headers:
+ * - X-PAYMENT: Base64-encoded x402 payment
+ * - Authorization: Bearer <JWT> (optional)
+ */
+s3ProxyRoutes.post(
+  '/credit',
+  x402OrJwtMiddleware,
+  x402PaymentMiddleware,
+  async (c) => {
     const payment = getPaymentInfo(c);
     const jwtUser = getJwtUser(c);
     const authMode = getAuthMode(c);
 
     if (!payment) {
-      throw new HttpError(402, 'Payment required to delete', 'PAYMENT_REQUIRED');
+      throw new HttpError(500, 'Payment info not found', 'INTERNAL_ERROR');
     }
 
-    // Determine auth header based on auth mode
-    let authHeader: string;
-
+    // Determine user email
+    let userEmail: string;
     if (authMode === 'jwt' && jwtUser) {
-      // JWT mode: use original JWT for S3
-      authHeader = c.req.header('Authorization')!;
-      console.log(`[delete] JWT mode: DELETE ${bucket}/${key} by user=${jwtUser.sub || jwtUser.email}`);
+      userEmail = jwtUser.sub || jwtUser.email || '';
     } else {
-      // x402-only mode: get/create user's API key, use it for S3
       const walletUser = await ensureWalletUserAndGetApiKey(payment.payer);
-      authHeader = `Bearer ${walletUser.apiKey}`;
-      console.log(`[delete] x402-only mode: DELETE ${bucket}/${key} by user=${walletUser.email}`);
+      userEmail = walletUser.email;
     }
 
-    const result = await proxyToS3(
-      { method: 'DELETE', bucket, key },
-      authHeader
-    );
+    // Add credits
+    const fulaAmount = usdcToFula(payment.priceUsdc);
+    const creditResult = await adjustPinningCredits({
+      userEmail,
+      wallet: payment.payer,
+      amountUsdc: payment.priceUsdc,
+      paymentId: payment.paymentId,
+      sizeMb: 0,
+      ttlHours: 0,
+    });
 
-    if (!result.success) {
-      return c.json(
-        { error: result.error || 'Delete failed' },
-        (result.status || 500) as 500
-      );
-    }
-
-    return c.json({ success: true, bucket, key }, 200);
+    return c.json({
+      success: true,
+      creditsAdded: fulaAmount,
+      newBalance: creditResult.newBalance,
+      amountPaidUsdc: payment.priceUsdc,
+      tx_hash: payment.txHash,
+      userEmail,
+    }, 200);
   }
 );
 

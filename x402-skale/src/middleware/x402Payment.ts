@@ -172,7 +172,9 @@ function buildPaymentRequiredResponse(
         maxAmountRequired: requiredMicroUsdc.toString(),
         payTo: config.receivingAddress,
         asset: getAssetIdentifier(),
-        description: `Storage: ${sizeMb.toFixed(2)} MB for ${hours} hour${hours > 1 ? 's' : ''}`,
+        description: sizeBytes === 0 && c.req.path === '/credit'
+          ? `Credit top-up (minimum ${(requiredMicroUsdc / 1_000_000).toFixed(6)} USDC)`
+          : `Storage: ${sizeMb.toFixed(2)} MB for ${hours} hour${hours > 1 ? 's' : ''}`,
         mimeType: 'application/octet-stream',
         maxTimeoutSeconds: PAYMENT_TIMEOUT_SECONDS,
         resource: c.req.url,
@@ -362,20 +364,24 @@ async function settleWithFacilitator(
  * NO JWT REQUIRED - payment signature is the authentication.
  */
 export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
-  // Only apply to PUT and DELETE requests (operations that require payment)
-  if (c.req.method !== 'PUT' && c.req.method !== 'DELETE') {
+  // Only apply to PUT and POST requests (operations that require payment)
+  if (c.req.method !== 'PUT' && c.req.method !== 'POST') {
     await next();
     return;
   }
 
   // Get request parameters
+  const isCreditTopUp = c.req.path === '/credit';
   const contentLength = parseInt(c.req.header('Content-Length') || '0', 10);
   const ttlSeconds = parseTtl(c);
-  const sizeBytes = contentLength;
+  const sizeBytes = isCreditTopUp ? 0 : contentLength;
   const sizeMb = sizeBytes / (1024 * 1024);
 
   // Calculate required payment
-  const requiredMicroUsdc = calculatePriceMicroUsdc(sizeBytes, ttlSeconds);
+  // For /credit endpoint, use minimum payment (user can overpay for more credits)
+  const requiredMicroUsdc = isCreditTopUp
+    ? config.minPaymentMicroUsdc
+    : calculatePriceMicroUsdc(sizeBytes, ttlSeconds);
 
   // Check for payment header
   const paymentHeader = getPaymentHeader(c);
@@ -420,8 +426,8 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
     };
 
     // Log payment to database (async)
-    const bucket = c.req.param('bucket');
-    const key = c.req.param('key');
+    const bucket = c.req.param('bucket') || 'credit';
+    const key = c.req.param('key') || 'top-up';
     await createPaymentLog(paymentInfo, bucket, key);
     await markPaymentVerified(paymentInfo.paymentId);
 

@@ -15,6 +15,8 @@
     "test:x402": "tsx scripts/test-x402-upload.ts",
     "test:download": "tsx scripts/test-x402-download.ts",
     "test:cleanup": "tsx scripts/test-cleanup.ts",
+    "test:delete": "tsx scripts/test-x402-delete.ts",
+    "test:credit": "tsx scripts/test-x402-credit.ts",
     "migrate": "./node_modules/.bin/tsx scripts/migrate.ts",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"

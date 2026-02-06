@@ -39,7 +39,9 @@ export async function adjustPinningCredits(params: {
   const email = userEmail;
 
   // Build reason string for audit
-  const reason = `x402:${paymentId}:${sizeMb.toFixed(2)}MB×${ttlHours}h`;
+  const reason = sizeMb === 0 && ttlHours === 0
+    ? `x402:${paymentId}:credit-topup`
+    : `x402:${paymentId}:${sizeMb.toFixed(2)}MB×${ttlHours}h`;
 
   const request: CreditAdjustmentRequest = {
     email,

@@ -5,6 +5,7 @@
  */
 
 import { config } from '../config/index.js';
+import { getFulaPerGbMonth } from '../services/pricingCache.js';
 
 /**
  * Calculate price in microUSDC for storage
@@ -55,10 +56,26 @@ export function usdcToMicroUsdc(usdc: number): number {
 }
 
 /**
- * Convert USDC amount to FULA credits
+ * Convert USDC payment to FULA credits.
+ *
+ * Conversion based on:
+ * - x402 rate: basePriceMicroUsdc per MB per hour (default $0.01/MB-hour)
+ * - Pinning rate: fulaPerGbMonth FULA per GB per month
+ *
+ * Formula:
+ *   mb_hours = amountUsdc / pricePerMbHour
+ *   fula = mb_hours / (1000 * 720 / fulaPerGbMonth)
+ *
+ * @param amountUsdc - USDC amount paid
+ * @param fulaPerGbMonth - Pinning service rate (default from config)
  */
-export function usdcToFula(usdc: number): number {
-  return usdc * config.fulaExchangeRate;
+export function usdcToFula(amountUsdc: number, fulaPerGbMonth: number = getFulaPerGbMonth()): number {
+  const pricePerMbHour = config.basePriceMicroUsdc / 1_000_000; // e.g., 0.01
+  const mbHours = amountUsdc / pricePerMbHour;
+  const mbHoursPerFula = (1000 * 720) / fulaPerGbMonth; // 240,000 at rate=3
+  const fula = mbHours / mbHoursPerFula;
+  // Round up to 6 decimal places (pinning-webui accepts fractional, min 0.001)
+  return Math.max(0.001, Math.ceil(fula * 1_000_000) / 1_000_000);
 }
 
 /**
@@ -113,13 +130,13 @@ export function validatePaymentAmount(
 export function getPricingInfo(): {
   basePricePerMbHour: string;
   minimumPayment: string;
-  fulaExchangeRate: number;
+  fulaPerGbMonth: number;
   examples: Array<{ size: string; duration: string; price: string }>;
 } {
   return {
     basePricePerMbHour: formatPriceUsdc(config.basePriceMicroUsdc),
     minimumPayment: formatPriceUsdc(config.minPaymentMicroUsdc),
-    fulaExchangeRate: config.fulaExchangeRate,
+    fulaPerGbMonth: getFulaPerGbMonth(),
     examples: [
       {
         size: '1 MB',

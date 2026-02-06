@@ -6,6 +6,7 @@
  */
 
 import { config } from '../config/index.js';
+import { getFulaPerGbMonth } from './pricingCache.js';
 import {
   calculatePriceMicroUsdc,
   calculatePriceUsdc,
@@ -39,7 +40,7 @@ export function getPricingConfig(): {
   basePriceUsdc: number;
   minPaymentMicroUsdc: number;
   minPaymentUsdc: number;
-  fulaExchangeRate: number;
+  fulaPerGbMonth: number;
   network: string;
   tokenAddress: string;
   tokenName: string;
@@ -49,7 +50,7 @@ export function getPricingConfig(): {
     basePriceUsdc: config.basePriceMicroUsdc / 1_000_000,
     minPaymentMicroUsdc: config.minPaymentMicroUsdc,
     minPaymentUsdc: config.minPaymentMicroUsdc / 1_000_000,
-    fulaExchangeRate: config.fulaExchangeRate,
+    fulaPerGbMonth: getFulaPerGbMonth(),
     network: `eip155:${config.networkChainId}`,
     tokenAddress: config.paymentTokenAddress,
     tokenName: config.paymentTokenName,

@@ -83,6 +83,17 @@ export async function getUnpaidExpiredObjects(
 }
 
 /**
+ * Mark an object as deleted by bucket and key
+ */
+export async function markObjectDeletedByKey(bucket: string, key: string): Promise<void> {
+  await query(
+    `UPDATE x402_ephemeral_objects SET deleted = 1, deleted_at = NOW()
+     WHERE bucket = $1 AND object_key = $2 AND deleted = 0`,
+    [bucket, key]
+  );
+}
+
+/**
  * Mark an object as deleted
  */
 export async function markObjectDeleted(id: number, error?: string): Promise<void> {

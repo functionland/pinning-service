@@ -203,7 +203,7 @@ collect_config_update() {
     echo ""
     print_info "Current configuration:"
     echo "  Claude API Key:  ****"
-    echo "  Model:           ${CLAUDE_MODEL:-claude-sonnet-4-20250514}"
+    echo "  Model:           ${CLAUDE_MODEL:-claude-opus-4-6}"
     echo "  Cost:            ${GENERATION_COST_FULA:-1000} FULA"
     echo "  Port:            ${PORT:-3002}"
     echo "  IPFS Gateway:    ${IPFS_GATEWAY_URL:-not set}"
@@ -280,7 +280,7 @@ NODE_ENV=production
 
 # Claude API
 CLAUDE_API_KEY=$CLAUDE_API_KEY
-CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-20250514}
+CLAUDE_MODEL=${CLAUDE_MODEL:-claude-opus-4-6}
 
 # Generation
 GENERATION_COST_FULA=${GENERATION_COST_FULA:-1000}

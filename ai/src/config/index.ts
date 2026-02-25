@@ -24,7 +24,7 @@ const configSchema = z.object({
 
   // Claude API
   claudeApiKey: z.string().min(1, 'CLAUDE_API_KEY is required'),
-  claudeModel: z.string().default('claude-sonnet-4-20250514'),
+  claudeModel: z.string().default('claude-opus-4-6'),
 
   // Generation
   generationCostFula: z.coerce.number().default(1000),

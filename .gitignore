@@ -30,3 +30,6 @@ ipfs-pinning
 /.claude
 /.claude
 /x402-skale/node_modules
+/ai/node_modules
+/ai/dist
+ai/package-lock.json

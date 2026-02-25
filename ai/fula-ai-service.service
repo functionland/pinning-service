@@ -1,0 +1,34 @@
+[Unit]
+Description=Fula AI Website Generation Service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/fula-ai-service
+ExecStart=/usr/bin/node /opt/fula-ai-service/dist/index.js
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=fula-ai-service
+Environment=NODE_ENV=production
+
+# Resource limits
+MemoryMax=4G
+CPUQuota=200%
+LimitNOFILE=65535
+LimitNPROC=65535
+
+# Security hardening
+ProtectHome=strict
+ProtectSystem=strict
+ReadWritePaths=/tmp /opt/fula-ai-service
+PrivateTmp=true
+NoNewPrivileges=true
+PrivateDevices=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

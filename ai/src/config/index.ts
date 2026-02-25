@@ -53,7 +53,7 @@ const configSchema = z.object({
   postgresDb: z.string().default('pinning_service'),
   postgresUser: z.string().default('pinning_user'),
   postgresPassword: z.string().min(1, 'POSTGRES_PASSWORD is required'),
-  postgresSsl: z.coerce.boolean().default(false),
+  postgresSsl: z.string().default('false').transform((v) => v === 'true'),
 });
 
 export type Config = z.infer<typeof configSchema>;

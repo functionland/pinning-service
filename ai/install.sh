@@ -94,6 +94,10 @@ collect_config_fresh() {
     GENERATION_COST_FULA=${GENERATION_COST_FULA:-1000}
 
     # Pinning system key
+    echo ""
+    print_info "The pinning system key is the shared secret (SYSTEM_KEY) configured in"
+    print_info "pinning-webui. The AI service uses it to call the pinning-webui admin API"
+    print_info "to deduct/refund user credits for website generation."
     read -sp "Enter pinning service system key: " PINNING_SYSTEM_KEY
     echo
     if [ -z "$PINNING_SYSTEM_KEY" ]; then
@@ -102,8 +106,15 @@ collect_config_fresh() {
     fi
 
     # JWT secret
-    read -sp "Enter JWT secret (optional, press enter to skip): " JWT_SECRET
+    echo ""
+    print_info "The JWT secret must match the JWT_SECRET from pinning-webui's .env."
+    print_info "It is used to verify that user tokens were signed by your pinning-webui."
+    read -sp "Enter JWT secret (same as pinning-webui JWT_SECRET): " JWT_SECRET
     echo
+    if [ -z "$JWT_SECRET" ]; then
+        print_error "JWT secret is required — must match pinning-webui's JWT_SECRET"
+        exit 1
+    fi
 
     # PostgreSQL
     read -p "Enter PostgreSQL host [localhost]: " POSTGRES_HOST
@@ -131,6 +142,18 @@ collect_config_fresh() {
         exit 1
     fi
 
+    # S3 Gateway (fula-api)
+    echo ""
+    print_info "S3 Gateway Configuration (fula-api running on this server)"
+    print_info "The AI service uploads generated website files to the S3 gateway,"
+    print_info "which stores them in IPFS and pins them in the cluster."
+
+    read -p "Enter S3 gateway URL [http://127.0.0.1:9000]: " S3_GATEWAY_URL
+    S3_GATEWAY_URL=${S3_GATEWAY_URL:-http://127.0.0.1:9000}
+
+    read -p "Enter S3 bucket name [ai-websites]: " S3_BUCKET_NAME
+    S3_BUCKET_NAME=${S3_BUCKET_NAME:-ai-websites}
+
     # Port
     read -p "Enter service port [${DEFAULT_PORT}]: " PORT
     PORT=${PORT:-$DEFAULT_PORT}
@@ -147,6 +170,8 @@ collect_config_fresh() {
     echo "  PostgreSQL:      $POSTGRES_HOST:$POSTGRES_PORT/$POSTGRES_DB"
     echo "  IPFS API:        $IPFS_API_URL"
     echo "  IPFS Gateway:    $IPFS_GATEWAY_URL"
+    echo "  S3 Gateway:      $S3_GATEWAY_URL"
+    echo "  S3 Bucket:       $S3_BUCKET_NAME"
     echo "  Port:            $PORT"
     echo "  Domain:          ${DOMAIN:-'(none)'}"
     echo ""
@@ -267,6 +292,10 @@ MAX_JOBS_PER_USER_PER_HOUR=${MAX_JOBS_PER_USER_PER_HOUR:-10}
 IPFS_API_URL=${IPFS_API_URL:-http://127.0.0.1:5001}
 IPFS_GATEWAY_URL=$IPFS_GATEWAY_URL
 
+# S3 Gateway (fula-api) — user's JWT is forwarded for authentication
+S3_GATEWAY_URL=${S3_GATEWAY_URL:-http://127.0.0.1:9000}
+S3_BUCKET_NAME=${S3_BUCKET_NAME:-ai-websites}
+
 # Pinning Service
 PINNING_WEBUI_URL=${PINNING_WEBUI_URL:-http://127.0.0.1:3001}
 PINNING_SYSTEM_KEY=$PINNING_SYSTEM_KEY
@@ -345,6 +374,7 @@ copy_files() {
     cp -r "$SCRIPT_DIR/migrations" "$INSTALL_DIR/"
     cp "$SCRIPT_DIR/package.json" "$INSTALL_DIR/"
     cp "$SCRIPT_DIR/tsconfig.json" "$INSTALL_DIR/"
+    cp "$SCRIPT_DIR/.env.example" "$INSTALL_DIR/" 2>/dev/null || true
 
     print_info "Files copied to $INSTALL_DIR"
 }

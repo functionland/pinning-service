@@ -38,7 +38,6 @@ const configSchema = z.object({
 
   // S3 Gateway (fula-api)
   s3GatewayUrl: z.string().default('http://127.0.0.1:9000'),
-  s3GatewayJwt: z.string().min(1, 'S3_GATEWAY_JWT is required'),
   s3BucketName: z.string().default('ai-websites'),
 
   // Pinning Service Integration
@@ -46,7 +45,7 @@ const configSchema = z.object({
   pinningSystemKey: z.string().min(1, 'PINNING_SYSTEM_KEY is required'),
 
   // JWT
-  jwtSecret: z.string().optional(),
+  jwtSecret: z.string().min(1, 'JWT_SECRET is required'),
 
   // PostgreSQL
   postgresHost: z.string().default('localhost'),
@@ -75,7 +74,6 @@ function loadConfig(): Config {
     ipfsApiUrl: process.env.IPFS_API_URL,
     ipfsGatewayUrl: process.env.IPFS_GATEWAY_URL,
     s3GatewayUrl: process.env.S3_GATEWAY_URL,
-    s3GatewayJwt: process.env.S3_GATEWAY_JWT,
     s3BucketName: process.env.S3_BUCKET_NAME,
     pinningWebuiUrl: process.env.PINNING_WEBUI_URL,
     pinningSystemKey: process.env.PINNING_SYSTEM_KEY,
@@ -118,7 +116,6 @@ export function logConfig(): void {
   console.log(`  ipfsApiUrl: ${config.ipfsApiUrl}`);
   console.log(`  ipfsGatewayUrl: ${config.ipfsGatewayUrl}`);
   console.log(`  s3GatewayUrl: ${config.s3GatewayUrl}`);
-  console.log(`  s3GatewayJwt: ${config.s3GatewayJwt ? '****' : '(not set)'}`);
   console.log(`  s3BucketName: ${config.s3BucketName}`);
   console.log(`  pinningWebuiUrl: ${config.pinningWebuiUrl}`);
   console.log(`  pinningSystemKey: ${config.pinningSystemKey ? '****' : '(not set)'}`);

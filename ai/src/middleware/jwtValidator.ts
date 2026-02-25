@@ -20,6 +20,7 @@ interface JwtPayload {
 interface Env {
   Variables: {
     userEmail: string;
+    userToken: string;
     requestId: string;
     requestStartTime: number;
   };
@@ -67,8 +68,9 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
       }
     }
 
-    // Store user email in context
+    // Store user email and token in context
     c.set('userEmail', email);
+    c.set('userToken', token);
   } catch (error) {
     console.error('[jwt] Token decode error:', error);
     return c.json({ error: 'Invalid token', code: 'INVALID_TOKEN' }, 401);

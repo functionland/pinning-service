@@ -43,13 +43,13 @@ function getContentType(filePath: string): string {
 // In-memory flag to avoid repeated bucket creation requests
 let bucketEnsured = false;
 
-async function ensureBucket(signal: AbortSignal): Promise<void> {
+async function ensureBucket(userToken: string, signal: AbortSignal): Promise<void> {
   if (bucketEnsured) return;
 
   const url = `${config.s3GatewayUrl}/${config.s3BucketName}`;
   const res = await fetch(url, {
     method: 'PUT',
-    headers: { Authorization: `Bearer ${config.s3GatewayJwt}` },
+    headers: { Authorization: `Bearer ${userToken}` },
     signal,
   });
 
@@ -75,6 +75,7 @@ interface UploadedFile {
 async function uploadFileToS3(
   file: { path: string; content: string },
   jobId: string,
+  userToken: string,
   signal: AbortSignal
 ): Promise<UploadedFile> {
   const s3Key = `website-${jobId}/${file.path}`;
@@ -93,7 +94,7 @@ async function uploadFileToS3(
       const res = await fetch(url, {
         method: 'PUT',
         headers: {
-          Authorization: `Bearer ${config.s3GatewayJwt}`,
+          Authorization: `Bearer ${userToken}`,
           'Content-Type': contentType,
         },
         body,
@@ -156,7 +157,7 @@ async function parallelLimit<T>(
 /**
  * Attempt to clean up uploaded S3 objects on failure.
  */
-async function cleanupS3(uploadedKeys: string[]): Promise<void> {
+async function cleanupS3(uploadedKeys: string[], userToken: string): Promise<void> {
   if (uploadedKeys.length === 0) return;
 
   try {
@@ -165,7 +166,7 @@ async function cleanupS3(uploadedKeys: string[]): Promise<void> {
       const url = `${config.s3GatewayUrl}/${config.s3BucketName}/${key}`;
       await fetch(url, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${config.s3GatewayJwt}` },
+        headers: { Authorization: `Bearer ${userToken}` },
       }).catch(() => {});
     }
     console.log(`[ipfs] Cleaned up ${uploadedKeys.length} S3 objects`);
@@ -245,7 +246,8 @@ async function assembleMfsDirectory(
  */
 export async function publishWebsite(
   files: Array<{ path: string; content: string }>,
-  jobId: string
+  jobId: string,
+  userToken: string
 ): Promise<PublishResult> {
   console.log(`[ipfs] Publishing ${files.length} files via S3 gateway + MFS...`);
 
@@ -255,12 +257,12 @@ export async function publishWebsite(
 
   try {
     // Ensure bucket exists
-    await ensureBucket(controller.signal);
+    await ensureBucket(userToken, controller.signal);
 
     // Phase A: Upload files to S3 gateway
     console.log(`[ipfs] Phase A: uploading ${files.length} files to S3...`);
     const uploadTasks = files.map((file) => () =>
-      uploadFileToS3(file, jobId, controller.signal).then((result) => {
+      uploadFileToS3(file, jobId, userToken, controller.signal).then((result) => {
         uploadedKeys.push(result.s3Key);
         return result;
       })
@@ -285,7 +287,7 @@ export async function publishWebsite(
     return { cid: directoryCid, gatewayUrl };
   } catch (error) {
     // Attempt S3 cleanup on failure
-    await cleanupS3(uploadedKeys);
+    await cleanupS3(uploadedKeys, userToken);
     throw error;
   } finally {
     clearTimeout(timeout);

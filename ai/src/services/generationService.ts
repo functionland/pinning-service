@@ -21,7 +21,7 @@ import { refundCredits } from './creditService.js';
 
 // Active jobs tracker
 const activeJobs = new Map<string, AbortController>();
-const jobQueue: string[] = [];
+const jobQueue: Array<{ jobId: string; userToken: string }> = [];
 
 /**
  * Get count of currently active jobs
@@ -40,20 +40,20 @@ export function getQueuedJobCount(): number {
 /**
  * Start a generation job (or queue if at capacity)
  */
-export function startGeneration(jobId: string): void {
+export function startGeneration(jobId: string, userToken: string): void {
   if (activeJobs.size >= config.maxConcurrentJobs) {
     console.log(`[generation] Job ${jobId} queued (${activeJobs.size}/${config.maxConcurrentJobs} active)`);
-    jobQueue.push(jobId);
+    jobQueue.push({ jobId, userToken });
     return;
   }
 
-  runJob(jobId);
+  runJob(jobId, userToken);
 }
 
 /**
  * Run a generation job
  */
-function runJob(jobId: string): void {
+function runJob(jobId: string, userToken: string): void {
   const controller = new AbortController();
   activeJobs.set(jobId, controller);
 
@@ -64,7 +64,7 @@ function runJob(jobId: string): void {
   }, config.jobTimeoutMs);
 
   // Run async worker
-  executeJob(jobId, controller.signal)
+  executeJob(jobId, userToken, controller.signal)
     .catch((error) => {
       console.error(`[generation] Job ${jobId} unhandled error:`, error);
     })
@@ -83,15 +83,15 @@ function processNextInQueue(): void {
     return;
   }
 
-  const nextJobId = jobQueue.shift()!;
-  console.log(`[generation] Dequeuing job ${nextJobId} (${jobQueue.length} remaining in queue)`);
-  runJob(nextJobId);
+  const next = jobQueue.shift()!;
+  console.log(`[generation] Dequeuing job ${next.jobId} (${jobQueue.length} remaining in queue)`);
+  runJob(next.jobId, next.userToken);
 }
 
 /**
  * Execute the full generation pipeline for a job
  */
-async function executeJob(jobId: string, signal: AbortSignal): Promise<void> {
+async function executeJob(jobId: string, userToken: string, signal: AbortSignal): Promise<void> {
   const tmpDir = path.join(os.tmpdir(), `ai-gen-${jobId}`);
 
   try {
@@ -159,7 +159,7 @@ async function executeJob(jobId: string, signal: AbortSignal): Promise<void> {
     await updateGenerationStatus(jobId, 'publishing', 'Publishing website to IPFS...');
     console.log(`[generation] Job ${jobId}: publishing ${files.length} files to IPFS`);
 
-    const { cid, gatewayUrl } = await publishWebsite(files, jobId);
+    const { cid, gatewayUrl } = await publishWebsite(files, jobId, userToken);
 
     // Phase 3: Complete
     await completeGeneration(jobId, cid, gatewayUrl);

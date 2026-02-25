@@ -23,6 +23,7 @@ import { startGeneration } from '../services/generationService.js';
 interface Env {
   Variables: {
     userEmail: string;
+    userToken: string;
     requestId: string;
     requestStartTime: number;
   };
@@ -121,8 +122,8 @@ generateRoutes.post('/generate', async (c) => {
       config.generationCostFula
     );
 
-    // Queue the job
-    startGeneration(jobId);
+    // Queue the job (pass user token for S3 uploads)
+    startGeneration(jobId, c.get('userToken'));
   } catch (error) {
     // DB insert or queue failed — refund the credits we just deducted
     console.error(`[generate] Job ${jobId} setup failed, refunding credits:`, error);

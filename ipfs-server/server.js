@@ -246,7 +246,18 @@ if (!fs.existsSync(config.uploadDir)) {
             // Check if it's valid UTF-8 text
             const text = content.toString('utf8');
             if (Buffer.from(text, 'utf8').equals(content)) {
-              contentType = 'text/plain; charset=utf-8';
+              // Sniff common text-based web formats that lack magic bytes
+              const trimmed = text.trimStart().toLowerCase();
+              if (trimmed.startsWith('<!doctype html') || trimmed.startsWith('<html') ||
+                  trimmed.startsWith('<head') || trimmed.startsWith('<body')) {
+                contentType = 'text/html; charset=utf-8';
+              } else if (trimmed.startsWith('<?xml') || trimmed.startsWith('<svg')) {
+                contentType = trimmed.includes('<svg') ? 'image/svg+xml' : 'application/xml; charset=utf-8';
+              } else if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                try { JSON.parse(text); contentType = 'application/json; charset=utf-8'; } catch {}
+              } else {
+                contentType = 'text/plain; charset=utf-8';
+              }
             }
           }
         } catch (typeError) {

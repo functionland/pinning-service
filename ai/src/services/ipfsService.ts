@@ -40,12 +40,7 @@ function getContentType(filePath: string): string {
   return CONTENT_TYPES[ext] || 'application/octet-stream';
 }
 
-// In-memory flag to avoid repeated bucket creation requests
-let bucketEnsured = false;
-
 async function ensureBucket(userToken: string, signal: AbortSignal): Promise<void> {
-  if (bucketEnsured) return;
-
   const url = `${config.s3GatewayUrl}/${config.s3BucketName}`;
   const res = await fetch(url, {
     method: 'PUT',
@@ -59,7 +54,6 @@ async function ensureBucket(userToken: string, signal: AbortSignal): Promise<voi
     throw new Error(`Failed to ensure S3 bucket: ${res.status} ${body}`);
   }
 
-  bucketEnsured = true;
   console.log(`[ipfs] S3 bucket "${config.s3BucketName}" ready`);
 }
 

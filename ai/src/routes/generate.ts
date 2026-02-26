@@ -98,6 +98,8 @@ generateRoutes.post('/generate', async (c) => {
         {
           error: 'Insufficient credits',
           code: 'INSUFFICIENT_CREDITS',
+          required: config.generationCostFula,
+          balance: deduction.newBalance ?? 0,
         },
         402
       );

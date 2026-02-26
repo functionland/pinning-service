@@ -78,7 +78,7 @@ export async function generateWebsite(
     response = await client.messages.create(
       {
         model: config.claudeModel,
-        max_tokens: 16000,
+        max_tokens: 64000,
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userMessage }],
       },
@@ -99,6 +99,11 @@ export async function generateWebsite(
 
   const rawText = textBlock.text.trim();
 
+  // Check if response was truncated (hit max_tokens)
+  if (response.stop_reason === 'max_tokens') {
+    console.warn(`[claude] Response truncated at ${rawText.length} chars (hit max_tokens). stop_reason: ${response.stop_reason}`);
+  }
+
   // Parse JSON response (handle possible markdown code blocks)
   let jsonText = rawText;
   if (jsonText.startsWith('```')) {
@@ -111,12 +116,13 @@ export async function generateWebsite(
     parsed = JSON.parse(jsonText);
   } catch (parseError) {
     // Retry once — ask Claude to fix its output
-    console.warn('[claude] Failed to parse response, retrying with correction prompt');
+    console.warn(`[claude] Failed to parse response (${rawText.length} chars), last 200 chars: ...${rawText.slice(-200)}`);
+    console.warn('[claude] Retrying with correction prompt');
     try {
       const retryResponse = await client.messages.create(
         {
           model: config.claudeModel,
-          max_tokens: 16000,
+          max_tokens: 64000,
           system: SYSTEM_PROMPT,
           messages: [
             { role: 'user', content: userMessage },

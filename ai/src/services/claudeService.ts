@@ -75,7 +75,7 @@ export async function generateWebsite(
 
   let response: Anthropic.Message;
   try {
-    response = await client.messages.create(
+    const stream = client.messages.stream(
       {
         model: config.claudeModel,
         max_tokens: 64000,
@@ -84,6 +84,7 @@ export async function generateWebsite(
       },
       { signal }
     );
+    response = await stream.finalMessage();
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('Generation was cancelled');
@@ -119,7 +120,7 @@ export async function generateWebsite(
     console.warn(`[claude] Failed to parse response (${rawText.length} chars), last 200 chars: ...${rawText.slice(-200)}`);
     console.warn('[claude] Retrying with correction prompt');
     try {
-      const retryResponse = await client.messages.create(
+      const retryStream = client.messages.stream(
         {
           model: config.claudeModel,
           max_tokens: 64000,
@@ -136,6 +137,7 @@ export async function generateWebsite(
         },
         { signal }
       );
+      const retryResponse = await retryStream.finalMessage();
 
       const retryBlock = retryResponse.content.find((b) => b.type === 'text');
       if (!retryBlock || retryBlock.type !== 'text') {

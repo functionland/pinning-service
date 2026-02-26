@@ -215,6 +215,18 @@ export async function countRecentJobsByUser(
   return parseInt(result.rows[0].count, 10);
 }
 
+// Count free completed generations for a user (for free tier eligibility)
+export async function countFreeCompletedGenerations(
+  email: string
+): Promise<number> {
+  const result = await query<{ count: string }>(
+    `SELECT COUNT(*) as count FROM ai_generations
+     WHERE user_email = $1 AND credits_charged = 0 AND status = 'completed'`,
+    [email]
+  );
+  return parseInt(result.rows[0].count, 10);
+}
+
 export default {
   createPostgresPool,
   getPool,
@@ -228,4 +240,5 @@ export default {
   getGeneration,
   getGenerationsByUser,
   countRecentJobsByUser,
+  countFreeCompletedGenerations,
 };

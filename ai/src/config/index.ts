@@ -28,6 +28,7 @@ const configSchema = z.object({
 
   // Generation
   generationCostFula: z.coerce.number().default(1000),
+  freeGenerationsPerUser: z.coerce.number().default(1),
   maxConcurrentJobs: z.coerce.number().default(3),
   jobTimeoutMs: z.coerce.number().default(300000),
   maxJobsPerUserPerHour: z.coerce.number().default(10),
@@ -68,6 +69,7 @@ function loadConfig(): Config {
     claudeApiKey: process.env.CLAUDE_API_KEY,
     claudeModel: process.env.CLAUDE_MODEL,
     generationCostFula: process.env.GENERATION_COST_FULA,
+    freeGenerationsPerUser: process.env.FREE_GENERATIONS_PER_USER,
     maxConcurrentJobs: process.env.MAX_CONCURRENT_JOBS,
     jobTimeoutMs: process.env.JOB_TIMEOUT_MS,
     maxJobsPerUserPerHour: process.env.MAX_JOBS_PER_USER_PER_HOUR,
@@ -110,6 +112,7 @@ export function logConfig(): void {
   console.log(`  claudeApiKey: ${config.claudeApiKey ? '****' : '(not set)'}`);
   console.log(`  claudeModel: ${config.claudeModel}`);
   console.log(`  generationCostFula: ${config.generationCostFula}`);
+  console.log(`  freeGenerationsPerUser: ${config.freeGenerationsPerUser}`);
   console.log(`  maxConcurrentJobs: ${config.maxConcurrentJobs}`);
   console.log(`  jobTimeoutMs: ${config.jobTimeoutMs}`);
   console.log(`  maxJobsPerUserPerHour: ${config.maxJobsPerUserPerHour}`);

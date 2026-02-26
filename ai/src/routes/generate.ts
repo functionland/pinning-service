@@ -16,6 +16,7 @@ import {
   getGeneration,
   getGenerationsByUser,
   countRecentJobsByUser,
+  countFreeCompletedGenerations,
 } from '../database/postgres.js';
 import { deductCredits, refundCredits } from '../services/creditService.js';
 import { startGeneration } from '../services/generationService.js';
@@ -90,29 +91,41 @@ generateRoutes.post('/generate', async (c) => {
   // Generate job ID
   const jobId = uuidv4();
 
-  // Deduct credits atomically — no separate balance check (avoids TOCTOU race)
-  const deduction = await deductCredits(userEmail, jobId, config.generationCostFula);
-  if (!deduction.success) {
-    if (deduction.insufficientBalance) {
+  // Free tier check: skip credit deduction if user has unused free generations
+  const freeCompletedCount = await countFreeCompletedGenerations(userEmail);
+  const isFreeGeneration = freeCompletedCount < config.freeGenerationsPerUser;
+
+  if (isFreeGeneration) {
+    console.log(`[generate] Free generation for user ${userEmail} (${freeCompletedCount}/${config.freeGenerationsPerUser} used)`);
+  }
+
+  // Deduct credits atomically — skip for free generations
+  if (!isFreeGeneration) {
+    const deduction = await deductCredits(userEmail, jobId, config.generationCostFula);
+    if (!deduction.success) {
+      if (deduction.insufficientBalance) {
+        return c.json(
+          {
+            error: 'Insufficient credits',
+            code: 'INSUFFICIENT_CREDITS',
+            required: config.generationCostFula,
+            balance: deduction.newBalance ?? 0,
+          },
+          402
+        );
+      }
       return c.json(
         {
-          error: 'Insufficient credits',
-          code: 'INSUFFICIENT_CREDITS',
-          required: config.generationCostFula,
-          balance: deduction.newBalance ?? 0,
+          error: 'Credit deduction failed',
+          code: 'CREDIT_ERROR',
+          details: deduction.error,
         },
-        402
+        500
       );
     }
-    return c.json(
-      {
-        error: 'Credit deduction failed',
-        code: 'CREDIT_ERROR',
-        details: deduction.error,
-      },
-      500
-    );
   }
+
+  const creditsCharged = isFreeGeneration ? 0 : config.generationCostFula;
 
   // Create DB record + queue job — if anything fails, refund credits
   try {
@@ -121,19 +134,23 @@ generateRoutes.post('/generate', async (c) => {
       userEmail,
       body.prompt,
       body.assets,
-      config.generationCostFula
+      creditsCharged
     );
 
     // Queue the job (pass user token for S3 uploads)
     startGeneration(jobId, c.get('userToken'));
   } catch (error) {
     // DB insert or queue failed — refund the credits we just deducted
-    console.error(`[generate] Job ${jobId} setup failed, refunding credits:`, error);
-    try {
-      await refundCredits(userEmail, jobId, config.generationCostFula);
-    } catch (refundError) {
-      // Log loudly — this means credits are lost and need manual recovery
-      console.error(`[generate] CRITICAL: Refund failed for job ${jobId}, user ${userEmail}, amount ${config.generationCostFula}:`, refundError);
+    if (!isFreeGeneration) {
+      console.error(`[generate] Job ${jobId} setup failed, refunding credits:`, error);
+      try {
+        await refundCredits(userEmail, jobId, config.generationCostFula);
+      } catch (refundError) {
+        // Log loudly — this means credits are lost and need manual recovery
+        console.error(`[generate] CRITICAL: Refund failed for job ${jobId}, user ${userEmail}, amount ${config.generationCostFula}:`, refundError);
+      }
+    } else {
+      console.error(`[generate] Job ${jobId} setup failed (free generation):`, error);
     }
     return c.json(
       { error: 'Failed to create generation job', code: 'INTERNAL_ERROR' },

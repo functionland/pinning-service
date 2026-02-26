@@ -270,6 +270,7 @@ npm install
 ~/pinning-service/pinning-webui# cp -r dist/* /home/root/pinning-service/pinning-webui/dist/
 /pinning-service/pinning-webui# cp package.json package-lock.json /home/root/pinning-service/pinning-webui/
 ~/pinning-service/pinning-webui# cd /home/root/pinning-service/pinning-webui
+cd /home/root/pinning-service/pinning-webui
 /home/root/pinning-service/pinning-webui# npm install --production --ignore-scripts=false
 /home/root/pinning-service/pinning-webui# npm audit fix
 /home/root/pinning-service/pinning-webui# npm rebuild

@@ -2,7 +2,8 @@
  * IPFS Service
  *
  * Publishes generated website files via the S3 gateway (fula-api) for storage
- * and cluster pinning, then assembles a directory CID using IPFS MFS.
+ * and cluster pinning. HTML files are rewritten so relative asset references
+ * point to absolute gateway CID URLs, eliminating the need for directory CIDs.
  */
 
 import { config } from '../config/index.js';
@@ -170,117 +171,90 @@ async function cleanupS3(uploadedKeys: string[], userToken: string): Promise<voi
 }
 
 /**
- * Assemble uploaded files into a directory using IPFS MFS, return root CID.
+ * Rewrite HTML content, replacing relative asset paths with absolute gateway URLs.
  */
-async function assembleMfsDirectory(
-  uploadedFiles: UploadedFile[],
-  jobId: string,
-  signal: AbortSignal
-): Promise<string> {
-  const ipfsApi = config.ipfsApiUrl;
-  const mfsRoot = `/ai-gen-${jobId}`;
-
-  // 1. Create directory structure
-  const mkdirUrl = `${ipfsApi}/api/v0/files/mkdir?arg=${encodeURIComponent(`${mfsRoot}/website`)}&parents=true`;
-  const mkdirRes = await fetch(mkdirUrl, { method: 'POST', signal });
-  if (!mkdirRes.ok) {
-    const body = await mkdirRes.text().catch(() => '');
-    throw new Error(`MFS mkdir failed: ${mkdirRes.status} ${body}`);
+function rewriteHtml(html: string, cidMap: Record<string, string>): string {
+  let result = html;
+  for (const [path, url] of Object.entries(cidMap)) {
+    result = result.replaceAll(`./${path}`, url);
+    result = result.replaceAll(`"${path}"`, `"${url}"`);
+    result = result.replaceAll(`'${path}'`, `'${url}'`);
   }
-
-  // 2. Copy each file CID into the MFS directory
-  for (const file of uploadedFiles) {
-    const src = `/ipfs/${file.cid}`;
-    const dst = `${mfsRoot}/website/${file.path}`;
-    // Ensure parent directories exist for nested paths
-    const parentDir = dst.slice(0, dst.lastIndexOf('/'));
-    if (parentDir !== `${mfsRoot}/website`) {
-      const mkParentUrl = `${ipfsApi}/api/v0/files/mkdir?arg=${encodeURIComponent(parentDir)}&parents=true`;
-      const mkParentRes = await fetch(mkParentUrl, { method: 'POST', signal });
-      if (!mkParentRes.ok) {
-        const body = await mkParentRes.text().catch(() => '');
-        throw new Error(`MFS mkdir parent failed for ${parentDir}: ${mkParentRes.status} ${body}`);
-      }
-    }
-
-    const cpUrl = `${ipfsApi}/api/v0/files/cp?arg=${encodeURIComponent(src)}&arg=${encodeURIComponent(dst)}`;
-    const cpRes = await fetch(cpUrl, { method: 'POST', signal });
-    if (!cpRes.ok) {
-      const body = await cpRes.text().catch(() => '');
-      throw new Error(`MFS cp failed for ${file.path}: ${cpRes.status} ${body}`);
-    }
-  }
-
-  // 3. Stat the root to get the directory CID
-  const statUrl = `${ipfsApi}/api/v0/files/stat?arg=${encodeURIComponent(mfsRoot)}&hash=true`;
-  const statRes = await fetch(statUrl, { method: 'POST', signal });
-  if (!statRes.ok) {
-    const body = await statRes.text().catch(() => '');
-    throw new Error(`MFS stat failed: ${statRes.status} ${body}`);
-  }
-
-  const statData = (await statRes.json()) as { Hash: string };
-  const directoryCid = statData.Hash;
-  if (!directoryCid) {
-    throw new Error('MFS stat returned no Hash');
-  }
-
-  // 4. Cleanup MFS directory (fire-and-forget)
-  const rmUrl = `${ipfsApi}/api/v0/files/rm?arg=${encodeURIComponent(mfsRoot)}&recursive=true`;
-  fetch(rmUrl, { method: 'POST' }).catch(() => {});
-
-  return directoryCid;
+  return result;
 }
 
 /**
- * Publish website files via S3 gateway + IPFS MFS directory assembly.
+ * Publish website files via S3 gateway with URL rewriting.
  *
- * Phase A: Upload each file to S3 gateway (gets stored in IPFS + cluster pinned)
- * Phase B: Assemble directory structure via MFS (metadata only, no data transfer)
+ * 1. Upload non-HTML assets to S3 → collect CID map
+ * 2. Rewrite HTML to replace relative paths with absolute gateway CID URLs
+ * 3. Upload rewritten HTML to S3 → return its CID as the website URL
+ *
+ * All files go through S3 for proper cluster replication and pinning.
+ * No direct IPFS API calls are made.
  */
 export async function publishWebsite(
   files: Array<{ path: string; content: string }>,
   jobId: string,
   userToken: string
 ): Promise<PublishResult> {
-  console.log(`[ipfs] Publishing ${files.length} files via S3 gateway + MFS...`);
+  console.log(`[ipfs] Publishing ${files.length} files via S3 gateway with URL rewriting...`);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OVERALL_TIMEOUT_MS);
   const uploadedKeys: string[] = [];
 
+  const gatewayBase = config.ipfsGatewayUrl.endsWith('/')
+    ? config.ipfsGatewayUrl.slice(0, -1)
+    : config.ipfsGatewayUrl;
+
   try {
-    // Ensure bucket exists
     await ensureBucket(userToken, controller.signal);
 
-    // Phase A: Upload files to S3 gateway
-    console.log(`[ipfs] Phase A: uploading ${files.length} files to S3...`);
-    const uploadTasks = files.map((file) => () =>
-      uploadFileToS3(file, jobId, userToken, controller.signal).then((result) => {
-        uploadedKeys.push(result.s3Key);
-        return result;
-      })
+    // Separate HTML entry point from other assets
+    const indexFile = files.find(f => f.path === 'index.html');
+    const otherFiles = files.filter(f => f.path !== 'index.html');
+
+    if (!indexFile) {
+      throw new Error('No index.html found in generated files');
+    }
+
+    // Step 1: Upload non-HTML assets, collect path → gateway URL map
+    const cidMap: Record<string, string> = {};
+
+    if (otherFiles.length > 0) {
+      console.log(`[ipfs] Uploading ${otherFiles.length} asset files to S3...`);
+      const uploadTasks = otherFiles.map((file) => () =>
+        uploadFileToS3(file, jobId, userToken, controller.signal).then((result) => {
+          uploadedKeys.push(result.s3Key);
+          cidMap[file.path] = `${gatewayBase}/${result.cid}`;
+          return result;
+        })
+      );
+      await parallelLimit(uploadTasks, UPLOAD_CONCURRENCY);
+      console.log(`[ipfs] Asset uploads complete`);
+    }
+
+    // Step 2: Rewrite index.html with absolute gateway URLs
+    const rewrittenHtml = rewriteHtml(indexFile.content, cidMap);
+
+    // Step 3: Upload rewritten index.html
+    console.log('[ipfs] Uploading rewritten index.html...');
+    const indexUploaded = await uploadFileToS3(
+      { path: 'index.html', content: rewrittenHtml },
+      jobId,
+      userToken,
+      controller.signal
     );
+    uploadedKeys.push(indexUploaded.s3Key);
 
-    const uploadedFiles = await parallelLimit(uploadTasks, UPLOAD_CONCURRENCY);
-    console.log(`[ipfs] Phase A complete: ${uploadedFiles.length} files uploaded`);
+    const gatewayUrl = `${gatewayBase}/${indexUploaded.cid}`;
 
-    // Phase B: Assemble directory via MFS
-    console.log('[ipfs] Phase B: assembling directory via MFS...');
-    const directoryCid = await assembleMfsDirectory(uploadedFiles, jobId, controller.signal);
-
-    // Build gateway URL
-    const gatewayBase = config.ipfsGatewayUrl.endsWith('/')
-      ? config.ipfsGatewayUrl.slice(0, -1)
-      : config.ipfsGatewayUrl;
-    const gatewayUrl = `${gatewayBase}/${directoryCid}/website/`;
-
-    console.log(`[ipfs] Published directory CID: ${directoryCid}`);
+    console.log(`[ipfs] Published HTML CID: ${indexUploaded.cid}`);
     console.log(`[ipfs] Gateway URL: ${gatewayUrl}`);
 
-    return { cid: directoryCid, gatewayUrl };
+    return { cid: indexUploaded.cid, gatewayUrl };
   } catch (error) {
-    // Attempt S3 cleanup on failure
     await cleanupS3(uploadedKeys, userToken);
     throw error;
   } finally {

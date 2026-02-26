@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "build": "npm run build:bundle && npm run build:binary",
-    "build:bundle": "esbuild server.js --bundle --platform=node --format=cjs --target=node18 --outfile=dist/bundle.cjs --external:pg --external:pg-native",
-    "build:binary": "pkg ./dist/bundle.cjs --target node18-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode",
+    "build:bundle": "esbuild server.js --bundle --platform=node --format=cjs --target=node20 --outfile=dist/bundle.cjs --external:pg --external:pg-native",
+    "build:binary": "pkg ./dist/bundle.cjs --target node20-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode",
     "dev": "node --watch server.js",
     "test": "node --test test/server.test.js",
     "test:setup": "node test/setup-test-db.js"
@@ -18,7 +18,7 @@
       "node_modules/file-type/**/*"
     ],
     "targets": [
-      "node18-linux-x64"
+      "node20-linux-x64"
     ],
     "outputPath": "dist"
   },
@@ -31,7 +31,7 @@
   },
   "devDependencies": {
     "esbuild": "^0.24.0",
-    "pkg": "^5.8.1"
+    "@yao-pkg/pkg": "^6.14.1"
   },
   "engines": {
     "node": ">=18.0.0"

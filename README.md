@@ -288,7 +288,7 @@ systemctl status fula-pinning-service
 
 
 ## update ipfs gateway
-cd ~/pinning-service/ipfs-server && git pull
+cd ~/pinning-service/ipfs-server
 npm install --production=false
 npm audit fix
 npm run build
@@ -299,3 +299,4 @@ cp package-lock.json /home/root/pinning-service/ipfs-server/ 2>/dev/null || true
 cd /home/root/pinning-service/ipfs-server
 npm install --production --ignore-scripts=false
 sudo systemctl start fula-upload-server
+sudo systemctl status fula-upload-server 

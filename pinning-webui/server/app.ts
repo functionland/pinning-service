@@ -371,6 +371,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.use(express.json());
   app.use(cookieParser());
 
+  // Request logging (API calls only, skip static assets)
+  app.use('/api/', (req: Request, _res: Response, next: NextFunction) => {
+    const source = req.headers['x-system-key'] ? 'system' : req.ip;
+    console.log(`<-- ${req.method} ${req.path} [${source}]`);
+    next();
+  });
+
   // Rate limiting (skip in tests)
   if (!options?.skipRateLimit) {
     const limiter = rateLimit({
@@ -378,6 +385,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       max: 100,
       standardHeaders: true,
       legacyHeaders: false,
+      // Bypass rate limit for server-to-server calls using system key
+      skip: (req) => !!req.headers['x-system-key'],
     });
     app.use('/api/', limiter);
   }

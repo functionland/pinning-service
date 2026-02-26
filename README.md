@@ -288,7 +288,7 @@ systemctl status fula-pinning-service
 
 
 ## update ipfs gateway
-cd ~/pinning-service/ipfs-server
+cd ~/pinning-service/ipfs-server && git pull
 npm install --production=false
 npm audit fix
 npm run build

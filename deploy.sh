@@ -187,6 +187,9 @@ if [ -d "$WEBUI_SRC" ]; then
     log_info "Installing dependencies..."
     run_cmd bash -c "cd '$WEBUI_SRC' && npm install"
 
+    log_info "Running npm audit fix..."
+    run_cmd bash -c "cd '$WEBUI_SRC' && npm audit fix" || true
+
     log_info "Building pinning-webui (with Vite env vars)..."
     if [ -z "$VITE_GOOGLE_CLIENT_ID" ] || [ -z "$VITE_WALLETCONNECT_PROJECT_ID" ]; then
         log_warn "VITE_GOOGLE_CLIENT_ID or VITE_WALLETCONNECT_PROJECT_ID not set"

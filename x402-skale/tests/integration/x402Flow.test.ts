@@ -16,6 +16,8 @@ import {
   createMockVerifyResponse,
   createMockSettleResponse,
   createMockJwt,
+  createSignedJwt,
+  TEST_JWT_SECRET,
   DEFAULT_MOCK_PAYMENT,
   encodeBase64,
   decodeBase64,
@@ -45,7 +47,7 @@ vi.mock('../../src/config/index.js', () => ({
     basePriceMicroUsdc: 10000,
     minPaymentMicroUsdc: 1000,
     fulaPerGbMonth: 3,
-    jwtSecret: undefined,
+    jwtSecret: TEST_JWT_SECRET,
     x402Version: 1,
     assetTransferMethod: 'eip3009',
   },
@@ -201,7 +203,7 @@ describe('x402 Flow Integration Tests', () => {
 
       const app = createTestApp();
 
-      const jwt = createMockJwt({
+      const jwt = await createSignedJwt({
         wallet: DEFAULT_MOCK_PAYMENT.payer,
         email: 'test@example.com',
       });
@@ -234,7 +236,7 @@ describe('x402 Flow Integration Tests', () => {
 
       const app = createTestApp();
 
-      const jwt = createMockJwt({
+      const jwt = await createSignedJwt({
         wallet: DEFAULT_MOCK_PAYMENT.payer,
       });
 
@@ -260,7 +262,7 @@ describe('x402 Flow Integration Tests', () => {
 
       const app = createTestApp();
 
-      const jwt = createMockJwt({
+      const jwt = await createSignedJwt({
         wallet: DEFAULT_MOCK_PAYMENT.payer,
       });
 
@@ -290,7 +292,7 @@ describe('x402 Flow Integration Tests', () => {
 
       const app = createTestApp();
 
-      const jwt = createMockJwt({ wallet: DEFAULT_MOCK_PAYMENT.payer });
+      const jwt = await createSignedJwt({ wallet: DEFAULT_MOCK_PAYMENT.payer });
 
       await app.request('/mybucket/file.txt', {
         method: 'PUT',
@@ -338,7 +340,7 @@ describe('x402 Flow Integration Tests', () => {
 
       const app = createTestApp();
 
-      const jwt = createMockJwt({ wallet: DEFAULT_MOCK_PAYMENT.payer });
+      const jwt = await createSignedJwt({ wallet: DEFAULT_MOCK_PAYMENT.payer });
 
       await app.request('/mybucket/file.txt', {
         method: 'PUT',
@@ -367,7 +369,7 @@ describe('x402 Flow Integration Tests', () => {
     it('should return 402 with correct headers when no payment', async () => {
       const app = createTestApp();
 
-      const jwt = createMockJwt();
+      const jwt = await createSignedJwt();
 
       const res = await app.request('/mybucket/file.txt', {
         method: 'PUT',
@@ -421,7 +423,7 @@ describe('x402 Flow Integration Tests', () => {
     it('should include body matching header in 402 response', async () => {
       const app = createTestApp();
 
-      const jwt = createMockJwt();
+      const jwt = await createSignedJwt();
 
       const res = await app.request('/mybucket/file.txt', {
         method: 'PUT',
@@ -491,7 +493,7 @@ describe('x402 Flow Integration Tests', () => {
 
       const app = createTestApp();
 
-      const jwt = createMockJwt({ wallet: DEFAULT_MOCK_PAYMENT.payer });
+      const jwt = await createSignedJwt({ wallet: DEFAULT_MOCK_PAYMENT.payer });
 
       const res = await app.request('/mybucket/file.txt', {
         method: 'PUT',
@@ -513,7 +515,7 @@ describe('x402 Flow Integration Tests', () => {
       const app = createTestApp();
 
       // JWT with different wallet - Option C allows any wallet to pay for any user
-      const jwt = createMockJwt({
+      const jwt = await createSignedJwt({
         wallet: '0xDifferentWallet12345678901234567890AB',
       });
 
@@ -538,7 +540,7 @@ describe('x402 Flow Integration Tests', () => {
 
       const app = createTestApp();
 
-      const jwt = createMockJwt({ wallet: DEFAULT_MOCK_PAYMENT.payer });
+      const jwt = await createSignedJwt({ wallet: DEFAULT_MOCK_PAYMENT.payer });
 
       const res = await app.request('/mybucket/file.txt', {
         method: 'PUT',
@@ -613,7 +615,7 @@ describe('x402 Flow Integration Tests', () => {
 
       const app = createTestApp();
 
-      const jwt = createMockJwt();
+      const jwt = await createSignedJwt();
 
       await app.request('/mybucket/private-file.txt', {
         method: 'GET',
@@ -666,7 +668,7 @@ describe('x402 Flow Integration Tests', () => {
 
       const app = createTestApp();
 
-      const jwt = createMockJwt({ wallet: DEFAULT_MOCK_PAYMENT.payer });
+      const jwt = await createSignedJwt({ wallet: DEFAULT_MOCK_PAYMENT.payer });
 
       const res = await app.request('/mybucket/file.txt', {
         method: 'DELETE',

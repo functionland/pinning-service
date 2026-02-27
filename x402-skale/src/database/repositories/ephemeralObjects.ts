@@ -52,6 +52,7 @@ export async function getExpiredObjects(limit = 100): Promise<EphemeralObject[]>
     `SELECT * FROM x402_ephemeral_objects
      WHERE expires_at < NOW()
        AND deleted = 0
+       AND COALESCE(delete_attempts, 0) < 5
      ORDER BY expires_at ASC
      LIMIT $1`,
     [limit]
@@ -73,6 +74,7 @@ export async function getUnpaidExpiredObjects(
      FROM x402_ephemeral_objects e
      LEFT JOIN x402_payment_logs p ON e.payment_id = p.payment_id
      WHERE e.deleted = 0
+       AND COALESCE(e.delete_attempts, 0) < 5
        AND e.created_at < NOW() - INTERVAL '1 minute' * $1
        AND (p.status IS NULL OR p.status IN ('pending', 'failed'))
      ORDER BY e.created_at ASC
@@ -102,6 +104,19 @@ export async function markObjectDeleted(id: number, error?: string): Promise<voi
      SET deleted = 1, deleted_at = NOW(), delete_error = $1
      WHERE id = $2`,
     [error || null, id]
+  );
+}
+
+/**
+ * Mark a delete attempt as failed (increment counter, store error)
+ * Object will be retried on next cleanup cycle until max attempts reached.
+ */
+export async function markDeleteFailed(id: number, error: string): Promise<void> {
+  await query(
+    `UPDATE x402_ephemeral_objects
+     SET delete_attempts = COALESCE(delete_attempts, 0) + 1, delete_error = $1
+     WHERE id = $2`,
+    [error, id]
   );
 }
 

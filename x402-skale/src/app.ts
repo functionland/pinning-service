@@ -34,7 +34,7 @@ app.use('*', secureHeaders());
 // CORS
 app.use('*', cors({
   origin: '*',
-  allowMethods: ['GET', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'],
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS'],
   allowHeaders: [
     'Authorization',
     'Content-Type',
@@ -53,6 +53,33 @@ app.use('*', cors({
   ],
   maxAge: 86400,
 }));
+
+// Per-IP rate limiting (generous for AI agents: 600 req/min = 10/sec sustained)
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 600;
+
+// Periodic cleanup to prevent memory leak
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimitMap) {
+    if (now > entry.resetAt) rateLimitMap.delete(ip);
+  }
+}, 60_000);
+
+app.use('*', async (c, next) => {
+  const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+  } else if (entry.count >= RATE_LIMIT_MAX) {
+    return c.json({ error: 'Rate limit exceeded' }, 429);
+  } else {
+    entry.count++;
+  }
+  await next();
+});
 
 // Request ID and timing
 app.use('*', async (c, next) => {

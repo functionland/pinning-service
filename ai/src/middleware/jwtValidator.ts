@@ -39,9 +39,18 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
     return c.json({ error: 'Authentication required', code: 'MISSING_AUTH' }, 401);
   }
 
+  // Reject if JWT_SECRET is not configured — AI service always requires verified JWT
+  if (!config.jwtSecret) {
+    return c.json({ error: 'JWT authentication not configured', code: 'JWT_NOT_CONFIGURED' }, 500);
+  }
+
   const token = authHeader.slice(7);
 
   try {
+    // Verify JWT signature
+    const secret = new TextEncoder().encode(config.jwtSecret);
+    await jose.jwtVerify(token, secret);
+
     // Decode the JWT to extract claims
     const decoded = jose.decodeJwt(token) as JwtPayload;
 
@@ -57,22 +66,11 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
       return c.json({ error: 'Token expired', code: 'TOKEN_EXPIRED' }, 401);
     }
 
-    // If JWT_SECRET is configured, verify the signature
-    if (config.jwtSecret) {
-      try {
-        const secret = new TextEncoder().encode(config.jwtSecret);
-        await jose.jwtVerify(token, secret);
-      } catch (verifyError) {
-        console.error('[jwt] Signature verification failed:', verifyError);
-        return c.json({ error: 'Invalid token signature', code: 'INVALID_SIGNATURE' }, 401);
-      }
-    }
-
     // Store user email and token in context
     c.set('userEmail', email);
     c.set('userToken', token);
   } catch (error) {
-    console.error('[jwt] Token decode error:', error);
+    console.error('[jwt] Token decode/verify error:', error);
     return c.json({ error: 'Invalid token', code: 'INVALID_TOKEN' }, 401);
   }
 

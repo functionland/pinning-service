@@ -26,6 +26,19 @@ export async function initializeDatabase(): Promise<void> {
     throw new Error('Failed to connect to PostgreSQL database');
   }
 
+  // Verify required tables exist
+  const tables = await query<{ tablename: string }>(
+    `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`
+  );
+  const tableNames = tables.rows.map(r => r.tablename);
+  const required = ['x402_ephemeral_objects', 'x402_payment_logs'];
+  for (const t of required) {
+    if (!tableNames.includes(t)) {
+      console.error(`[database] FATAL: Required table '${t}' missing. Run migrations first.`);
+      process.exit(1);
+    }
+  }
+
   console.log('[database] PostgreSQL connected successfully');
 }
 

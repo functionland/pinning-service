@@ -40,6 +40,17 @@ import { HttpError } from '../middleware/errorHandler.js';
 import { config } from '../config/index.js';
 import { ensureWalletUserAndGetApiKey } from '../services/walletUser.js';
 
+// Nonce tracking for download signature replay prevention
+const usedNonces = new Map<string, number>(); // nonceKey -> expiry timestamp
+
+// Periodically clean expired nonce entries
+setInterval(() => {
+  const now = Math.floor(Date.now() / 1000);
+  for (const [nonce, expiry] of usedNonces) {
+    if (now > expiry) usedNonces.delete(nonce);
+  }
+}, 60_000);
+
 // EIP-712 types for TransferWithAuthorization (EIP-3009)
 const TRANSFER_WITH_AUTHORIZATION_TYPES = {
   TransferWithAuthorization: [
@@ -119,6 +130,14 @@ async function resolveReadAuth(c: Context<Env>): Promise<string> {
         console.warn(`[download] X-PAYMENT signature expired for ${claimedWallet}`);
         return '';
       }
+
+      // Check for signature replay
+      const nonceKey = `${claimedWallet.toLowerCase()}:${auth.nonce}`;
+      if (usedNonces.has(nonceKey)) {
+        console.warn(`[download] Replay detected for ${claimedWallet}`);
+        return '';
+      }
+      usedNonces.set(nonceKey, Number(message.validBefore));
 
       // Signature verified — look up wallet's API key
       const walletUser = await ensureWalletUserAndGetApiKey(claimedWallet);

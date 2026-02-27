@@ -89,7 +89,8 @@ healthRoutes.get('/pricing', (c) => {
  */
 healthRoutes.post('/cleanup', async (c) => {
   const auth = c.req.header('Authorization');
-  if (!auth || !auth.includes(process.env.S3_ADMIN_TOKEN || '__never_match__')) {
+  const expected = `Bearer ${process.env.S3_ADMIN_TOKEN || '__never_match__'}`;
+  if (!auth || auth !== expected) {
     return c.json({ error: 'Admin token required' }, 403);
   }
 

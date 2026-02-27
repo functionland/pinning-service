@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import cookieParser from 'cookie-parser';
+import crypto from 'crypto';
 import http from 'http';
 import { OAuth2Client } from 'google-auth-library';
 import { v4 as uuidv4 } from 'uuid';
@@ -400,9 +401,26 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       secure: config.nodeEnv === 'production',
       httpOnly: true,
       maxAge: 7 * 24 * 60 * 60 * 1000,
-      sameSite: 'lax',
+      sameSite: 'strict',
     },
   }));
+
+  // CSRF origin validation for state-changing requests using session auth
+  app.use('/api/', (req: Request, res: Response, next: NextFunction) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+    // Skip for API key / system key auth (CSRF-immune, no cookies)
+    if (req.headers.authorization || req.headers['x-system-key']) return next();
+    const origin = req.headers.origin;
+    if (origin) {
+      const allowedOrigins = config.nodeEnv === 'production'
+        ? [`https://${req.hostname}`]
+        : ['http://localhost:5173', 'http://localhost:3001', `http://${req.hostname}:${config.port}`];
+      if (!allowedOrigins.some(o => origin === o)) {
+        return res.status(403).json({ error: 'Invalid origin' });
+      }
+    }
+    next();
+  });
 
   // Auth middleware (session-based for web UI)
   function requireAuth(req: Request, res: Response, next: NextFunction) {
@@ -1866,7 +1884,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   function requireAdminOrSystemKey(req: Request, res: Response, next: NextFunction) {
     // Check for system key in header
     const systemKeyHeader = req.header('X-System-Key');
-    if (systemKeyHeader && config.systemKey && systemKeyHeader === config.systemKey) {
+    if (systemKeyHeader && config.systemKey &&
+        systemKeyHeader.length === config.systemKey.length &&
+        crypto.timingSafeEqual(Buffer.from(systemKeyHeader), Buffer.from(config.systemKey))) {
       // System key authentication - mark as system caller
       (req as any).isSystemCall = true;
       return next();
@@ -1880,6 +1900,18 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       return res.status(403).json({ error: 'Admin access required' });
     }
     next();
+  }
+
+  // Admin audit logging helper
+  async function logAdminAction(actor: string, action: string, targetEmail?: string, details?: Record<string, unknown>) {
+    try {
+      await query(
+        `INSERT INTO admin_audit_log (actor, action, target_email, details) VALUES ($1, $2, $3, $4)`,
+        [actor, action, targetEmail || null, details ? JSON.stringify(details) : null]
+      );
+    } catch (err) {
+      console.error('[audit] Failed to log admin action:', err);
+    }
   }
 
   // Get suspended users (admin only)
@@ -1908,7 +1940,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(404).json({ error: 'User not found or not suspended' });
       }
 
-      console.log(`[webui] Admin ${req.session.user!.email} unsuspended ${email}`);
+      const adminEmail = req.session.user!.email;
+      console.log(`[webui] Admin ${adminEmail} unsuspended ${email}`);
+      await logAdminAction(adminEmail, 'unsuspend', email);
 
       res.json({ success: true });
     } catch (error) {
@@ -1938,6 +1972,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       await creditUser(email, numAmount, `${caller}:${reason}`, 'adjustment');
 
       console.log(`[webui] ${caller} adjusted ${email} by ${numAmount} FULA: ${reason}`);
+      await logAdminAction(caller, 'adjust', email, { amount: numAmount, reason });
 
       const newStatus = await getUserCreditStatus(email);
 
@@ -1995,6 +2030,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         apiKey = await dbOps.createApiKey(email);
         console.log(`[webui] Created API key for x402 user: ${email}`);
       }
+
+      const caller = (req as any).isSystemCall ? 'system:x402' : `admin:${req.session.user?.email || 'unknown'}`;
+      await logAdminAction(caller, 'ensure-user-key', email);
 
       res.json({ success: true, email, apiKey });
 
@@ -2099,6 +2137,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         LEFT JOIN webui_users wu ON r.referred_email = wu.email
         LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
         ORDER BY rc.user_email, r.referred_at
+        LIMIT 100000
       `);
       const data = dataResult.rows;
 

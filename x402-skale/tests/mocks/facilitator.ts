@@ -263,8 +263,11 @@ export function decodeBase64<T>(base64: string): T {
   return JSON.parse(Buffer.from(base64, 'base64').toString('utf-8'));
 }
 
+/** Shared test secret for JWT signing (must match config mock) */
+export const TEST_JWT_SECRET = 'test-jwt-secret-for-unit-tests-32ch';
+
 /**
- * Create a mock JWT token
+ * Create a mock JWT token (unsigned, for decode-only tests or when jwtSecret is not set)
  */
 export function createMockJwt(claims: {
   email?: string;
@@ -287,4 +290,33 @@ export function createMockJwt(claims: {
   const signature = 'mock-signature';
 
   return `${headerB64}.${payloadB64}.${signature}`;
+}
+
+/**
+ * Create a properly signed JWT token (for tests where jwtSecret is configured)
+ */
+export async function createSignedJwt(claims: {
+  email?: string;
+  wallet?: string;
+  sub?: string;
+  exp?: number;
+} = {}, secret: string = TEST_JWT_SECRET): Promise<string> {
+  const { SignJWT } = await import('jose');
+  const secretKey = new TextEncoder().encode(secret);
+
+  const builder = new SignJWT({
+    email: claims.email || 'test@example.com',
+    wallet: claims.wallet || '0x1234567890123456789012345678901234567890',
+    sub: claims.sub || 'user-123',
+  })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt();
+
+  if (claims.exp) {
+    builder.setExpirationTime(claims.exp);
+  } else {
+    builder.setExpirationTime('1h');
+  }
+
+  return builder.sign(secretKey);
 }

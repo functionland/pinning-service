@@ -24,12 +24,19 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
     throw new HttpError(401, 'Missing or invalid Authorization header', 'MISSING_AUTH');
   }
 
+  // Reject JWT auth if JWT_SECRET is not configured — prevents forged token attacks
+  if (!config.jwtSecret) {
+    throw new HttpError(401, 'JWT authentication not available. Use x402 payment.', 'JWT_NOT_CONFIGURED');
+  }
+
   const token = authHeader.slice(7); // Remove 'Bearer '
 
   try {
+    // Verify JWT signature
+    const secret = new TextEncoder().encode(config.jwtSecret);
+    await jose.jwtVerify(token, secret);
+
     // Decode the JWT to extract claims
-    // Note: We decode but don't verify here because the S3 backend will verify
-    // If JWT_SECRET is set, we can also verify locally
     const decoded = jose.decodeJwt(token) as JwtPayload;
 
     // Extract user info
@@ -44,17 +51,6 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
     // Check expiration if present
     if (decoded.exp && decoded.exp * 1000 < Date.now()) {
       throw new HttpError(401, 'Token expired', 'TOKEN_EXPIRED');
-    }
-
-    // If JWT_SECRET is configured, verify the signature
-    if (config.jwtSecret) {
-      try {
-        const secret = new TextEncoder().encode(config.jwtSecret);
-        await jose.jwtVerify(token, secret);
-      } catch (verifyError) {
-        console.error('[jwt] Signature verification failed:', verifyError);
-        throw new HttpError(401, 'Invalid token signature', 'INVALID_SIGNATURE');
-      }
     }
 
     // Store user info in context
@@ -87,10 +83,19 @@ export const x402OrJwtMiddleware = createMiddleware<Env>(async (c, next) => {
   const authHeader = c.req.header('Authorization');
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
+    // Reject JWT auth if JWT_SECRET is not configured — prevents forged token attacks
+    if (!config.jwtSecret) {
+      throw new HttpError(401, 'JWT authentication not available. Use x402 payment.', 'JWT_NOT_CONFIGURED');
+    }
+
     // JWT mode: validate JWT (same logic as jwtValidatorMiddleware)
     const token = authHeader.slice(7);
 
     try {
+      // Verify JWT signature
+      const secret = new TextEncoder().encode(config.jwtSecret);
+      await jose.jwtVerify(token, secret);
+
       const decoded = jose.decodeJwt(token) as JwtPayload;
 
       const userInfo: JwtUserInfo = {
@@ -104,17 +109,6 @@ export const x402OrJwtMiddleware = createMiddleware<Env>(async (c, next) => {
       // Check expiration if present
       if (decoded.exp && decoded.exp * 1000 < Date.now()) {
         throw new HttpError(401, 'Token expired', 'TOKEN_EXPIRED');
-      }
-
-      // If JWT_SECRET is configured, verify the signature
-      if (config.jwtSecret) {
-        try {
-          const secret = new TextEncoder().encode(config.jwtSecret);
-          await jose.jwtVerify(token, secret);
-        } catch (verifyError) {
-          console.error('[jwt] Signature verification failed:', verifyError);
-          throw new HttpError(401, 'Invalid token signature', 'INVALID_SIGNATURE');
-        }
       }
 
       // Store user info and auth mode in context

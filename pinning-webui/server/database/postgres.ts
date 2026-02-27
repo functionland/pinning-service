@@ -6,6 +6,7 @@
  */
 
 import pg, { QueryResultRow } from 'pg';
+import crypto from 'crypto';
 const { Pool } = pg;
 
 // Pool instance
@@ -173,7 +174,11 @@ export async function getOrCreateWebuiUser(
 
   // Create first API key automatically
   const keyId = generateJwtApiKey(email, jwtSecret);
-  await query('INSERT INTO api_keys (key_id, user_email) VALUES ($1, $2)', [keyId, email]);
+  const encryptedKey = encryptApiKey(keyId);
+  await query(
+    'INSERT INTO api_keys (key_id, user_email, encrypted_key) VALUES ($1, $2, $3)',
+    [keyId, email, encryptedKey]
+  );
 
   // Also create entry in main users/sessions tables for pinning service compatibility
   const existingMainUser = await query('SELECT * FROM users WHERE username = $1', [email]);
@@ -240,13 +245,26 @@ export async function getWebuiUserByEmail(email: string): Promise<any> {
   return result.rows[0];
 }
 
-// Get API keys
+// Get API keys (decrypts encrypted_key if available, falls back to key_id)
 export async function getApiKeys(email: string): Promise<any[]> {
   const result = await query(
-    'SELECT key_id, created_at, last_used_at FROM api_keys WHERE user_email = $1 AND is_deleted = 0 ORDER BY created_at DESC',
+    'SELECT key_id, encrypted_key, created_at, last_used_at FROM api_keys WHERE user_email = $1 AND is_deleted = 0 ORDER BY created_at DESC',
     [email]
   );
-  return result.rows;
+  return result.rows.map((row: any) => {
+    let displayKey = row.key_id;
+    if (row.encrypted_key) {
+      try {
+        const decrypted = decryptApiKey(row.encrypted_key);
+        if (decrypted) displayKey = decrypted;
+      } catch { /* fallback to key_id */ }
+    }
+    return {
+      key_id: displayKey,
+      created_at: row.created_at,
+      last_used_at: row.last_used_at,
+    };
+  });
 }
 
 // Create API key
@@ -256,7 +274,11 @@ export async function createApiKey(
   generateJwtApiKey: (email: string, jwtSecret: string) => string
 ): Promise<string> {
   const keyId = generateJwtApiKey(email, jwtSecret);
-  await query('INSERT INTO api_keys (key_id, user_email) VALUES ($1, $2)', [keyId, email]);
+  const encryptedKey = encryptApiKey(keyId);
+  await query(
+    'INSERT INTO api_keys (key_id, user_email, encrypted_key) VALUES ($1, $2, $3)',
+    [keyId, email, encryptedKey]
+  );
 
   // Also create corresponding session for pinning service
   await query(
@@ -561,6 +583,38 @@ export async function deleteUserReferralCode(
 }
 
 // ============================================
+// API Key Encryption (AES-256-GCM at rest)
+// ============================================
+
+function getEncryptionKey(): Buffer | null {
+  const hex = process.env.ENCRYPTION_KEY;
+  if (!hex) return null;
+  return Buffer.from(hex, 'hex');
+}
+
+export function encryptApiKey(key: string): string | null {
+  const encKey = getEncryptionKey();
+  if (!encKey) return null;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', encKey, iv);
+  const encrypted = Buffer.concat([cipher.update(key, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, encrypted]).toString('base64');
+}
+
+export function decryptApiKey(stored: string): string | null {
+  const encKey = getEncryptionKey();
+  if (!encKey) return null;
+  const buf = Buffer.from(stored, 'base64');
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const encrypted = buf.subarray(28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', encKey, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+}
+
+// ============================================
 // API Key Verification
 // ============================================
 
@@ -661,4 +715,6 @@ export default {
   markAppDownloaded,
   getUserCompany,
   updateUserCompany,
+  encryptApiKey,
+  decryptApiKey,
 };

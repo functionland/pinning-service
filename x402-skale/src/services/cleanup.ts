@@ -9,7 +9,7 @@
  * - Phase 2: Normal TTL-based cleanup for paid objects whose TTL has expired
  */
 
-import { getExpiredObjects, getUnpaidExpiredObjects, markObjectDeleted } from '../database/repositories/ephemeralObjects.js';
+import { getExpiredObjects, getUnpaidExpiredObjects, markObjectDeleted, markDeleteFailed } from '../database/repositories/ephemeralObjects.js';
 import { deleteObject } from './s3Proxy.js';
 import { config } from '../config/index.js';
 
@@ -109,13 +109,13 @@ async function runCleanup(): Promise<void> {
             await markObjectDeleted(obj.id);
             deleted++;
           } else {
-            await markObjectDeleted(obj.id, 'S3 delete failed');
+            await markDeleteFailed(obj.id, 'S3 delete failed');
             errors++;
           }
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : 'Unknown error';
           console.error(`[cleanup] Error cleaning up unpaid object ${obj.bucket}/${obj.object_key}:`, errorMsg);
-          await markObjectDeleted(obj.id, errorMsg).catch(() => {});
+          await markDeleteFailed(obj.id, errorMsg).catch(() => {});
           errors++;
         }
       }
@@ -134,13 +134,13 @@ async function runCleanup(): Promise<void> {
             await markObjectDeleted(obj.id);
             deleted++;
           } else {
-            await markObjectDeleted(obj.id, 'S3 delete failed');
+            await markDeleteFailed(obj.id, 'S3 delete failed');
             errors++;
           }
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : 'Unknown error';
           console.error(`[cleanup] Error cleaning up expired object ${obj.bucket}/${obj.object_key}:`, errorMsg);
-          await markObjectDeleted(obj.id, errorMsg).catch(() => {});
+          await markDeleteFailed(obj.id, errorMsg).catch(() => {});
           errors++;
         }
       }
@@ -179,10 +179,12 @@ export async function triggerCleanup(): Promise<{
         await markObjectDeleted(obj.id);
         deleted++;
       } else {
-        await markObjectDeleted(obj.id, 'S3 delete failed');
+        await markDeleteFailed(obj.id, 'S3 delete failed');
         errors++;
       }
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      await markDeleteFailed(obj.id, errorMsg).catch(() => {});
       errors++;
     }
   }

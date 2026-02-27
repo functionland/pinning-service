@@ -2,25 +2,28 @@
  * Unit Tests for JWT Validator Middleware
  *
  * Tests JWT parsing, validation, and wallet extraction.
+ * Updated for C2 security fix: JWT auth now requires JWT_SECRET to be configured.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Hono } from 'hono';
-import { createMockJwt } from '../mocks/facilitator.js';
+import { createSignedJwt, createMockJwt, TEST_JWT_SECRET } from '../mocks/facilitator.js';
 
-// Mock config
+// Mock config with jwtSecret set (C2: JWT auth requires configured secret)
 vi.mock('../../src/config/index.js', () => ({
   config: {
-    jwtSecret: undefined, // No signature verification by default
+    jwtSecret: 'test-jwt-secret-for-unit-tests-32ch',
   },
 }));
 
 // Import after mocking
 import {
   jwtValidatorMiddleware,
+  x402OrJwtMiddleware,
   walletAssertionMiddleware,
   optionalJwtMiddleware,
   getJwtUser,
+  getAuthMode,
 } from '../../src/middleware/jwtValidator.js';
 import { errorHandler } from '../../src/middleware/errorHandler.js';
 
@@ -65,7 +68,7 @@ describe('JWT Validator Middleware', () => {
       expect(res.status).toBe(401);
     });
 
-    it('should extract email from JWT claims', async () => {
+    it('should extract email from signed JWT claims', async () => {
       const app = createTestApp();
       app.use('*', jwtValidatorMiddleware);
       app.get('/test', (c) => {
@@ -73,7 +76,7 @@ describe('JWT Validator Middleware', () => {
         return c.json({ email: user?.email });
       });
 
-      const jwt = createMockJwt({ email: 'test@example.com' });
+      const jwt = await createSignedJwt({ email: 'test@example.com' });
 
       const res = await app.request('/test', {
         headers: {
@@ -86,7 +89,7 @@ describe('JWT Validator Middleware', () => {
       expect(body.email).toBe('test@example.com');
     });
 
-    it('should extract wallet from JWT claims', async () => {
+    it('should extract wallet from signed JWT claims', async () => {
       const app = createTestApp();
       app.use('*', jwtValidatorMiddleware);
       app.get('/test', (c) => {
@@ -94,7 +97,7 @@ describe('JWT Validator Middleware', () => {
         return c.json({ wallet: user?.wallet });
       });
 
-      const jwt = createMockJwt({
+      const jwt = await createSignedJwt({
         wallet: '0xABCDEF1234567890ABCDEF1234567890ABCDEF12',
       });
 
@@ -115,8 +118,8 @@ describe('JWT Validator Middleware', () => {
       app.use('*', jwtValidatorMiddleware);
       app.get('/test', (c) => c.json({ success: true }));
 
-      // Create JWT with past expiration
-      const jwt = createMockJwt({
+      // Create signed JWT with past expiration
+      const jwt = await createSignedJwt({
         exp: Math.floor(Date.now() / 1000) - 3600, // 1 hour ago
       });
 
@@ -127,8 +130,23 @@ describe('JWT Validator Middleware', () => {
       });
 
       expect(res.status).toBe(401);
-      const body = await res.json();
-      expect(body.error).toContain('expired');
+    });
+
+    it('should return 401 for unsigned/forged JWT (C2 security fix)', async () => {
+      const app = createTestApp();
+      app.use('*', jwtValidatorMiddleware);
+      app.get('/test', (c) => c.json({ success: true }));
+
+      // Use unsigned mock JWT — should be rejected because jwtSecret IS configured
+      const jwt = createMockJwt({ email: 'attacker@evil.com' });
+
+      const res = await app.request('/test', {
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+        },
+      });
+
+      expect(res.status).toBe(401);
     });
 
     it('should return 401 for malformed JWT', async () => {
@@ -145,7 +163,7 @@ describe('JWT Validator Middleware', () => {
       expect(res.status).toBe(401);
     });
 
-    it('should extract subject from JWT claims', async () => {
+    it('should extract subject from signed JWT claims', async () => {
       const app = createTestApp();
       app.use('*', jwtValidatorMiddleware);
       app.get('/test', (c) => {
@@ -153,7 +171,7 @@ describe('JWT Validator Middleware', () => {
         return c.json({ sub: user?.sub });
       });
 
-      const jwt = createMockJwt({ sub: 'user-456' });
+      const jwt = await createSignedJwt({ sub: 'user-456' });
 
       const res = await app.request('/test', {
         headers: {
@@ -167,16 +185,66 @@ describe('JWT Validator Middleware', () => {
     });
   });
 
+  describe('x402OrJwtMiddleware (C2 security)', () => {
+    it('should accept signed JWT and set authMode to jwt', async () => {
+      const app = createTestApp();
+      app.use('*', x402OrJwtMiddleware);
+      app.get('/test', (c) => {
+        const user = getJwtUser(c);
+        const mode = getAuthMode(c);
+        return c.json({ email: user?.email, mode });
+      });
+
+      const jwt = await createSignedJwt({ email: 'jwt-user@example.com' });
+
+      const res = await app.request('/test', {
+        headers: { Authorization: `Bearer ${jwt}` },
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.email).toBe('jwt-user@example.com');
+      expect(body.mode).toBe('jwt');
+    });
+
+    it('should reject unsigned JWT even in x402-or-jwt mode', async () => {
+      const app = createTestApp();
+      app.use('*', x402OrJwtMiddleware);
+      app.get('/test', (c) => c.json({ success: true }));
+
+      const jwt = createMockJwt({ email: 'forged@evil.com' });
+
+      const res = await app.request('/test', {
+        headers: { Authorization: `Bearer ${jwt}` },
+      });
+
+      expect(res.status).toBe(401);
+    });
+
+    it('should fall through to x402 mode when no Authorization header', async () => {
+      const app = createTestApp();
+      app.use('*', x402OrJwtMiddleware);
+      app.get('/test', (c) => {
+        const mode = getAuthMode(c);
+        return c.json({ mode });
+      });
+
+      const res = await app.request('/test');
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.mode).toBe('x402');
+    });
+  });
+
   describe('walletAssertionMiddleware', () => {
     it('should pass when JWT wallet matches x402 wallet', async () => {
       const app = createTestApp();
       app.use('*', async (c, next) => {
-        // Simulate JWT middleware setting user
         c.set('jwtUser', {
           email: 'test@example.com',
           wallet: '0x1234567890123456789012345678901234567890',
         });
-        // Simulate x402 middleware setting payment
         c.set('x402Payment', {
           payer: '0x1234567890123456789012345678901234567890',
         });
@@ -217,7 +285,6 @@ describe('JWT Validator Middleware', () => {
       app.use('*', async (c, next) => {
         c.set('jwtUser', {
           email: 'test@example.com',
-          // No wallet
         });
         c.set('x402Payment', {
           payer: '0x2222222222222222222222222222222222222222',
@@ -229,7 +296,6 @@ describe('JWT Validator Middleware', () => {
 
       const res = await app.request('/test');
 
-      // Should pass - no wallet to assert
       expect(res.status).toBe(200);
     });
 
@@ -278,6 +344,7 @@ describe('JWT Validator Middleware', () => {
         return c.json({ email: user?.email });
       });
 
+      // optionalJwtMiddleware uses decode-only (no verify), so unsigned is fine
       const jwt = createMockJwt({ email: 'optional@test.com' });
 
       const res = await app.request('/test', {
@@ -305,7 +372,6 @@ describe('JWT Validator Middleware', () => {
         },
       });
 
-      // Should still succeed, just no user
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.hasUser).toBe(false);

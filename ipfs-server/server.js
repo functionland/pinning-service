@@ -34,11 +34,12 @@ if (!fs.existsSync(config.uploadDir)) {
 
   const app = express();
   
-  // Security headers middleware
+  // Security headers middleware (strict defaults for non-gateway routes)
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('X-XSS-Protection', '0'); // Deprecated, can cause issues — disable
+    res.setHeader('Referrer-Policy', 'no-referrer');
     next();
   });
 
@@ -146,6 +147,14 @@ if (!fs.existsSync(config.uploadDir)) {
     });
   });
 
+  // Blocked MIME types for upload
+  const BLOCKED_MIMES = new Set([
+    'application/x-msdownload',   // .exe
+    'application/x-msdos-program', // .com
+    'application/x-sh',           // .sh
+    'application/x-bat',          // .bat
+  ]);
+
   // Upload endpoint (requires authentication)
   app.post('/upload', authenticate, upload.single('file'), async (req, res) => {
     if (!req.file) {
@@ -155,6 +164,17 @@ if (!fs.existsSync(config.uploadDir)) {
     const filePath = req.file.path;
 
     try {
+      // Check file type against blocklist
+      const headerBuf = Buffer.alloc(4100);
+      const fd = fs.openSync(filePath, 'r');
+      fs.readSync(fd, headerBuf, 0, 4100, 0);
+      fs.closeSync(fd);
+      const detectedType = await fileTypeFromBuffer(headerBuf);
+      if (detectedType && BLOCKED_MIMES.has(detectedType.mime)) {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: `File type ${detectedType.mime} not allowed` });
+      }
+
       // Stream file to IPFS for better memory efficiency with large files
       const fileStream = fs.createReadStream(filePath);
       
@@ -216,6 +236,7 @@ if (!fs.existsSync(config.uploadDir)) {
       if (isRawRequest) {
         // Handle raw block request
         const block = await ipfs.block.get(cid);
+        res.removeHeader('X-Frame-Options');
         res.setHeader('Content-Type', 'application/vnd.ipld.raw');
         res.setHeader('Content-Length', block.length);
         res.send(Buffer.from(block));
@@ -263,6 +284,12 @@ if (!fs.existsSync(config.uploadDir)) {
         } catch (typeError) {
           // Ignore type detection errors, use default
         }
+
+        // Gateway-specific headers for hosted websites
+        res.removeHeader('X-Frame-Options'); // Allow iframes within hosted websites
+        res.setHeader('Content-Security-Policy',
+          "frame-ancestors 'self'; base-uri 'self'; form-action 'self' https:; object-src 'none'"
+        );
 
         res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Length', content.length);

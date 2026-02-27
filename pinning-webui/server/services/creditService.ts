@@ -189,30 +189,13 @@ export async function creditUser(
 }
 
 // Convert raw token amount (from blockchain) to FULA
+// Preserves precision for the integer part; only fractional part may lose precision above 2^53
 export function rawToFula(rawAmount: string): number {
   const amount = BigInt(rawAmount);
   const divisor = BigInt(10 ** FULA_DECIMALS);
-  return Number(amount) / Number(divisor);
-}
-
-// Verify EIP-191 signature for wallet ownership
-export function verifySignature(message: string, signature: string, expectedAddress: string): boolean {
-  // Simple EIP-191 signature verification
-  // In production, use ethers.js or viem for proper verification
-  try {
-    // Import viem for verification (will be added to dependencies)
-    const { verifyMessage } = require('viem');
-    verifyMessage({
-      address: expectedAddress as `0x${string}`,
-      message,
-      signature: signature as `0x${string}`,
-    });
-    return true; // verifyMessage throws if invalid
-  } catch {
-    // Fallback: just check that the signature exists and address format is valid
-    // This is a temporary workaround until viem is properly integrated
-    return /^0x[a-fA-F0-9]{130}$/.test(signature) && /^0x[a-fA-F0-9]{40}$/i.test(expectedAddress);
-  }
+  const whole = amount / divisor;
+  const remainder = amount % divisor;
+  return Number(whole) + Number(remainder) / Number(divisor);
 }
 
 // Get user's linked wallets

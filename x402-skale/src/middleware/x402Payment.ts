@@ -31,12 +31,14 @@ import type {
 } from '../types/index.js';
 import { config, getNetworkIdentifier, getAssetIdentifier } from '../config/index.js';
 import { calculatePriceMicroUsdc, microUsdcToUsdc } from '../utils/pricing.js';
+import { normalizeAddress } from '../utils/address.js';
 import { HttpError } from './errorHandler.js';
 import {
   createPaymentLog,
   markPaymentVerified,
   markPaymentSettled,
   markPaymentFailed,
+  getPaymentLog,
 } from '../database/repositories/paymentLogs.js';
 
 // Constants
@@ -373,6 +375,10 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
   // Get request parameters
   const isCreditTopUp = c.req.path === '/credit';
   const contentLength = parseInt(c.req.header('Content-Length') || '0', 10);
+  const MAX_UPLOAD_SIZE = 10 * 1024 * 1024 * 1024; // 10GB
+  if (isNaN(contentLength) || contentLength < 0 || contentLength > MAX_UPLOAD_SIZE) {
+    throw new HttpError(413, 'Invalid or excessive Content-Length', 'INVALID_SIZE');
+  }
   const ttlSeconds = parseTtl(c);
   const sizeBytes = isCreditTopUp ? 0 : contentLength;
   const sizeMb = sizeBytes / (1024 * 1024);
@@ -414,7 +420,7 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
     // Build payment info
     paymentInfo = {
       paymentId: verification.paymentId,
-      payer: verification.payer.toLowerCase(),
+      payer: normalizeAddress(verification.payer),
       amount: verification.amount,
       amountUsdc: microUsdcToUsdc(parseInt(verification.amount, 10)),
       asset: verification.asset,
@@ -485,6 +491,14 @@ export const x402PaymentMiddleware = createMiddleware<Env>(async (c, next) => {
       }
     } catch (error) {
       console.error('[x402] Settlement error:', error);
+      // Check if payment was actually settled despite network error (idempotency)
+      try {
+        const existingLog = await getPaymentLog(paymentInfo.paymentId);
+        if (existingLog?.status === 'settled') {
+          console.log(`[x402] Payment ${paymentInfo.paymentId} already settled, skipping failure mark`);
+          return;
+        }
+      } catch { /* ignore check failure */ }
       const message = error instanceof Error ? error.message : 'Unknown error';
       await markPaymentFailed(paymentInfo.paymentId, message);
     }

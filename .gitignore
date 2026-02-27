@@ -33,3 +33,4 @@ ipfs-pinning
 /ai/node_modules
 /ai/dist
 ai/package-lock.json
+.claude/settings.local.json

@@ -5,7 +5,7 @@
 # This script ensures database migrations run BEFORE any service restarts.
 # Without this order, services referencing new columns/tables will crash.
 #
-# Usage: sudo bash deploy.sh [OPTIONS]
+# Usage: sudo VITE_GOOGLE_CLIENT_ID=xxx VITE_WALLETCONNECT_PROJECT_ID=xxx bash ./deploy.sh [OPTIONS]
 #
 # Options:
 #   --skip-pull          Skip git pull (already up to date)

@@ -661,7 +661,7 @@ func (s *PostgresService) CreateTestSession(ctx context.Context, username, sessi
 func (s *PostgresService) ValidateSession(ctx context.Context, sessionToken string) (string, error) {
 	var username string
 	err := s.db.QueryRowContext(ctx,
-		"SELECT username FROM sessions WHERE session_token = $1",
+		"SELECT username FROM sessions WHERE session_token = $1 AND (expires_at IS NULL OR expires_at > NOW())",
 		sessionToken,
 	).Scan(&username)
 

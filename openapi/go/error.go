@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 )
 
@@ -61,11 +62,12 @@ func DefaultErrorHandler(w http.ResponseWriter, _ *http.Request, err error, resu
 
 	var parsingErr *ParsingError
 	if ok := errors.As(err, &parsingErr); ok {
+		log.Printf("[error] Parsing error: %v", err)
 		// Handle parsing errors - return IPFS standard Failure format
 		failure := Failure{
 			Error: FailureError{
 				Reason:  "BAD_REQUEST",
-				Details: err.Error(),
+				Details: "Invalid request parameters",
 			},
 		}
 		w.WriteHeader(http.StatusBadRequest)
@@ -75,11 +77,12 @@ func DefaultErrorHandler(w http.ResponseWriter, _ *http.Request, err error, resu
 
 	var requiredErr *RequiredError
 	if ok := errors.As(err, &requiredErr); ok {
+		log.Printf("[error] Required field error: %v", err)
 		// Handle missing required errors - return IPFS standard Failure format
 		failure := Failure{
 			Error: FailureError{
 				Reason:  "BAD_REQUEST",
-				Details: err.Error(),
+				Details: "Missing required field",
 			},
 		}
 		w.WriteHeader(http.StatusBadRequest)
@@ -98,6 +101,7 @@ func DefaultErrorHandler(w http.ResponseWriter, _ *http.Request, err error, resu
 	}
 
 	// Fallback: create a Failure object for unknown errors
+	log.Printf("[error] Internal error: %v", err)
 	statusCode := http.StatusInternalServerError
 	if result != nil && result.Code > 0 {
 		statusCode = result.Code
@@ -106,7 +110,7 @@ func DefaultErrorHandler(w http.ResponseWriter, _ *http.Request, err error, resu
 	failure := Failure{
 		Error: FailureError{
 			Reason:  "INTERNAL_SERVER_ERROR",
-			Details: err.Error(),
+			Details: "Internal server error",
 		},
 	}
 	w.WriteHeader(statusCode)

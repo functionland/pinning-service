@@ -390,6 +390,16 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       skip: (req) => !!req.headers['x-system-key'],
     });
     app.use('/api/', limiter);
+
+    // Stricter rate limit for auth endpoints
+    const authLimiter = rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 10,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message: { error: 'Too many authentication attempts, please try again later' },
+    });
+    app.use('/api/auth/', authLimiter);
   }
 
   // Session middleware

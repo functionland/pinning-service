@@ -32,10 +32,23 @@ const config: AppConfig = {
     : undefined,
 };
 
+// Refuse to start with default secrets in production
+if (config.nodeEnv === 'production') {
+  if (!process.env.JWT_SECRET) {
+    console.error('[webui] FATAL: JWT_SECRET must be set in production');
+    process.exit(1);
+  }
+  if (!process.env.SESSION_SECRET) {
+    console.error('[webui] FATAL: SESSION_SECRET must be set in production');
+    process.exit(1);
+  }
+}
+
 // Debug .env loading
 console.log('[webui] Configuration loaded:');
-console.log(`[webui]   JWT_SECRET: ${config.jwtSecret.substring(0, 10)}...`);
-console.log(`[webui]   SESSION_SECRET: ${config.sessionSecret.substring(0, 10)}...`);
+console.log(`[webui]   JWT_SECRET: ${process.env.JWT_SECRET ? '(set)' : '(default - INSECURE)'}`);
+console.log(`[webui]   SESSION_SECRET: ${process.env.SESSION_SECRET ? '(set)' : '(default - INSECURE)'}`);
+
 console.log(`[webui]   POSTGRES_HOST: ${process.env.POSTGRES_HOST || '(not set)'}`);
 console.log(`[webui]   NODE_ENV: ${config.nodeEnv}`);
 console.log(`[webui]   PINNING_SYSTEM_KEY: ${config.systemKey ? '****' : '(not set)'}`);

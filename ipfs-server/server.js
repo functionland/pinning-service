@@ -204,8 +204,7 @@ if (!fs.existsSync(config.uploadDir)) {
       fs.unlink(filePath, () => {});
 
       res.status(500).json({
-        error: 'Error uploading file to IPFS',
-        details: error.message
+        error: 'Error uploading file to IPFS'
       });
     }
   });
@@ -291,6 +290,19 @@ if (!fs.existsSync(config.uploadDir)) {
           "frame-ancestors 'self'; base-uri 'self'; form-action 'self' https:; object-src 'none'"
         );
 
+        // Block dangerous executable types — force download instead of execution
+        const GATEWAY_BLOCKED_MIMES = new Set([
+          'application/x-msdownload',    // .exe
+          'application/x-msdos-program', // .com executables
+          'application/x-sh',            // .sh
+          'application/x-bat',           // .bat
+          'application/x-executable',    // Linux executables
+        ]);
+        if (GATEWAY_BLOCKED_MIMES.has(contentType)) {
+          contentType = 'application/octet-stream';
+          res.setHeader('Content-Disposition', 'attachment');
+        }
+
         res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Length', content.length);
         res.send(content);
@@ -309,7 +321,7 @@ if (!fs.existsSync(config.uploadDir)) {
   // Serve ACME challenge files for SSL certificates
   app.use('/.well-known/acme-challenge', express.static(
     path.join(__dirname, '.well-known', 'acme-challenge'), 
-    { dotfiles: 'allow' }
+    { dotfiles: 'deny' }
   ));
 
   // 404 handler

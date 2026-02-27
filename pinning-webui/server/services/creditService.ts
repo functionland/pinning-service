@@ -8,7 +8,7 @@ import { query, getClient } from '../database/postgres.js';
 // Configuration
 export const FREE_TIER_BYTES = parseInt(process.env.FREE_TIER_BYTES || '524288000'); // 500MB
 export const FULA_PER_GB_MONTH = parseFloat(process.env.FULA_PER_GB_MONTH || '3');
-export const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim()).filter(Boolean);
+export const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
 
 // FULA token decimals
 const FULA_DECIMALS = 18;
@@ -292,7 +292,7 @@ export async function getCreditHistory(
 
 // Check if email is admin
 export function isAdmin(email: string): boolean {
-  return ADMIN_EMAILS.includes(email);
+  return ADMIN_EMAILS.includes(email.toLowerCase());
 }
 
 // Get suspended users (admin only)

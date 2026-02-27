@@ -178,6 +178,20 @@ func (m *MockPinsAPIService) ReplacePinByRequestId(ctx context.Context, requesti
 	return Response(http.StatusAccepted, status), nil
 }
 
+func (m *MockPinsAPIService) GetPinNodes(ctx context.Context, requestid string) (ImplResponse, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if _, ok := m.pins[requestid]; !ok {
+		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), fmt.Errorf("pin not found")
+	}
+
+	return Response(http.StatusOK, PinNodesResponse{
+		Requestid: requestid,
+		Nodes:     []PinNodeInfo{},
+	}), nil
+}
+
 // Helper function to create test router
 func setupTestRouter(service PinsAPIServicer) *mux.Router {
 	controller := NewPinsAPIController(service)

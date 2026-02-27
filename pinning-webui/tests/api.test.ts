@@ -15,6 +15,18 @@ const testConfig: AppConfig = {
   pinningServiceUrl: 'http://localhost:6000',
 };
 
+// Check if PostgreSQL is reachable before running integration tests
+let pgAvailable = false;
+try {
+  const pool = createPostgresPool();
+  const client = await pool.connect();
+  client.release();
+  pgAvailable = true;
+} catch {
+  console.warn('[test] PostgreSQL not available — skipping integration tests that require a database');
+  await closePool();
+}
+
 // Test user data
 const testUser = {
   id: 'google-user-123',
@@ -37,15 +49,12 @@ async function clearTestData(): Promise<void> {
   await query('DELETE FROM webui_users');
 }
 
-describe('API Endpoints', () => {
+describe.runIf(pgAvailable)('API Endpoints', () => {
   let app: Express;
   let agent: request.Agent;
 
   beforeAll(async () => {
-    // Initialize PostgreSQL connection pool
-    createPostgresPool();
-
-    // Create test app
+    // Create test app (pool already created during availability check)
     const result = createApp(testConfig, { skipRateLimit: true });
     app = result.app;
   });
@@ -215,12 +224,11 @@ describe('API Endpoints', () => {
   });
 });
 
-describe('Database Operations', () => {
+describe.runIf(pgAvailable)('Database Operations', () => {
   let dbOps: DbOps;
 
   beforeAll(async () => {
-    // Initialize PostgreSQL connection pool
-    createPostgresPool();
+    // Pool already created during availability check
     dbOps = createDbOps(testConfig.jwtSecret);
   });
 
@@ -532,11 +540,11 @@ describe('JWT API Key Generation', () => {
   });
 });
 
-describe('Input Validation', () => {
+describe.runIf(pgAvailable)('Input Validation', () => {
   let app: Express;
 
   beforeAll(async () => {
-    createPostgresPool();
+    // Pool already created during availability check
     const result = createApp(testConfig, { skipRateLimit: true });
     app = result.app;
   });

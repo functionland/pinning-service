@@ -161,6 +161,7 @@ export interface EphemeralObject {
   expires_at: string;
   deleted: number;
   deleted_at: string | null;
+  delete_attempts: number;
   delete_error: string | null;
   created_at: string;
 }

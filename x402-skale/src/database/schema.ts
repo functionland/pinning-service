@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS x402_ephemeral_objects (
   expires_at TIMESTAMP NOT NULL,            -- When to delete
   deleted INTEGER DEFAULT 0,                -- Soft delete flag (0=active, 1=deleted)
   deleted_at TIMESTAMP,                     -- When deleted
+  delete_attempts INTEGER DEFAULT 0,        -- Number of failed delete attempts
   delete_error TEXT,                        -- Error message if delete failed
   created_at TIMESTAMP DEFAULT NOW(),
   UNIQUE(bucket, object_key),

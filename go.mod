@@ -10,7 +10,6 @@ require (
 	github.com/ipfs-cluster/ipfs-cluster v1.1.1
 	github.com/ipfs/kubo v0.29.0
 	github.com/joho/godotenv v1.5.1
-	github.com/lib/pq v1.10.9
 	github.com/multiformats/go-multiaddr v0.12.4
 )
 
@@ -86,6 +85,7 @@ require (
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.8 // indirect
 	github.com/koron/go-ssdp v0.0.4 // indirect
+	github.com/lib/pq v1.11.2 // indirect
 	github.com/libp2p/go-buffer-pool v0.1.0 // indirect
 	github.com/libp2p/go-cidranger v1.1.0 // indirect
 	github.com/libp2p/go-flow-metrics v0.1.0 // indirect

@@ -6,6 +6,7 @@
 
 DB_USER="${DB_USER:-pinning_user}"
 DB_NAME="${DB_NAME:-pinning_service}"
+PG_CONTAINER="${PG_CONTAINER:-postgres-pinning}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -49,7 +50,7 @@ echo ""
 echo -e "${BOLD}Database Migrations:${NC}"
 
 # Migration 006: encrypted_key column
-if psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
     "SELECT column_name FROM information_schema.columns WHERE table_name='api_keys' AND column_name='encrypted_key'" 2>/dev/null | grep -q "encrypted_key"; then
     check_pass "Migration 006: api_keys.encrypted_key column exists"
 else
@@ -57,7 +58,7 @@ else
 fi
 
 # Migration 007: delete_attempts column
-if psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
     "SELECT column_name FROM information_schema.columns WHERE table_name='x402_ephemeral_objects' AND column_name='delete_attempts'" 2>/dev/null | grep -q "delete_attempts"; then
     check_pass "Migration 007: x402_ephemeral_objects.delete_attempts column exists"
 else
@@ -65,7 +66,7 @@ else
 fi
 
 # Migration 008: admin_audit_log table
-if psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
     "SELECT tablename FROM pg_tables WHERE tablename='admin_audit_log'" 2>/dev/null | grep -q "admin_audit_log"; then
     check_pass "Migration 008: admin_audit_log table exists"
 else
@@ -102,9 +103,9 @@ if [ "$FAIL" -gt 0 ]; then
     echo ""
     echo -e "${RED}${BOLD}Action required:${NC} Fix the failed checks above."
     echo "  To apply missing migrations:"
-    echo "    psql -U $DB_USER -d $DB_NAME -f migrations/postgres/006_encrypted_api_keys.sql"
-    echo "    psql -U $DB_USER -d $DB_NAME -f migrations/postgres/007_cleanup_retry.sql"
-    echo "    psql -U $DB_USER -d $DB_NAME -f migrations/postgres/008_admin_audit_log.sql"
+    echo "    docker exec -i $PG_CONTAINER psql -U $DB_USER -d $DB_NAME < migrations/postgres/006_encrypted_api_keys.sql"
+    echo "    docker exec -i $PG_CONTAINER psql -U $DB_USER -d $DB_NAME < migrations/postgres/007_cleanup_retry.sql"
+    echo "    docker exec -i $PG_CONTAINER psql -U $DB_USER -d $DB_NAME < migrations/postgres/008_admin_audit_log.sql"
     exit 1
 fi
 

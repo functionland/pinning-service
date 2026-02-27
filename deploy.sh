@@ -26,6 +26,9 @@ DEPLOY_DIR="/home/root/pinning-service"
 DB_USER="${DB_USER:-pinning_user}"
 DB_NAME="${DB_NAME:-pinning_service}"
 
+# PostgreSQL runs in Docker container
+PG_CONTAINER="${PG_CONTAINER:-postgres-pinning}"
+
 # Vite build-time env vars for pinning-webui frontend
 # Override these or set them in your environment before running
 VITE_GOOGLE_CLIENT_ID="${VITE_GOOGLE_CLIENT_ID:-}"
@@ -107,6 +110,15 @@ if [ "$SERVICES_ONLY" = false ]; then
     log_step "Running database migrations"
     log_info "Migrations must complete before any service restart"
 
+    # Verify Docker container is running
+    if ! docker ps --format '{{.Names}}' | grep -q "^${PG_CONTAINER}$"; then
+        log_err "PostgreSQL container '$PG_CONTAINER' is not running"
+        log_err "Check: docker ps | grep postgres"
+        log_err "Override container name with: PG_CONTAINER=mycontainer bash deploy.sh"
+        exit 1
+    fi
+    log_info "Using PostgreSQL container: $PG_CONTAINER"
+
     MIGRATION_DIR="$SCRIPT_DIR/migrations/postgres"
     MIGRATION_FILES=(
         "006_encrypted_api_keys.sql"
@@ -118,7 +130,7 @@ if [ "$SERVICES_ONLY" = false ]; then
         migration_path="$MIGRATION_DIR/$migration"
         if [ -f "$migration_path" ]; then
             log_info "Applying $migration..."
-            if run_cmd psql -U "$DB_USER" -d "$DB_NAME" -f "$migration_path"; then
+            if run_cmd docker exec -i "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" < "$migration_path"; then
                 log_ok "$migration applied"
             else
                 log_err "$migration FAILED — aborting deployment"
@@ -321,21 +333,21 @@ done
 if [ "$DRY_RUN" = false ]; then
     log_info "Verifying migration columns..."
 
-    if psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT column_name FROM information_schema.columns WHERE table_name='api_keys' AND column_name='encrypted_key'" 2>/dev/null | grep -q "encrypted_key"; then
+    if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT column_name FROM information_schema.columns WHERE table_name='api_keys' AND column_name='encrypted_key'" 2>/dev/null | grep -q "encrypted_key"; then
         log_ok "api_keys.encrypted_key column exists"
     else
         log_err "api_keys.encrypted_key column MISSING — migration 006 not applied"
         ALL_OK=false
     fi
 
-    if psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT column_name FROM information_schema.columns WHERE table_name='x402_ephemeral_objects' AND column_name='delete_attempts'" 2>/dev/null | grep -q "delete_attempts"; then
+    if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT column_name FROM information_schema.columns WHERE table_name='x402_ephemeral_objects' AND column_name='delete_attempts'" 2>/dev/null | grep -q "delete_attempts"; then
         log_ok "x402_ephemeral_objects.delete_attempts column exists"
     else
         log_err "x402_ephemeral_objects.delete_attempts column MISSING — migration 007 not applied"
         ALL_OK=false
     fi
 
-    if psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT tablename FROM pg_tables WHERE tablename='admin_audit_log'" 2>/dev/null | grep -q "admin_audit_log"; then
+    if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT tablename FROM pg_tables WHERE tablename='admin_audit_log'" 2>/dev/null | grep -q "admin_audit_log"; then
         log_ok "admin_audit_log table exists"
     else
         log_err "admin_audit_log table MISSING — migration 008 not applied"

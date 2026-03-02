@@ -235,6 +235,11 @@ func (s *PinsAPIServicePostgres) GetPins(ctx context.Context, cid []string, name
 
 	delegates := s.getDelegates(ctx)
 
+	// Skip expensive per-CID cluster status lookups for large batch requests.
+	// Each cluster status call is a network round-trip; for large lists this
+	// causes the request to timeout before any response is sent.
+	skipClusterStatus := len(pins) > 10
+
 	var results []PinStatus
 	for _, p := range pins {
 		ps := PinStatus{
@@ -246,8 +251,10 @@ func (s *PinsAPIServicePostgres) GetPins(ctx context.Context, cid []string, name
 			Info:      map[string]string{},
 		}
 
-		if s.ipfsClusterAPI != nil {
-			clusterStatus, err := s.getClusterStatus(ctx, p.Pin.Cid)
+		if s.ipfsClusterAPI != nil && !skipClusterStatus {
+			cidCtx, cidCancel := context.WithTimeout(ctx, 5*time.Second)
+			clusterStatus, err := s.getClusterStatus(cidCtx, p.Pin.Cid)
+			cidCancel()
 			if err == nil {
 				ps.Status = mapStatus(clusterStatus)
 			}

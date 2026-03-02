@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -104,6 +105,34 @@ func (s *PostgresService) verifySchema() error {
 			return fmt.Errorf("required table '%s' does not exist - run migrations first", table)
 		}
 	}
+
+	// Ensure critical indexes exist for query performance
+	if err := s.ensureIndexes(); err != nil {
+		log.Printf("Warning: failed to ensure indexes: %v", err)
+	}
+
+	return nil
+}
+
+// ensureIndexes creates critical indexes if they don't already exist.
+func (s *PostgresService) ensureIndexes() error {
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_pins_username ON pins(username)`,
+		`CREATE INDEX IF NOT EXISTS idx_pins_status ON pins(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_pins_created ON pins(created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_pins_username_status ON pins(username, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_pins_username_created ON pins(username, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_pins_cid ON pins(cid)`,
+		`CREATE INDEX IF NOT EXISTS idx_pins_session_token ON pins(session_token)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(session_token)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions(username)`,
+	}
+	for _, ddl := range indexes {
+		if _, err := s.db.Exec(ddl); err != nil {
+			return fmt.Errorf("failed to create index: %s: %w", ddl, err)
+		}
+	}
+	log.Println("postgres: ensured critical indexes exist")
 	return nil
 }
 

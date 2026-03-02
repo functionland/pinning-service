@@ -256,6 +256,9 @@ func (s *PinsAPIServiceSQLite) GetPins(ctx context.Context, cid []string, name s
 	// Get delegates once for all results
 	delegates := s.getDelegates(ctx)
 
+	// Skip expensive per-CID cluster status lookups for large batch requests.
+	skipClusterStatus := len(pins) > 10
+
 	var results []PinStatus
 	for _, p := range pins {
 		ps := PinStatus{
@@ -268,8 +271,10 @@ func (s *PinsAPIServiceSQLite) GetPins(ctx context.Context, cid []string, name s
 		}
 
 		// Update status from IPFS cluster if available
-		if s.ipfsClusterAPI != nil {
-			clusterStatus, err := s.getClusterStatus(ctx, p.Pin.Cid)
+		if s.ipfsClusterAPI != nil && !skipClusterStatus {
+			cidCtx, cidCancel := context.WithTimeout(ctx, 5*time.Second)
+			clusterStatus, err := s.getClusterStatus(cidCtx, p.Pin.Cid)
+			cidCancel()
 			if err == nil {
 				ps.Status = mapStatus(clusterStatus)
 			}

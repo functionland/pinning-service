@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-const sharp = require('sharp');
+const heicConvert = require('heic-convert');
 const { createPostgresPool, validateSession: pgValidateSession, getUserPoolId: pgGetUserPoolId, closePool } = require('./database/postgres.js');
 
 let create, fileTypeFromBuffer;
@@ -292,8 +292,12 @@ if (!fs.existsSync(config.uploadDir)) {
 
         if (HEIC_MIMES.has(contentType) && !('original' in req.query)) {
           try {
-            const converted = await sharp(content).jpeg({ quality: 85 }).toBuffer();
-            content = converted;
+            const converted = await heicConvert({
+              buffer: content,
+              format: 'JPEG',
+              quality: 0.85,
+            });
+            content = Buffer.from(converted);
             contentType = 'image/jpeg';
           } catch (convErr) {
             console.error('HEIC conversion failed, serving original:', convErr.message);

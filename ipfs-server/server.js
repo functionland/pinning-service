@@ -306,6 +306,10 @@ if (!fs.existsSync(config.uploadDir)) {
 
         // Gateway-specific headers for hosted websites
         res.removeHeader('X-Frame-Options'); // Allow iframes within hosted websites
+        if (contentType.startsWith('text/html')) {
+          // Allow origin referrer so YouTube/Vimeo embeds work
+          res.setHeader('Referrer-Policy', 'origin');
+        }
         res.setHeader('Content-Security-Policy',
           "frame-ancestors 'self'; base-uri 'self'; form-action 'self' https:; object-src 'none'"
         );

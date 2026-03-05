@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "build": "npm run build:bundle && npm run build:binary",
-    "build:bundle": "esbuild server.js --bundle --platform=node --format=cjs --target=node20 --outfile=dist/bundle.cjs --external:pg --external:pg-native",
+    "build:bundle": "esbuild server.js --bundle --platform=node --format=cjs --target=node20 --outfile=dist/bundle.cjs --external:pg --external:pg-native --external:sharp",
     "build:binary": "pkg ./dist/bundle.cjs --target node20-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode",
     "dev": "node --watch server.js",
     "test": "node --test test/server.test.js",
@@ -15,7 +15,8 @@
   "pkg": {
     "assets": [
       "node_modules/kubo-rpc-client/**/*",
-      "node_modules/file-type/**/*"
+      "node_modules/file-type/**/*",
+      "node_modules/sharp/**/*"
     ],
     "targets": [
       "node20-linux-x64"
@@ -27,7 +28,8 @@
     "file-type": "^19.6.0",
     "kubo-rpc-client": "^5.0.2",
     "multer": "^1.4.5-lts.1",
-    "pg": "^8.11.3"
+    "pg": "^8.11.3",
+    "sharp": "^0.33.2"
   },
   "devDependencies": {
     "esbuild": "^0.24.0",

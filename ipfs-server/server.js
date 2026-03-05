@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const sharp = require('sharp');
 const { createPostgresPool, validateSession: pgValidateSession, getUserPoolId: pgGetUserPoolId, closePool } = require('./database/postgres.js');
 
 let create, fileTypeFromBuffer;
@@ -253,7 +254,7 @@ if (!fs.existsSync(config.uploadDir)) {
           chunks.push(chunk);
         }
         
-        const content = Buffer.concat(chunks);
+        let content = Buffer.concat(chunks);
 
         // Determine content type
         let contentType = 'application/octet-stream';
@@ -282,6 +283,21 @@ if (!fs.existsSync(config.uploadDir)) {
           }
         } catch (typeError) {
           // Ignore type detection errors, use default
+        }
+
+        // Convert HEIC/HEIF to JPEG for browser compatibility
+        const HEIC_MIMES = new Set([
+          'image/heic', 'image/heif', 'image/heic-sequence', 'image/heif-sequence'
+        ]);
+
+        if (HEIC_MIMES.has(contentType) && !('original' in req.query)) {
+          try {
+            const converted = await sharp(content).jpeg({ quality: 85 }).toBuffer();
+            content = converted;
+            contentType = 'image/jpeg';
+          } catch (convErr) {
+            console.error('HEIC conversion failed, serving original:', convErr.message);
+          }
         }
 
         // Gateway-specific headers for hosted websites

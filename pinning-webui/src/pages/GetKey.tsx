@@ -71,6 +71,16 @@ export default function GetKey() {
         // Construct the redirect URL with the key parameter
         const url = new URL(redirectUrl);
         url.searchParams.set('key', data.key);
+        // Include user identity so the app can create a user session
+        if (user) {
+          url.searchParams.set('email', user.email);
+          url.searchParams.set('name', user.name);
+          url.searchParams.set('id', user.id);
+          url.searchParams.set('provider', user.provider);
+          if (user.picture) {
+            url.searchParams.set('picture', user.picture);
+          }
+        }
         const fullUrl = url.toString();
 
         // Store the URL for manual redirect button

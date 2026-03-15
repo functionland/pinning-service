@@ -2660,6 +2660,159 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
+  // =========================================================================
+  // NFT Meta-Tx Relay (gasless claims on Base)
+  // =========================================================================
+
+  app.post('/api/v1/nft/relay', async (req: Request, res: Response) => {
+    try {
+      const { action, chainId, secret, claimKey, signer, deadline, nonce, signature, tokenId, amount } = req.body;
+
+      // Validate required fields
+      if (!action || !chainId || !signer || deadline == null || nonce == null || !signature) {
+        res.status(400).json({ error: 'Missing required fields: action, chainId, signer, deadline, nonce, signature' });
+        return;
+      }
+
+      // Claim action requires secret; burn/transferBack require claimKey
+      if (action === 'claimNFT' && !secret) {
+        res.status(400).json({ error: 'claimNFT requires secret field' });
+        return;
+      }
+      if ((action === 'burn' || action === 'transferBack') && !claimKey) {
+        res.status(400).json({ error: `${action} requires claimKey field` });
+        return;
+      }
+
+      // Supported relay chains: Base (8453) and Skale Europa (2046399126)
+      const RELAY_CHAINS: Record<number, { rpcEnvVar: string; contractEnvVar: string; freeGas: boolean }> = {
+        8453: { rpcEnvVar: 'BASE_RPC_URL', contractEnvVar: 'NFT_CONTRACT_ADDRESS', freeGas: false },
+        2046399126: { rpcEnvVar: 'SKALE_RPC_URL', contractEnvVar: 'NFT_CONTRACT_ADDRESS_SKALE', freeGas: true },
+      };
+      const chainConfig = RELAY_CHAINS[chainId as number];
+      if (!chainConfig) {
+        res.status(400).json({ error: `Gasless relay not supported on chainId ${chainId}. Supported: ${Object.keys(RELAY_CHAINS).join(', ')}` });
+        return;
+      }
+
+      // Validate action
+      const validActions = ['claimNFT', 'burn', 'transferBack'];
+      if (!validActions.includes(action)) {
+        res.status(400).json({ error: `Invalid action. Must be one of: ${validActions.join(', ')}` });
+        return;
+      }
+
+      // Validate burn/transferBack require tokenId
+      if ((action === 'burn' || action === 'transferBack') && tokenId == null) {
+        res.status(400).json({ error: `${action} requires tokenId` });
+        return;
+      }
+      if (action === 'burn' && amount == null) {
+        res.status(400).json({ error: 'burn requires amount' });
+        return;
+      }
+
+      const relayPrivateKey = process.env.NFT_RELAY_PRIVATE_KEY;
+      const nftContractAddress = process.env[chainConfig.contractEnvVar];
+      const rpcUrl = process.env[chainConfig.rpcEnvVar]
+        || (chainId === 8453 ? 'https://mainnet.base.org' : 'https://mainnet.skalenodes.com/v1/elated-tan-skat');
+
+      if (!relayPrivateKey || !nftContractAddress) {
+        res.status(500).json({ error: `Relay not configured for chainId ${chainId} (missing NFT_RELAY_PRIVATE_KEY or ${chainConfig.contractEnvVar})` });
+        return;
+      }
+
+      // Dynamically import viem (already a project dependency)
+      const { createPublicClient, createWalletClient, http: viemHttp, encodeFunctionData, parseAbi, defineChain } = await import('viem');
+      const { privateKeyToAccount } = await import('viem/accounts');
+      const { base } = await import('viem/chains');
+
+      // Define Skale Europa chain for viem
+      const skaleEuropa = defineChain({
+        id: 2046399126,
+        name: 'SKALE Europa',
+        nativeCurrency: { name: 'sFUEL', symbol: 'sFUEL', decimals: 18 },
+        rpcUrls: { default: { http: ['https://mainnet.skalenodes.com/v1/elated-tan-skat'] } },
+        blockExplorers: { default: { name: 'Explorer', url: 'https://elated-tan-skat.explorer.mainnet.skalenodes.com' } },
+      });
+
+      const viemChain = chainId === 8453 ? base : skaleEuropa;
+      const account = privateKeyToAccount(relayPrivateKey as `0x${string}`);
+
+      const publicClient = createPublicClient({
+        chain: viemChain,
+        transport: viemHttp(rpcUrl),
+      });
+
+      const walletClient = createWalletClient({
+        account,
+        chain: viemChain,
+        transport: viemHttp(rpcUrl),
+      });
+
+      // Check gas deposit (skip on free-gas chains like Skale)
+      if (!chainConfig.freeGas) {
+        // For claim: compute claimKey from secret for gas deposit lookup
+        // For burn/transferBack: claimKey is provided directly
+        const { keccak256: viemKeccak256 } = await import('viem');
+        const gasDepositKey = action === 'claimNFT'
+          ? (claimKey || viemKeccak256(secret as `0x${string}`))
+          : claimKey;
+
+        const gasDeposit = await publicClient.readContract({
+          address: nftContractAddress as `0x${string}`,
+          abi: parseAbi(['function claimGasDeposits(bytes32) view returns (uint256)']),
+          functionName: 'claimGasDeposits',
+          args: [gasDepositKey as `0x${string}`],
+        });
+
+        if (gasDeposit === BigInt(0)) {
+          res.status(400).json({ error: 'No gas deposit for this claim link' });
+          return;
+        }
+      }
+
+      // Build the meta-tx call
+      let functionName: string;
+      let args: any[];
+      let abi: any;
+
+      if (action === 'claimNFT') {
+        // claimNFTMeta takes secret (contract computes claimKey internally)
+        abi = parseAbi(['function claimNFTMeta(bytes32,address,uint256,uint256,bytes)']);
+        functionName = 'claimNFTMeta';
+        args = [secret, signer, BigInt(deadline), BigInt(nonce), signature];
+      } else if (action === 'burn') {
+        // burnMeta takes claimKey directly
+        abi = parseAbi(['function burnMeta(bytes32,uint256,uint256,address,uint256,uint256,bytes)']);
+        functionName = 'burnMeta';
+        args = [claimKey, BigInt(tokenId), BigInt(amount), signer, BigInt(deadline), BigInt(nonce), signature];
+      } else {
+        // transferBackMeta takes claimKey directly
+        abi = parseAbi(['function transferBackMeta(bytes32,uint256,address,uint256,uint256,bytes)']);
+        functionName = 'transferBackMeta';
+        args = [claimKey, BigInt(tokenId), signer, BigInt(deadline), BigInt(nonce), signature];
+      }
+
+      const data = encodeFunctionData({ abi, functionName, args });
+
+      // Submit transaction
+      const txHash = await walletClient.sendTransaction({
+        to: nftContractAddress as `0x${string}`,
+        data,
+      });
+
+      console.log(`[nft-relay] ${action} tx submitted: ${txHash}`);
+      res.json({ success: true, txHash });
+    } catch (error: any) {
+      console.error('[nft-relay] Error:', error);
+
+      // Surface contract revert reasons
+      const message = error?.shortMessage || error?.message || 'Relay transaction failed';
+      res.status(500).json({ error: message });
+    }
+  });
+
   // Error handler
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     console.error('[webui] Unhandled error:', err);

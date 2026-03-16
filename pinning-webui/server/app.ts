@@ -2712,7 +2712,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return;
       }
 
-      const relayPrivateKey = process.env.NFT_RELAY_PRIVATE_KEY;
+      const relayPrivateKey = process.env.NFT_RELAY_PRIVATE_KEY?.trim();
       const nftContractAddress = process.env[chainConfig.contractEnvVar];
       const rpcUrl = process.env[chainConfig.rpcEnvVar]
         || (chainId === 8453 ? 'https://mainnet.base.org' : 'https://mainnet.skalenodes.com/v1/elated-tan-skat');

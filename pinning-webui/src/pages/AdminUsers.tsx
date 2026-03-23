@@ -33,6 +33,13 @@ export default function AdminUsers() {
   // Unsuspend state
   const [unsuspending, setUnsuspending] = useState<string | null>(null);
 
+  // Scan blocks form
+  const [scanChainId, setScanChainId] = useState('8453');
+  const [scanBlocks, setScanBlocks] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [scanResults, setScanResults] = useState<Array<{ block: number; transfers: number; credited: number }> | null>(null);
+
   useEffect(() => {
     fetchSuspendedUsers();
   }, []);
@@ -118,6 +125,40 @@ export default function AdminUsers() {
       setAdjustError(err instanceof Error ? err.message : 'Failed to adjust credits');
     } finally {
       setAdjusting(false);
+    }
+  };
+
+  const handleScanBlocks = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setScanError(null);
+    setScanResults(null);
+
+    const blocks = scanBlocks.split(/[\s,]+/).map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0);
+    if (blocks.length === 0) {
+      setScanError('Enter at least one valid block number');
+      return;
+    }
+
+    try {
+      setScanning(true);
+      const res = await fetch('/api/admin/scan-blocks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ chainId: parseInt(scanChainId), blocks }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to scan blocks');
+      }
+
+      const data = await res.json();
+      setScanResults(data.results);
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : 'Failed to scan blocks');
+    } finally {
+      setScanning(false);
     }
   };
 
@@ -282,6 +323,60 @@ export default function AdminUsers() {
             className="btn-primary w-full disabled:opacity-50"
           >
             {adjusting ? (t.common?.loading || 'Processing...') : (t.admin?.adjustCredits || 'Adjust Credits')}
+          </button>
+        </form>
+      </div>
+
+      {/* Scan Missed Blocks Section */}
+      <div className="card">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">
+          Scan Missed Blocks
+        </h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Scan specific blocks for missed FULA credit transactions. Enter block numbers separated by commas or newlines.
+        </p>
+
+        <form onSubmit={handleScanBlocks} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Chain</label>
+            <select
+              value={scanChainId}
+              onChange={(e) => setScanChainId(e.target.value)}
+              className="input w-full"
+            >
+              <option value="8453">Base (8453)</option>
+              <option value="1">Ethereum (1)</option>
+              <option value="2046399126">SKALE Europa</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Block Numbers</label>
+            <textarea
+              value={scanBlocks}
+              onChange={(e) => setScanBlocks(e.target.value)}
+              placeholder="40916619, 41029539, 43623679, 43705728"
+              className="input w-full h-24 resize-y"
+              required
+            />
+          </div>
+
+          {scanError && (
+            <div className="bg-red-50 text-red-600 px-4 py-3 rounded-lg text-sm">{scanError}</div>
+          )}
+
+          {scanResults && (
+            <div className="bg-green-50 px-4 py-3 rounded-lg text-sm space-y-1">
+              {scanResults.map((r) => (
+                <div key={r.block} className={r.credited > 0 ? 'text-green-700' : 'text-gray-600'}>
+                  Block {r.block}: {r.transfers} transfer(s) found, {r.credited} new credit(s)
+                </div>
+              ))}
+            </div>
+          )}
+
+          <button type="submit" disabled={scanning} className="btn-primary w-full disabled:opacity-50">
+            {scanning ? 'Scanning...' : 'Scan Blocks'}
           </button>
         </form>
       </div>

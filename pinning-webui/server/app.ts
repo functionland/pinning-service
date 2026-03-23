@@ -45,6 +45,7 @@ import {
   getUserCompany,
   updateUserCompany,
 } from './database/postgres.js';
+import { getEnabledChains, processTransfer } from './services/blockScanner.js';
 
 // Session user type
 export interface SessionUser {
@@ -2000,6 +2001,65 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     } catch (error) {
       console.error('[webui] Error adjusting credits:', error);
       res.status(500).json({ error: 'Failed to adjust credits' });
+    }
+  });
+
+  // Admin: scan specific blocks to pick up missed transactions
+  app.post('/api/admin/scan-blocks', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { chainId, blocks } = req.body; // blocks: number[]
+      if (!chainId || !Array.isArray(blocks) || blocks.length === 0) {
+        return res.status(400).json({ error: 'chainId and blocks[] required' });
+      }
+
+      const chains = await getEnabledChains();
+      const chain = chains.find(c => c.chainId === chainId);
+      if (!chain) {
+        return res.status(400).json({ error: `Chain ${chainId} not found or disabled` });
+      }
+
+      const rpcUrl = process.env.BASE_RPC_URL || 'https://mainnet.base.org';
+      const vaultPadded = '0x' + chain.vaultAddress.slice(2).toLowerCase().padStart(64, '0');
+
+      const results = [];
+      for (const block of blocks) {
+        const blockHex = '0x' + block.toString(16);
+        const resp = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 1,
+            method: 'eth_getLogs',
+            params: [{
+              address: chain.tokenAddress,
+              topics: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef', null, vaultPadded],
+              fromBlock: blockHex, toBlock: blockHex
+            }]
+          })
+        });
+        const data = await resp.json();
+        const logs = data.result || [];
+
+        let credited = 0;
+        for (const log of logs) {
+          const isNew = await processTransfer(chainId, {
+            hash: log.transactionHash,
+            from: '0x' + log.topics[1].slice(26),
+            to: '0x' + log.topics[2].slice(26),
+            value: BigInt(log.data).toString(),
+            blockNumber: parseInt(log.blockNumber, 16).toString(),
+            timeStamp: log.blockTimestamp ? parseInt(log.blockTimestamp, 16).toString() : Math.floor(Date.now() / 1000).toString()
+          });
+          if (isNew) credited++;
+        }
+        results.push({ block, transfers: logs.length, credited });
+      }
+
+      console.log(`[admin] ${req.session.user!.email} scanned ${blocks.length} blocks on chain ${chainId}:`, results);
+      res.json({ results });
+    } catch (error) {
+      console.error('[admin] Error scanning blocks:', error);
+      res.status(500).json({ error: 'Failed to scan blocks' });
     }
   });
 

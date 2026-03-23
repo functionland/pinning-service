@@ -10,7 +10,7 @@
 import { query, getClient } from '../database/postgres.js';
 
 // Chain configuration
-interface ChainConfig {
+export interface ChainConfig {
   chainId: number;
   chainName: string;
   tokenAddress: string;
@@ -165,7 +165,7 @@ async function fetchTokenTransfers(chainId: number, tokenAddress: string, vaultA
 }
 
 // Process a single token transfer
-async function processTransfer(chainId: number, transfer: TokenTransfer): Promise<boolean> {
+export async function processTransfer(chainId: number, transfer: TokenTransfer): Promise<boolean> {
   const amountFula = toFula(transfer.value);
 
   // Skip tiny amounts (dust)
@@ -287,7 +287,7 @@ async function updateLastScannedBlock(chainId: number, blockNumber: number): Pro
 }
 
 // Get enabled chains from database
-async function getEnabledChains(): Promise<ChainConfig[]> {
+export async function getEnabledChains(): Promise<ChainConfig[]> {
   const result = await query<{
     chainid: number;
     chainname: string;
@@ -313,7 +313,7 @@ async function getEnabledChains(): Promise<ChainConfig[]> {
 }
 
 // Scan a single chain
-async function scanChain(chain: ChainConfig): Promise<{ processed: number; newTxs: number }> {
+export async function scanChain(chain: ChainConfig): Promise<{ processed: number; newTxs: number }> {
   console.log(`[blockScanner] Scanning ${chain.chainName} (${chain.chainId}) from block ${chain.lastScannedBlock}`);
 
   const transfers = await fetchTokenTransfers(

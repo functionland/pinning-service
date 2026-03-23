@@ -18,7 +18,16 @@
       "Bash(npm search:*)",
       "Bash(npm pack:*)",
       "Bash(npm view:*)",
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Bash(npx vitest:*)",
+      "Bash(node:*)",
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(go mod:*)",
+      "Bash(cast code:*)",
+      "Bash(curl:*)",
+      "Bash(git log:*)",
+      "Bash(wait b88qomlu5:*)"
     ]
   }
 }

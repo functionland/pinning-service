@@ -1293,31 +1293,37 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Unsupported or disabled chain' });
       }
 
-      // Fetch transaction from blockchain explorer
-      let explorerUrl: string;
-      switch (chainId) {
-        case 1:
-          explorerUrl = `https://api.etherscan.io/v2/api?chainid=1&module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}&apikey=${process.env.ETHERSCAN_API_KEY || ''}`;
-          break;
-        case 8453:
-          explorerUrl = `https://api.etherscan.io/v2/api?chainid=8453&module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}&apikey=${process.env.ETHERSCAN_API_KEY || ''}`;
-          break;
-        case 2046399126:
-          explorerUrl = `https://elated-tan-skat.explorer.mainnet.skalenodes.com/api?module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}`;
-          break;
-        default:
-          return res.status(400).json({ error: 'Unsupported chain' });
-      }
-
-      // Retry logic - transaction may not be indexed immediately
+      // Fetch transaction receipt with retry logic
       let data: any = null;
       let retries = 3;
       while (retries > 0) {
-        const response = await fetch(explorerUrl);
+        let response: globalThis.Response;
+        if (chainId === 8453) {
+          // Base: use direct RPC (Etherscan v2 dropped free Base support)
+          const baseRpc = process.env.BASE_RPC_URL || 'https://mainnet.base.org';
+          response = await fetch(baseRpc, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [txHash] })
+          });
+        } else {
+          let explorerUrl: string;
+          switch (chainId) {
+            case 1:
+              explorerUrl = `https://api.etherscan.io/v2/api?chainid=1&module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}&apikey=${process.env.ETHERSCAN_API_KEY || ''}`;
+              break;
+            case 2046399126:
+              explorerUrl = `https://elated-tan-skat.explorer.mainnet.skalenodes.com/api?module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}`;
+              break;
+            default:
+              return res.status(400).json({ error: 'Unsupported chain' });
+          }
+          response = await fetch(explorerUrl);
+        }
         data = await response.json();
 
         if (data.result && data.result !== null && data.result.logs) {
-          break; // Got valid result with logs
+          break;
         }
 
         retries--;
@@ -2478,27 +2484,33 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Unsupported or disabled chain' });
       }
 
-      // Fetch transaction from blockchain explorer
-      let explorerUrl: string;
-      switch (chainId) {
-        case 1:
-          explorerUrl = `https://api.etherscan.io/v2/api?chainid=1&module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}&apikey=${process.env.ETHERSCAN_API_KEY || ''}`;
-          break;
-        case 8453:
-          explorerUrl = `https://api.etherscan.io/v2/api?chainid=8453&module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}&apikey=${process.env.ETHERSCAN_API_KEY || ''}`;
-          break;
-        case 2046399126:
-          explorerUrl = `https://elated-tan-skat.explorer.mainnet.skalenodes.com/api?module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}`;
-          break;
-        default:
-          return res.status(400).json({ error: 'Unsupported chain' });
-      }
-
-      // Retry logic - transaction may not be indexed immediately
+      // Fetch transaction receipt with retry logic
       let data: any = null;
       let retries = 3;
       while (retries > 0) {
-        const response = await fetch(explorerUrl);
+        let response: globalThis.Response;
+        if (chainId === 8453) {
+          // Base: use direct RPC (Etherscan v2 dropped free Base support)
+          const baseRpc = process.env.BASE_RPC_URL || 'https://mainnet.base.org';
+          response = await fetch(baseRpc, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [txHash] })
+          });
+        } else {
+          let explorerUrl: string;
+          switch (chainId) {
+            case 1:
+              explorerUrl = `https://api.etherscan.io/v2/api?chainid=1&module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}&apikey=${process.env.ETHERSCAN_API_KEY || ''}`;
+              break;
+            case 2046399126:
+              explorerUrl = `https://elated-tan-skat.explorer.mainnet.skalenodes.com/api?module=proxy&action=eth_getTransactionReceipt&txhash=${txHash}`;
+              break;
+            default:
+              return res.status(400).json({ error: 'Unsupported chain' });
+          }
+          response = await fetch(explorerUrl);
+        }
         data = await response.json();
 
         if (data.result && data.result !== null && data.result.logs) {

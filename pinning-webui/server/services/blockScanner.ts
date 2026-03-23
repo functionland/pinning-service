@@ -47,13 +47,11 @@ function toFula(rawAmount: string): number {
   return fula;
 }
 
-// Get explorer API URL for a chain
+// Get explorer API URL for a chain (Ethereum + SKALE only; Base uses direct RPC)
 function getExplorerUrl(chainId: number, tokenAddress: string, vaultAddress: string, startBlock: number): string {
   switch (chainId) {
     case 1: // Ethereum
       return `https://api.etherscan.io/v2/api?chainid=1&module=account&action=tokentx&contractaddress=${tokenAddress}&address=${vaultAddress}&startblock=${startBlock}&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
-    case 8453: // Base
-      return `https://api.etherscan.io/v2/api?chainid=8453&module=account&action=tokentx&contractaddress=${tokenAddress}&address=${vaultAddress}&startblock=${startBlock}&sort=asc&apikey=${ETHERSCAN_API_KEY}`;
     case 2046399126: // Skale Europa
       return `https://elated-tan-skat.explorer.mainnet.skalenodes.com/api?module=account&action=tokentx&contractaddress=${tokenAddress}&address=${vaultAddress}&startblock=${startBlock}&sort=asc`;
     default:
@@ -61,8 +59,84 @@ function getExplorerUrl(chainId: number, tokenAddress: string, vaultAddress: str
   }
 }
 
-// Fetch token transfers from explorer API
+const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+const RPC_LOG_RANGE = 10000; // Base RPC limits eth_getLogs to 10,000 blocks
+
+// Fetch token transfers via direct RPC eth_getLogs (for Base chain)
+async function fetchTokenTransfersViaRpc(tokenAddress: string, vaultAddress: string, startBlock: number): Promise<TokenTransfer[]> {
+  const rpcUrl = process.env.BASE_RPC_URL || 'https://mainnet.base.org';
+  const vaultPadded = '0x' + vaultAddress.slice(2).toLowerCase().padStart(64, '0');
+
+  try {
+    // Get current block number
+    const blockResp = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] })
+    });
+    const blockData = await blockResp.json();
+    const currentBlock = parseInt(blockData.result, 16);
+
+    if (startBlock > currentBlock) return [];
+
+    const allTransfers: TokenTransfer[] = [];
+
+    // Scan in chunks of RPC_LOG_RANGE blocks
+    for (let from = startBlock; from <= currentBlock; from += RPC_LOG_RANGE) {
+      const to = Math.min(from + RPC_LOG_RANGE - 1, currentBlock);
+
+      const resp = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1,
+          method: 'eth_getLogs',
+          params: [{
+            address: tokenAddress,
+            topics: [TRANSFER_TOPIC, null, vaultPadded],
+            fromBlock: '0x' + from.toString(16),
+            toBlock: '0x' + to.toString(16)
+          }]
+        })
+      });
+      const data = await resp.json();
+
+      if (data.error) {
+        console.error(`[blockScanner] Base RPC eth_getLogs error:`, data.error.message);
+        break;
+      }
+
+      for (const log of data.result || []) {
+        allTransfers.push({
+          hash: log.transactionHash,
+          from: '0x' + log.topics[1].slice(26),
+          to: '0x' + log.topics[2].slice(26),
+          value: BigInt(log.data).toString(),
+          blockNumber: parseInt(log.blockNumber, 16).toString(),
+          timeStamp: log.blockTimestamp ? parseInt(log.blockTimestamp, 16).toString() : Math.floor(Date.now() / 1000).toString()
+        });
+      }
+
+      // Small delay between chunks to avoid rate limiting
+      if (to < currentBlock) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
+
+    return allTransfers;
+  } catch (error) {
+    console.error(`[blockScanner] Error fetching Base transfers via RPC:`, error);
+    return [];
+  }
+}
+
+// Fetch token transfers from explorer API or RPC
 async function fetchTokenTransfers(chainId: number, tokenAddress: string, vaultAddress: string, startBlock: number): Promise<TokenTransfer[]> {
+  // Base: use direct RPC (Etherscan v2 dropped free Base support)
+  if (chainId === 8453) {
+    return fetchTokenTransfersViaRpc(tokenAddress, vaultAddress, startBlock);
+  }
+
   const url = getExplorerUrl(chainId, tokenAddress, vaultAddress, startBlock);
 
   try {

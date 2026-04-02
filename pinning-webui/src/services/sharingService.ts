@@ -55,7 +55,7 @@ export interface SharePayload {
   f?: string;          // Filename (v2 only)
   // Folder share fields
   folder?: boolean;    // true if this is a folder share
-  files?: Array<{ n: string; c: string; s: number }>; // File manifest: name, CID, size
+  files?: Array<{ n: string; c: string; s: number; t?: string }>; // File manifest: name, CID, size, per-file token
   // Password-protected fields
   p?: boolean;         // Password protected flag
   s?: string;          // Base64 salt (16 bytes)

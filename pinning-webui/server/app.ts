@@ -190,8 +190,6 @@ export async function initializeDatabase(): Promise<void> {
       `ALTER TABLE user_wallets ADD COLUMN IF NOT EXISTS encrypted_wallet_address TEXT`,
       `ALTER TABLE admin_audit_log ADD COLUMN IF NOT EXISTS actor_id VARCHAR(64)`,
       `ALTER TABLE admin_audit_log ADD COLUMN IF NOT EXISTS target_id VARCHAR(64)`,
-      // Drop dead code column
-      `ALTER TABLE pins DROP COLUMN IF EXISTS name_lowercase`,
     ];
     for (const sql of zkMigrations) {
       await query(sql).catch(() => { /* column may already exist or table may not exist */ });

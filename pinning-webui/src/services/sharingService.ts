@@ -128,6 +128,7 @@ export interface FolderFileEntry {
   name: string;        // Relative file name within the folder
   cid: string;         // Storage key / CID
   size: number;        // File size in bytes
+  tokenJson?: string;  // Per-file fula share token JSON
 }
 
 export interface ProcessedShareDataV2 {
@@ -417,10 +418,11 @@ export async function processSharePayloadV2(
   // Parse folder manifest if present
   const isFolder = payload.folder === true;
   const files: FolderFileEntry[] | undefined = isFolder && Array.isArray(payload.files)
-    ? payload.files.map((f: { n: string; c: string; s: number }) => ({
+    ? payload.files.map((f: { n: string; c: string; s: number; t?: string }) => ({
         name: f.n,
         cid: f.c,
         size: f.s,
+        tokenJson: f.t || undefined,
       }))
     : undefined;
 

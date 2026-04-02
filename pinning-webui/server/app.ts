@@ -117,6 +117,27 @@ export async function initializeDatabase(): Promise<void> {
     console.error('[webui] Failed to connect to PostgreSQL:', error);
     throw error;
   }
+
+  // Create share_manifests table for temporal folder share updates
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS share_manifests (
+        share_id TEXT PRIMARY KEY,
+        bucket TEXT NOT NULL,
+        path_scope TEXT NOT NULL,
+        secret_key TEXT NOT NULL,
+        token_json TEXT NOT NULL,
+        files JSONB,
+        share_mode TEXT DEFAULT 'temporal',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        expires_at TIMESTAMPTZ
+      )
+    `);
+    console.log('[webui] share_manifests table ready');
+  } catch (error) {
+    console.error('[webui] Failed to create share_manifests table:', error);
+  }
 }
 
 // Seed chain_sync_state with supported chains (if empty)
@@ -1199,6 +1220,87 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     } catch (error) {
       console.error('[webui] Error in v2 share fetch:', error);
       res.status(500).json({ error: 'Failed to fetch shared content' });
+    }
+  });
+
+  // ============ Share Manifest Endpoints ============
+  // Server-managed manifests for temporal folder shares.
+  // Flutter POSTs manifest at share creation; portal GETs it at view time.
+  // For temporal shares, manifest can be updated without changing the URL.
+
+  const manifestLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many manifest requests, please try again later' },
+  });
+
+  // Upsert share manifest (called by Flutter at share creation and on temporal updates)
+  app.put('/api/share/v2/manifest/:shareId', manifestLimiter, async (req: Request, res: Response) => {
+    try {
+      const { shareId } = req.params;
+      const { bucket, pathScope, secretKey, tokenJson, files, shareMode, expiresAt } = req.body;
+
+      if (!shareId || !bucket || !pathScope || !secretKey || !tokenJson) {
+        return res.status(400).json({ error: 'Missing required fields' });
+      }
+
+      // Validate shareId format (UUID)
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(shareId)) {
+        return res.status(400).json({ error: 'Invalid shareId format' });
+      }
+
+      await query(
+        `INSERT INTO share_manifests (share_id, bucket, path_scope, secret_key, token_json, files, share_mode, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+         ON CONFLICT (share_id) DO UPDATE SET
+           files = EXCLUDED.files, token_json = EXCLUDED.token_json, updated_at = NOW()`,
+        [shareId, bucket, pathScope, secretKey, tokenJson, JSON.stringify(files || null), shareMode || 'temporal', expiresAt || null]
+      );
+
+      console.log('[webui] Manifest upserted for share:', shareId);
+      res.json({ ok: true });
+    } catch (error) {
+      console.error('[webui] Error upserting manifest:', error);
+      res.status(500).json({ error: 'Failed to save manifest' });
+    }
+  });
+
+  // Fetch share manifest (called by portal View.tsx at view time)
+  app.get('/api/share/v2/manifest/:shareId', manifestLimiter, async (req: Request, res: Response) => {
+    try {
+      const { shareId } = req.params;
+
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(shareId)) {
+        return res.status(400).json({ error: 'Invalid shareId format' });
+      }
+
+      const result = await query('SELECT * FROM share_manifests WHERE share_id = $1', [shareId]);
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      const row = result.rows[0];
+      if (row.expires_at && new Date(row.expires_at) < new Date()) {
+        return res.status(410).json({ error: 'Expired' });
+      }
+
+      res.json({
+        shareId: row.share_id,
+        bucket: row.bucket,
+        pathScope: row.path_scope,
+        secretKey: row.secret_key,
+        tokenJson: row.token_json,
+        files: row.files,
+        shareMode: row.share_mode,
+        expiresAt: row.expires_at,
+      });
+    } catch (error) {
+      console.error('[webui] Error fetching manifest:', error);
+      res.status(500).json({ error: 'Failed to fetch manifest' });
     }
   });
 

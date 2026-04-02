@@ -222,6 +222,26 @@ export default function View() {
     // For folder shares, skip content loading — show file listing instead
     if (shareDataV2.isFolder && shareDataV2.files?.length) {
       console.log('[View] Folder share detected with', shareDataV2.files.length, 'files');
+
+      // For temporal folder shares, fetch server manifest for updated file list
+      try {
+        const resp = await fetch(`/api/share/v2/manifest/${shareDataV2.shareId}`);
+        if (resp.ok) {
+          const manifest = await resp.json();
+          if (manifest.files && Array.isArray(manifest.files)) {
+            // Map server manifest format to FolderFileEntry
+            shareDataV2.files = manifest.files.map((f: { n: string; c: string; s: number; t?: string } | FolderFileEntry) => {
+              // Server stores same format as URL fragment
+              if ('name' in f) return f;
+              return { name: f.n, cid: f.c, size: f.s, tokenJson: f.t || undefined };
+            });
+            console.log('[View] Updated folder manifest from server:', shareDataV2.files.length, 'files');
+          }
+        }
+      } catch (e) {
+        console.log('[View] Manifest fetch failed, using URL fragment fallback:', e);
+      }
+
       setState(s => ({
         ...s,
         loading: false,
@@ -583,7 +603,9 @@ function FolderView({ shareData, expiresAt }: { shareData: ProcessedShareDataV2;
     try {
       const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch`;
       const client = await createShareClient(shareData.secretKey, proxyEndpoint);
-      const acceptedShare = await acceptShareToken(client, shareData.tokenJson);
+      // Use per-file token if available, fallback to main token
+      const tokenJson = file.tokenJson || shareData.tokenJson;
+      const acceptedShare = await acceptShareToken(client, tokenJson);
       const decryptedData = await decryptWithAcceptedShare(client, shareData.bucket, file.cid, acceptedShare);
 
       downloadBlob(new Uint8Array(decryptedData), file.name, '');

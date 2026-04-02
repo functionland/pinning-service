@@ -1518,7 +1518,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     message: { error: 'Too many updates, please try again later' },
   });
 
-  // Resolve S3 JWT for collab operations: creator → session → admin
+  // Resolve S3 JWT for collab operations: creator → session user
   async function getCollabS3Jwt(groupId: string, req: Request): Promise<string | undefined> {
     // Priority 1: Creator's JWT
     try {
@@ -1544,9 +1544,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         if (keys?.length > 0) return keys[0].key_id;
       } catch {}
     }
-    // Priority 3: Admin JWT fallback
-    console.log('[webui] getCollabS3Jwt: falling back to admin JWT (exists=%s)', !!config.s3AdminJwt);
-    return config.s3AdminJwt;
+    console.warn('[webui] getCollabS3Jwt: no JWT found for collab:', groupId);
+    return undefined;
   }
 
   // Upload encrypted file for collaboration (public - link-authorized)
@@ -1583,7 +1582,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
         const bucket = 'files';
         const storageKey = `collab/${groupId}/${fileId}`;
-        const uploadUrl = `${s3BaseUrl}/admin/upload/${bucket}/${storageKey}`;
+        const uploadUrl = `${s3BaseUrl}/${bucket}/${storageKey}`;
 
         console.log('[webui] Collab upload:', { groupId, fileId, size: body.length });
 
@@ -1643,7 +1642,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
         const bucket = 'fula-metadata';
         const storageKey = `.fula/collab/${groupId}/manifest.json`;
-        const uploadUrl = `${s3BaseUrl}/admin/upload/${bucket}/${encodeURIComponent(storageKey)}`;
+        const uploadUrl = `${s3BaseUrl}/${bucket}/${encodeURIComponent(storageKey)}`;
 
         console.log('[webui] Collab manifest update:', { groupId, size: body.length });
 

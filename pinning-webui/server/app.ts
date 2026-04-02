@@ -615,7 +615,6 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         ? [`https://${req.hostname}`]
         : ['http://localhost:5173', 'http://localhost:3001', `http://${req.hostname}:${config.port}`];
       if (!allowedOrigins.some(o => origin === o)) {
-        console.warn(`[CSRF] Blocked ${req.method} ${fullPath} | origin=${origin} hostname=${req.hostname} allowed=${JSON.stringify(allowedOrigins)}`);
         return res.status(403).json({ error: 'Invalid origin' });
       }
     }
@@ -1541,9 +1540,19 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           return res.status(400).json({ error: 'Empty file body' });
         }
 
-        const s3Jwt = config.s3AdminJwt;
+        // Use logged-in user's JWT if available, fall back to admin JWT
+        let s3Jwt: string | undefined;
+        if (req.session.user?.userId) {
+          const keys = await dbOps.getApiKeys(req.session.user.userId);
+          if (keys && keys.length > 0) {
+            s3Jwt = keys[0].key_id;
+          }
+        }
         if (!s3Jwt) {
-          console.error('[webui] S3_ADMIN_JWT not configured');
+          s3Jwt = config.s3AdminJwt;
+        }
+        if (!s3Jwt) {
+          console.error('[webui] No S3 JWT available (no session and S3_ADMIN_JWT not configured)');
           return res.status(500).json({ error: 'Upload not configured' });
         }
 
@@ -1601,9 +1610,19 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           return res.status(400).json({ error: 'Empty manifest body' });
         }
 
-        const s3Jwt = config.s3AdminJwt;
+        // Use logged-in user's JWT if available, fall back to admin JWT
+        let s3Jwt: string | undefined;
+        if (req.session.user?.userId) {
+          const keys = await dbOps.getApiKeys(req.session.user.userId);
+          if (keys && keys.length > 0) {
+            s3Jwt = keys[0].key_id;
+          }
+        }
         if (!s3Jwt) {
-          console.error('[webui] S3_ADMIN_JWT not configured');
+          s3Jwt = config.s3AdminJwt;
+        }
+        if (!s3Jwt) {
+          console.error('[webui] No S3 JWT available for manifest update');
           return res.status(500).json({ error: 'Manifest update not configured' });
         }
 

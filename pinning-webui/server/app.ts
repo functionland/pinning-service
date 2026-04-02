@@ -125,7 +125,6 @@ export async function initializeDatabase(): Promise<void> {
         share_id TEXT PRIMARY KEY,
         bucket TEXT NOT NULL,
         path_scope TEXT NOT NULL,
-        secret_key TEXT NOT NULL,
         token_json TEXT NOT NULL,
         files JSONB,
         share_mode TEXT DEFAULT 'temporal',
@@ -134,6 +133,10 @@ export async function initializeDatabase(): Promise<void> {
         expires_at TIMESTAMPTZ
       )
     `);
+    // Migration: drop secret_key column if it exists (no longer stored server-side for security)
+    await query(`
+      ALTER TABLE share_manifests DROP COLUMN IF EXISTS secret_key
+    `).catch(() => { /* column may not exist on fresh installs */ });
     console.log('[webui] share_manifests table ready');
   } catch (error) {
     console.error('[webui] Failed to create share_manifests table:', error);
@@ -1240,9 +1243,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.put('/api/share/v2/manifest/:shareId', manifestLimiter, async (req: Request, res: Response) => {
     try {
       const { shareId } = req.params;
-      const { bucket, pathScope, secretKey, tokenJson, files, shareMode, expiresAt } = req.body;
+      const { bucket, pathScope, tokenJson, files, shareMode, expiresAt } = req.body;
 
-      if (!shareId || !bucket || !pathScope || !secretKey || !tokenJson) {
+      if (!shareId || !bucket || !pathScope || !tokenJson) {
         return res.status(400).json({ error: 'Missing required fields' });
       }
 
@@ -1253,11 +1256,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
 
       await query(
-        `INSERT INTO share_manifests (share_id, bucket, path_scope, secret_key, token_json, files, share_mode, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+        `INSERT INTO share_manifests (share_id, bucket, path_scope, token_json, files, share_mode, expires_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
          ON CONFLICT (share_id) DO UPDATE SET
            files = EXCLUDED.files, token_json = EXCLUDED.token_json, updated_at = NOW()`,
-        [shareId, bucket, pathScope, secretKey, tokenJson, JSON.stringify(files || null), shareMode || 'temporal', expiresAt || null]
+        [shareId, bucket, pathScope, tokenJson, JSON.stringify(files || null), shareMode || 'temporal', expiresAt || null]
       );
 
       console.log('[webui] Manifest upserted for share:', shareId);
@@ -1292,7 +1295,6 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         shareId: row.share_id,
         bucket: row.bucket,
         pathScope: row.path_scope,
-        secretKey: row.secret_key,
         tokenJson: row.token_json,
         files: row.files,
         shareMode: row.share_mode,

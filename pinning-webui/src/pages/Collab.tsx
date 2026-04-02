@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   parseCollabUrl,
+  decryptManifestPayload,
   type CollaborationManifest,
   type CollaborationPayload,
   type CollaborationFile,
@@ -75,9 +76,19 @@ export default function Collab() {
         const groupId = parsed.payload.g;
         const syncResp = await fetch(`/api/collab/${groupId}/manifest-sync`);
         if (syncResp.ok) {
-          const { data } = await syncResp.json();
-          manifest = JSON.parse(data) as CollaborationManifest;
-          console.log('[Collab] Loaded manifest from server sync');
+          const result = await syncResp.json();
+          if (result.encryptedManifest) {
+            // Encrypted manifest — decrypt client-side with link secret key
+            const linkSecret = Uint8Array.from(atob(parsed.payload.sk), c => c.charCodeAt(0));
+            manifest = await decryptManifestPayload(
+              result.encryptedManifest, linkSecret, groupId
+            ) as CollaborationManifest;
+            console.log('[Collab] Loaded encrypted manifest from server sync');
+          } else if (result.data) {
+            // Legacy plaintext manifest
+            manifest = JSON.parse(result.data) as CollaborationManifest;
+            console.log('[Collab] Loaded plaintext manifest from server sync');
+          }
         }
       } catch (syncErr) {
         console.warn('[Collab] Server sync fetch failed, falling back to fula:', syncErr);

@@ -15,6 +15,8 @@ import { parseUnits, formatUnits, erc20Abi } from 'viem';
 import { useAuth } from '../context/AuthContext';
 import { FULA_TOKEN_ADDRESSES, SWAP_URLS, FULA_DECIMALS } from '../constants/tokens';
 import { CHAIN_NAMES, DEFAULT_CHAIN_ID, SUPPORTED_CHAIN_IDS, skaleEuropa } from '../config/wagmi';
+import { deriveEncryptionKey, encrypt, decrypt } from '../services/encryptionService';
+import { hasValidKey } from '../services/secureStorage';
 
 // Gas token names per chain
 const GAS_TOKEN_NAMES: Record<number, string> = {
@@ -172,9 +174,34 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
 
       if (response.ok) {
         const data = await response.json();
-        const linked = data.wallets?.some(
-          (w: { address: string }) => w.address.toLowerCase() === address.toLowerCase()
+        const addrLower = address.toLowerCase();
+
+        // Check plaintext address match first (legacy wallets)
+        let linked = data.wallets?.some(
+          (w: { address?: string }) => w.address?.toLowerCase() === addrLower
         );
+
+        // If not found by plaintext, try decrypting encrypted addresses
+        if (!linked && user?.email && user?.id) {
+          try {
+            const key = await deriveEncryptionKey(user.provider as 'google' | 'apple', user.id, user.email);
+            for (const w of data.wallets || []) {
+              if (w.encryptedWalletAddress) {
+                try {
+                  const bytes = Uint8Array.from(atob(w.encryptedWalletAddress), c => c.charCodeAt(0));
+                  if (bytes.length >= 28) {
+                    const decrypted = new TextDecoder().decode(await decrypt(bytes, key));
+                    if (decrypted.toLowerCase() === addrLower) {
+                      linked = true;
+                      break;
+                    }
+                  }
+                } catch { /* not our wallet or legacy */ }
+              }
+            }
+          } catch { /* key derivation failed, rely on plaintext match */ }
+        }
+
         setIsWalletLinked(linked);
       }
     } catch (err) {
@@ -215,11 +242,19 @@ export default function WalletSection({ supportedChains, onTransferSuccess }: Wa
       const message = `Link wallet ${address} to ${user.email}\nTimestamp: ${timestamp}\nThis signature proves you own this wallet.`;
       const signature = await signMessageAsync({ message });
 
+      // Encrypt wallet address client-side before sending
+      let encryptedAddress: string | undefined;
+      try {
+        const key = await deriveEncryptionKey(user.provider as 'google' | 'apple', user.id, user.email);
+        const encrypted = await encrypt(new TextEncoder().encode(address.toLowerCase()), key);
+        encryptedAddress = btoa(String.fromCharCode(...encrypted));
+      } catch { /* encryption optional — server still stores hash for lookup */ }
+
       const response = await fetch('/api/wallets/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ address, chainId: selectedChainId, signature, message }),
+        body: JSON.stringify({ address, chainId: selectedChainId, signature, message, encryptedAddress }),
       });
 
       const data = await response.json();

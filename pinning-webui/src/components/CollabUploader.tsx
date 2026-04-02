@@ -127,7 +127,7 @@ export default function CollabUploader({
           version: manifest.version + 1,
           updatedAt: new Date().toISOString(),
         };
-        await updateCollabManifest(groupId, updatedManifest);
+        await updateCollabManifest(groupId, updatedManifest, linkSecret);
         onUploadComplete();
       } catch (err) {
         console.error('[CollabUploader] Failed to update manifest:', err);

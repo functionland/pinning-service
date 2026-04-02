@@ -18,6 +18,7 @@ import {
   type ProcessedShareDataV2,
   type FolderFileEntry,
   type ViewerType,
+  decryptManifestPayload,
 } from '../services/sharingService';
 import { createShareClient, acceptShareToken, decryptWithAcceptedShare } from '../services/fulaClientService';
 import { downloadBlob } from '../services/encryptionService';
@@ -227,13 +228,25 @@ export default function View() {
       try {
         const resp = await fetch(`/api/share/v2/manifest/${shareDataV2.shareId}`);
         if (resp.ok) {
-          const manifest = await resp.json();
-          if (manifest.files && Array.isArray(manifest.files)) {
-            shareDataV2.files = manifest.files.map((f: { n: string; c: string; s: number; t?: string } | FolderFileEntry) => {
+          const data = await resp.json();
+          if (data.encryptedManifest && shareDataV2.secretKey) {
+            // Encrypted manifest — decrypt client-side
+            const decrypted = await decryptManifestPayload(
+              data.encryptedManifest, shareDataV2.secretKey, shareDataV2.shareId
+            ) as { files?: Array<{ n: string; c: string; s: number; t?: string }> };
+            if (decrypted.files && Array.isArray(decrypted.files)) {
+              shareDataV2.files = decrypted.files.map(f => ({
+                name: f.n, cid: f.c, size: f.s, tokenJson: f.t || undefined,
+              }));
+              console.log('[View] Loaded encrypted folder manifest:', shareDataV2.files.length, 'files');
+            }
+          } else if (data.files && Array.isArray(data.files)) {
+            // Legacy plaintext manifest
+            shareDataV2.files = data.files.map((f: { n: string; c: string; s: number; t?: string } | FolderFileEntry) => {
               if ('name' in f) return f;
               return { name: f.n, cid: f.c, size: f.s, tokenJson: f.t || undefined };
             });
-            console.log('[View] Loaded folder manifest from server:', shareDataV2.files.length, 'files');
+            console.log('[View] Loaded plaintext folder manifest:', shareDataV2.files.length, 'files');
           }
         } else {
           console.log('[View] Manifest fetch returned', resp.status, '- using URL fragment fallback');

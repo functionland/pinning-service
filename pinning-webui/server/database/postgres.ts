@@ -131,24 +131,30 @@ export async function verifyConnection(): Promise<boolean> {
 // WebUI Database Operations (Async)
 // ============================================
 
+// Compute user_id from email (SHA-256 hex hash)
+export function emailToUserId(email: string): string {
+  return crypto.createHash('sha256').update(email.toLowerCase()).digest('hex');
+}
+
 // Get or create webui user
 export async function getOrCreateWebuiUser(
+  userId: string,
   email: string,
   name: string,
   picture: string,
   jwtSecret: string,
-  generateJwtApiKey: (email: string, jwtSecret: string) => string,
+  generateJwtApiKey: (userId: string, jwtSecret: string) => string,
   referralCode?: string
 ): Promise<{ email: string; name: string; picture: string; isNew: boolean }> {
   const existing = await query<any>(
-    'SELECT * FROM webui_users WHERE email = $1',
-    [email]
+    'SELECT * FROM webui_users WHERE user_id = $1',
+    [userId]
   );
 
   if (existing.rows[0]) {
     await query(
-      'UPDATE webui_users SET last_login_at = NOW(), name = $1, picture = $2 WHERE email = $3',
-      [name, picture, email]
+      'UPDATE webui_users SET last_login_at = NOW(), name = $1, picture = $2 WHERE user_id = $3',
+      [name, picture, userId]
     );
     return { ...existing.rows[0], isNew: false };
   }
@@ -168,16 +174,16 @@ export async function getOrCreateWebuiUser(
 
   // Insert new user with company pre-filled from referral link name
   await query(
-    'INSERT INTO webui_users (email, name, picture, last_login_at, company) VALUES ($1, $2, $3, NOW(), $4)',
-    [email, name, picture, inheritedName]
+    'INSERT INTO webui_users (user_id, email, name, picture, last_login_at, company) VALUES ($1, $2, $3, $4, NOW(), $5)',
+    [userId, email, name, picture, inheritedName]
   );
 
   // Create first API key automatically
-  const keyId = generateJwtApiKey(email, jwtSecret);
+  const keyId = generateJwtApiKey(userId, jwtSecret);
   const encryptedKey = encryptApiKey(keyId);
   await query(
-    'INSERT INTO api_keys (key_id, user_email, encrypted_key) VALUES ($1, $2, $3)',
-    [keyId, email, encryptedKey]
+    'INSERT INTO api_keys (key_id, user_id, user_email, encrypted_key) VALUES ($1, $2, $3, $4)',
+    [keyId, userId, email, encryptedKey]
   );
 
   // Also create entry in main users/sessions tables for pinning service compatibility
@@ -192,10 +198,10 @@ export async function getOrCreateWebuiUser(
 
   // Create session token that matches the API key
   await query(
-    `INSERT INTO sessions (session_token, username, created_at)
-     VALUES ($1, $2, NOW())
-     ON CONFLICT (session_token) DO UPDATE SET username = $2, created_at = NOW()`,
-    [keyId, email]
+    `INSERT INTO sessions (session_token, user_id, username, created_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (session_token) DO UPDATE SET user_id = $2, username = $3, created_at = NOW()`,
+    [keyId, userId, email]
   );
 
   // Generate referral code for this new user
@@ -217,8 +223,8 @@ export async function getOrCreateWebuiUser(
 
   // Insert with is_default and inherited_name
   await query(
-    'INSERT INTO referral_codes (user_email, code, is_default, inherited_name) VALUES ($1, $2, TRUE, $3)',
-    [email, newReferralCode, inheritedName]
+    'INSERT INTO referral_codes (user_id, user_email, code, is_default, inherited_name) VALUES ($1, $2, $3, TRUE, $4)',
+    [userId, email, newReferralCode, inheritedName]
   );
 
   // If referred by someone, create referral record
@@ -239,17 +245,20 @@ export async function getOrCreateWebuiUser(
   return { email, name, picture, isNew: true };
 }
 
-// Get user by email
-export async function getWebuiUserByEmail(email: string): Promise<any> {
-  const result = await query('SELECT * FROM webui_users WHERE email = $1', [email]);
+// Get user by user_id
+export async function getWebuiUserById(userId: string): Promise<any> {
+  const result = await query('SELECT * FROM webui_users WHERE user_id = $1', [userId]);
   return result.rows[0];
 }
 
+// Backward-compatible alias
+export const getWebuiUserByEmail = getWebuiUserById;
+
 // Get API keys (decrypts encrypted_key if available, falls back to key_id)
-export async function getApiKeys(email: string): Promise<any[]> {
+export async function getApiKeys(userId: string): Promise<any[]> {
   const result = await query(
-    'SELECT key_id, encrypted_key, created_at, last_used_at FROM api_keys WHERE user_email = $1 AND is_deleted = 0 ORDER BY created_at DESC',
-    [email]
+    'SELECT key_id, encrypted_key, created_at, last_used_at FROM api_keys WHERE user_id = $1 AND is_deleted = 0 ORDER BY created_at DESC',
+    [userId]
   );
   return result.rows.map((row: any) => {
     let displayKey = row.key_id;
@@ -269,52 +278,52 @@ export async function getApiKeys(email: string): Promise<any[]> {
 
 // Create API key
 export async function createApiKey(
-  email: string,
+  userId: string,
   jwtSecret: string,
-  generateJwtApiKey: (email: string, jwtSecret: string) => string
+  generateJwtApiKey: (userId: string, jwtSecret: string) => string
 ): Promise<string> {
-  const keyId = generateJwtApiKey(email, jwtSecret);
+  const keyId = generateJwtApiKey(userId, jwtSecret);
   const encryptedKey = encryptApiKey(keyId);
   await query(
-    'INSERT INTO api_keys (key_id, user_email, encrypted_key) VALUES ($1, $2, $3)',
-    [keyId, email, encryptedKey]
+    'INSERT INTO api_keys (key_id, user_id, user_email, encrypted_key) VALUES ($1, $2, $3, $4)',
+    [keyId, userId, userId, encryptedKey]
   );
 
   // Also create corresponding session for pinning service
   await query(
-    `INSERT INTO sessions (session_token, username, created_at)
-     VALUES ($1, $2, NOW())
-     ON CONFLICT (session_token) DO UPDATE SET username = $2, created_at = NOW()`,
-    [keyId, email]
+    `INSERT INTO sessions (session_token, user_id, username, created_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (session_token) DO UPDATE SET user_id = $2, username = $3, created_at = NOW()`,
+    [keyId, userId, userId]
   );
 
   return keyId;
 }
 
 // Delete API key
-export async function deleteApiKey(email: string, keyId: string): Promise<boolean> {
+export async function deleteApiKey(userId: string, keyId: string): Promise<boolean> {
   const result = await query(
-    'UPDATE api_keys SET is_deleted = 1, deleted_at = NOW() WHERE user_email = $1 AND key_id = $2 AND is_deleted = 0',
-    [email, keyId]
+    'UPDATE api_keys SET is_deleted = 1, deleted_at = NOW() WHERE user_id = $1 AND key_id = $2 AND is_deleted = 0',
+    [userId, keyId]
   );
 
   // Remove from sessions table
-  await query('DELETE FROM sessions WHERE session_token = $1 AND username = $2', [keyId, email]);
+  await query('DELETE FROM sessions WHERE session_token = $1 AND user_id = $2', [keyId, userId]);
 
   return (result.rowCount || 0) > 0;
 }
 
 // Get user pins
 export async function getUserPins(
-  email: string,
+  userId: string,
   page: number,
   limit: number,
   search?: string
 ): Promise<{ pins: any[]; total: number }> {
   const offset = (page - 1) * limit;
 
-  let whereClause = 'WHERE username = $1 AND status != \'deleted\'';
-  const params: any[] = [email];
+  let whereClause = 'WHERE user_id = $1 AND status != \'deleted\'';
+  const params: any[] = [userId];
   let paramIndex = 2;
 
   if (search && search.trim()) {
@@ -345,7 +354,7 @@ export async function getUserPins(
 }
 
 // Get user stats
-export async function getUserStats(email: string): Promise<{
+export async function getUserStats(userId: string): Promise<{
   totalPins: number;
   totalSize: number;
   lastLogin: string;
@@ -354,13 +363,13 @@ export async function getUserStats(email: string): Promise<{
   const statsResult = await query(
     `SELECT COUNT(*) as total_pins, COALESCE(SUM(size), 0) as total_size
      FROM pins
-     WHERE username = $1 AND status != 'deleted'`,
-    [email]
+     WHERE user_id = $1 AND status != 'deleted'`,
+    [userId]
   );
 
   const userResult = await query(
-    'SELECT last_login_at, created_at FROM webui_users WHERE email = $1',
-    [email]
+    'SELECT last_login_at, created_at FROM webui_users WHERE user_id = $1',
+    [userId]
   );
 
   return {
@@ -372,15 +381,16 @@ export async function getUserStats(email: string): Promise<{
 }
 
 // Delete user profile
-export async function deleteUserProfile(email: string): Promise<void> {
+export async function deleteUserProfile(userId: string): Promise<void> {
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    await client.query('DELETE FROM pins WHERE username = $1', [email]);
-    await client.query('DELETE FROM users WHERE username = $1', [email]);
-    await client.query('DELETE FROM sessions WHERE username = $1', [email]);
-    await client.query('DELETE FROM api_keys WHERE user_email = $1', [email]);
-    await client.query('DELETE FROM webui_users WHERE email = $1', [email]);
+    await client.query('DELETE FROM pins WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM users WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM api_keys WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM referral_codes WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM webui_users WHERE user_id = $1', [userId]);
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -391,15 +401,14 @@ export async function deleteUserProfile(email: string): Promise<void> {
 }
 
 // Add pin
-export async function addPin(email: string, cid: string, name?: string): Promise<string> {
+export async function addPin(userId: string, cid: string, name?: string): Promise<string> {
   const { v4: uuidv4 } = await import('uuid');
   const requestId = uuidv4();
-  const nameLower = (name || '').toLowerCase();
 
   await query(
-    `INSERT INTO pins (requestid, username, cid, name, name_lowercase, status, created_at, updated_at)
+    `INSERT INTO pins (requestid, user_id, username, cid, name, status, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, 'queued', NOW(), NOW())`,
-    [requestId, email, cid, name || '', nameLower]
+    [requestId, userId, userId, cid, name || '']
   );
 
   return requestId;
@@ -409,26 +418,26 @@ export async function addPin(email: string, cid: string, name?: string): Promise
 // Referral System Operations
 // ============================================
 
-export async function getReferralCode(email: string): Promise<string | null> {
+export async function getReferralCode(userId: string): Promise<string | null> {
   const result = await query<{ code: string }>(
-    'SELECT code FROM referral_codes WHERE user_email = $1',
-    [email]
+    'SELECT code FROM referral_codes WHERE user_id = $1',
+    [userId]
   );
   return result.rows[0]?.code || null;
 }
 
-export async function getReferralStats(email: string): Promise<{
+export async function getReferralStats(userId: string): Promise<{
   totalReferred: number;
   referrals: Array<{ email: string; referredAt: string }>;
 }> {
   const countResult = await query<{ count: string }>(
-    'SELECT COUNT(*) as count FROM referrals WHERE referrer_email = $1',
-    [email]
+    'SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = $1',
+    [userId]
   );
 
   const referralsResult = await query<{ referred_email: string; referred_at: string }>(
-    'SELECT referred_email, referred_at FROM referrals WHERE referrer_email = $1 ORDER BY referred_at DESC LIMIT 50',
-    [email]
+    'SELECT referred_email, referred_at FROM referrals WHERE referrer_user_id = $1 ORDER BY referred_at DESC LIMIT 50',
+    [userId]
   );
 
   return {
@@ -449,7 +458,7 @@ export interface ReferralCodeInfo {
   createdAt: string;
 }
 
-export async function getUserReferralCodes(email: string): Promise<ReferralCodeInfo[]> {
+export async function getUserReferralCodes(userId: string): Promise<ReferralCodeInfo[]> {
   const result = await query<{
     code: string;
     name: string | null;
@@ -459,9 +468,9 @@ export async function getUserReferralCodes(email: string): Promise<ReferralCodeI
   }>(
     `SELECT code, name, inherited_name, is_default, created_at
      FROM referral_codes
-     WHERE user_email = $1
+     WHERE user_id = $1
      ORDER BY is_default DESC, created_at ASC`,
-    [email]
+    [userId]
   );
 
   return result.rows.map(r => ({
@@ -475,13 +484,13 @@ export async function getUserReferralCodes(email: string): Promise<ReferralCodeI
 
 // Create a new referral code for a user
 export async function createUserReferralCode(
-  email: string,
+  userId: string,
   name: string | null
 ): Promise<{ code: string; error?: string }> {
   // Check max codes limit (10 per user)
   const countResult = await query<{ count: string }>(
-    'SELECT COUNT(*) as count FROM referral_codes WHERE user_email = $1',
-    [email]
+    'SELECT COUNT(*) as count FROM referral_codes WHERE user_id = $1',
+    [userId]
   );
   const currentCount = parseInt(countResult.rows[0]?.count || '0', 10);
   if (currentCount >= 10) {
@@ -508,8 +517,8 @@ export async function createUserReferralCode(
   }
 
   await query(
-    'INSERT INTO referral_codes (user_email, code, name, is_default) VALUES ($1, $2, $3, FALSE)',
-    [email, newCode, truncatedName]
+    'INSERT INTO referral_codes (user_id, user_email, code, name, is_default) VALUES ($1, $2, $3, $4, FALSE)',
+    [userId, userId, newCode, truncatedName]
   );
 
   return { code: newCode };
@@ -517,7 +526,7 @@ export async function createUserReferralCode(
 
 // Update a referral code's name
 export async function updateReferralCodeName(
-  email: string,
+  userId: string,
   code: string,
   name: string | null
 ): Promise<{ success: boolean; error?: string }> {
@@ -525,8 +534,8 @@ export async function updateReferralCodeName(
   const truncatedName = name ? name.substring(0, 50) : null;
 
   const result = await query(
-    'UPDATE referral_codes SET name = $1 WHERE user_email = $2 AND code = $3',
-    [truncatedName, email, code]
+    'UPDATE referral_codes SET name = $1 WHERE user_id = $2 AND code = $3',
+    [truncatedName, userId, code]
   );
 
   if ((result.rowCount || 0) === 0) {
@@ -538,7 +547,7 @@ export async function updateReferralCodeName(
 
 // Delete a referral code
 export async function deleteUserReferralCode(
-  email: string,
+  userId: string,
   code: string
 ): Promise<{ success: boolean; error?: string }> {
   // Check if this code has any referrals
@@ -553,8 +562,8 @@ export async function deleteUserReferralCode(
 
   // Check if this is the only code
   const countResult = await query<{ count: string }>(
-    'SELECT COUNT(*) as count FROM referral_codes WHERE user_email = $1',
-    [email]
+    'SELECT COUNT(*) as count FROM referral_codes WHERE user_id = $1',
+    [userId]
   );
   const totalCodes = parseInt(countResult.rows[0]?.count || '0', 10);
   if (totalCodes <= 1) {
@@ -563,16 +572,16 @@ export async function deleteUserReferralCode(
 
   // Check if this is the default code
   const codeInfo = await query<{ is_default: boolean }>(
-    'SELECT is_default FROM referral_codes WHERE user_email = $1 AND code = $2',
-    [email, code]
+    'SELECT is_default FROM referral_codes WHERE user_id = $1 AND code = $2',
+    [userId, code]
   );
   if (codeInfo.rows[0]?.is_default) {
     return { success: false, error: 'Cannot delete the default referral code' };
   }
 
   const result = await query(
-    'DELETE FROM referral_codes WHERE user_email = $1 AND code = $2',
-    [email, code]
+    'DELETE FROM referral_codes WHERE user_id = $1 AND code = $2',
+    [userId, code]
   );
 
   if ((result.rowCount || 0) === 0) {
@@ -619,8 +628,8 @@ export function decryptApiKey(stored: string): string | null {
 // ============================================
 
 export async function verifyApiKey(keyId: string): Promise<string | null> {
-  const result = await query<{ user_email: string }>(
-    'SELECT user_email FROM api_keys WHERE key_id = $1 AND is_deleted = 0',
+  const result = await query<{ user_id: string | null; user_email: string }>(
+    'SELECT user_id, user_email FROM api_keys WHERE key_id = $1 AND is_deleted = 0',
     [keyId]
   );
 
@@ -630,7 +639,8 @@ export async function verifyApiKey(keyId: string): Promise<string | null> {
       'UPDATE api_keys SET last_used_at = NOW() WHERE key_id = $1',
       [keyId]
     );
-    return result.rows[0].user_email;
+    // Return user_id if available, otherwise compute from user_email for legacy keys
+    return result.rows[0].user_id || emailToUserId(result.rows[0].user_email);
   }
 
   return null;
@@ -656,10 +666,10 @@ export async function updateChainSyncState(chainId: number, lastScannedBlock: nu
 // App Download Tracking
 // ============================================
 
-export async function markAppDownloaded(email: string): Promise<void> {
+export async function markAppDownloaded(userId: string): Promise<void> {
   await query(
-    'UPDATE webui_users SET app_downloaded = 1, app_downloaded_at = NOW() WHERE email = $1 AND app_downloaded = 0',
-    [email]
+    'UPDATE webui_users SET app_downloaded = 1, app_downloaded_at = NOW() WHERE user_id = $1 AND app_downloaded = 0',
+    [userId]
   );
 }
 
@@ -667,21 +677,21 @@ export async function markAppDownloaded(email: string): Promise<void> {
 // User Company/Organization
 // ============================================
 
-export async function getUserCompany(email: string): Promise<string | null> {
+export async function getUserCompany(userId: string): Promise<string | null> {
   const result = await query<{ company: string | null }>(
-    'SELECT company FROM webui_users WHERE email = $1',
-    [email]
+    'SELECT company FROM webui_users WHERE user_id = $1',
+    [userId]
   );
   return result.rows[0]?.company || null;
 }
 
-export async function updateUserCompany(email: string, company: string | null): Promise<boolean> {
+export async function updateUserCompany(userId: string, company: string | null): Promise<boolean> {
   // Truncate company to 100 chars if provided
   const truncatedCompany = company ? company.substring(0, 100) : null;
 
   const result = await query(
-    'UPDATE webui_users SET company = $1 WHERE email = $2',
-    [truncatedCompany, email]
+    'UPDATE webui_users SET company = $1 WHERE user_id = $2',
+    [truncatedCompany, userId]
   );
   return (result.rowCount || 0) > 0;
 }
@@ -694,7 +704,9 @@ export default {
   closePool,
   isPostgresConfigured,
   verifyConnection,
+  emailToUserId,
   getOrCreateWebuiUser,
+  getWebuiUserById,
   getWebuiUserByEmail,
   getApiKeys,
   createApiKey,

@@ -80,18 +80,6 @@ export async function getFulaClient(
   cachedSecretKey = new Uint8Array(secretKey);
   cachedAccessToken = accessToken;
 
-  // Debug: Log the public key derived from the secret key
-  // This helps verify the key derivation matches FxFiles mobile
-  try {
-    const publicKey = await getPublicKey(client);
-    console.log('[getFulaClient] Public key (first 8 bytes):',
-      Array.from(new Uint8Array(publicKey).slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
-    console.log('[getFulaClient] Full public key (base64):',
-      btoa(String.fromCharCode(...new Uint8Array(publicKey))));
-  } catch (e) {
-    console.warn('[getFulaClient] Could not get public key:', e);
-  }
-
   return client;
 }
 

@@ -18,24 +18,24 @@ const HOURS_PER_MONTH = 720;
 
 // User storage info
 interface UserStorage {
-  username: string;
+  userId: string;
   totalSize: number;
 }
 
 // Get all users with storage over free tier
 async function getUsersOverFreeTier(): Promise<UserStorage[]> {
   // Query pins table for users with total storage > free tier
-  const result = await query<{ username: string; totalsize: string }>(
-    `SELECT username, SUM(size) as totalsize
+  const result = await query<{ user_id: string; totalsize: string }>(
+    `SELECT user_id, SUM(size) as totalsize
      FROM pins
-     WHERE status != 'deleted'
-     GROUP BY username
+     WHERE status != 'deleted' AND user_id IS NOT NULL
+     GROUP BY user_id
      HAVING SUM(size) > $1`,
     [FREE_TIER_BYTES]
   );
 
   return result.rows.map(u => ({
-    username: u.username,
+    userId: u.user_id,
     totalSize: parseInt(u.totalsize || '0', 10),
   }));
 }
@@ -51,7 +51,7 @@ function calculateHourlyDeduction(totalBytes: number): number {
 }
 
 // Process deduction for a single user
-async function processUserDeduction(username: string, storageBytes: number): Promise<{
+async function processUserDeduction(userId: string, storageBytes: number): Promise<{
   deducted: boolean;
   amount: number;
   suspended: boolean;
@@ -68,8 +68,8 @@ async function processUserDeduction(username: string, storageBytes: number): Pro
 
     // Get or create user credits
     const creditsResult = await client.query<{ balance_fula: number; is_suspended: number }>(
-      'SELECT balance_fula, is_suspended FROM user_credits WHERE user_email = $1',
-      [username]
+      'SELECT balance_fula, is_suspended FROM user_credits WHERE user_id = $1',
+      [userId]
     );
     const credits = creditsResult.rows[0];
 
@@ -95,23 +95,23 @@ async function processUserDeduction(username: string, storageBytes: number): Pro
              is_suspended = $3,
              suspended_at = CASE WHEN $4 THEN NOW() ELSE suspended_at END,
              updated_at = NOW()
-         WHERE user_email = $5`,
-        [newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend, username]
+         WHERE user_id = $5`,
+        [newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend, userId]
       );
     } else {
-      // Create new record with negative balance
+      // Create new record with negative balance (dual-write: user_id + user_email)
       await client.query(
-        `INSERT INTO user_credits (user_email, balance_fula, total_deducted_fula, is_suspended, suspended_at, last_deduction_at)
-         VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN NOW() ELSE NULL END, NOW())`,
-        [username, newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend]
+        `INSERT INTO user_credits (user_id, user_email, balance_fula, total_deducted_fula, is_suspended, suspended_at, last_deduction_at)
+         VALUES ($1, $1, $2, $3, $4, CASE WHEN $5 THEN NOW() ELSE NULL END, NOW())`,
+        [userId, newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend]
       );
     }
 
-    // Log the deduction
+    // Log the deduction (dual-write: user_id + user_email)
     await client.query(
-      `INSERT INTO credit_history (user_email, tx_type, amount_fula, balance_after, reference_id)
-       VALUES ($1, 'hourly_deduction', $2, $3, $4)`,
-      [username, -deductionAmount, newBalance, new Date().toISOString()]
+      `INSERT INTO credit_history (user_id, user_email, tx_type, amount_fula, balance_after, reference_id)
+       VALUES ($1, $1, 'hourly_deduction', $2, $3, $4)`,
+      [userId, -deductionAmount, newBalance, new Date().toISOString()]
     );
 
     await client.query('COMMIT');
@@ -127,8 +127,8 @@ async function processUserDeduction(username: string, storageBytes: number): Pro
 // Check if users should be unsuspended (e.g., they unpinned content)
 async function checkForUnsuspension(): Promise<number> {
   // Get suspended users
-  const suspendedResult = await query<{ user_email: string }>(
-    'SELECT user_email FROM user_credits WHERE is_suspended = 1'
+  const suspendedResult = await query<{ user_id: string }>(
+    'SELECT user_id FROM user_credits WHERE is_suspended = 1 AND user_id IS NOT NULL'
   );
 
   let unsuspendedCount = 0;
@@ -138,8 +138,8 @@ async function checkForUnsuspension(): Promise<number> {
     const storageResult = await query<{ totalsize: string }>(
       `SELECT COALESCE(SUM(size), 0) as totalsize
        FROM pins
-       WHERE username = $1 AND status != 'deleted'`,
-      [user.user_email]
+       WHERE user_id = $1 AND status != 'deleted'`,
+      [user.user_id]
     );
     const storage = parseInt(storageResult.rows[0]?.totalsize || '0', 10);
 
@@ -148,17 +148,17 @@ async function checkForUnsuspension(): Promise<number> {
       await query(
         `UPDATE user_credits
          SET is_suspended = 0, suspended_at = NULL, updated_at = NOW()
-         WHERE user_email = $1`,
-        [user.user_email]
+         WHERE user_id = $1`,
+        [user.user_id]
       );
 
-      console.log(`[deductionJob] Unsuspended ${user.user_email} (now under free tier)`);
+      console.log(`[deductionJob] Unsuspended user ${user.user_id.slice(0, 8)}... (now under free tier)`);
       unsuspendedCount++;
     } else {
       // Check if they have positive balance
       const creditsResult = await query<{ balance_fula: number }>(
-        'SELECT balance_fula FROM user_credits WHERE user_email = $1',
-        [user.user_email]
+        'SELECT balance_fula FROM user_credits WHERE user_id = $1',
+        [user.user_id]
       );
       const credits = creditsResult.rows[0];
 
@@ -166,11 +166,11 @@ async function checkForUnsuspension(): Promise<number> {
         await query(
           `UPDATE user_credits
            SET is_suspended = 0, suspended_at = NULL, updated_at = NOW()
-           WHERE user_email = $1`,
-          [user.user_email]
+           WHERE user_id = $1`,
+          [user.user_id]
         );
 
-        console.log(`[deductionJob] Unsuspended ${user.user_email} (has positive balance)`);
+        console.log(`[deductionJob] Unsuspended user ${user.user_id.slice(0, 8)}... (has positive balance)`);
         unsuspendedCount++;
       }
     }
@@ -203,7 +203,7 @@ export async function runDeductionJob(): Promise<void> {
 
   for (const user of users) {
     try {
-      const result = await processUserDeduction(user.username, user.totalSize);
+      const result = await processUserDeduction(user.userId, user.totalSize);
 
       if (result.deducted) {
         totalDeducted += result.amount;
@@ -213,7 +213,7 @@ export async function runDeductionJob(): Promise<void> {
         usersSuspended++;
       }
     } catch (error) {
-      console.error(`[deductionJob] Error processing ${user.username}:`, error);
+      console.error(`[deductionJob] Error processing user ${user.userId.slice(0, 8)}...:`, error);
     }
   }
 

@@ -8,6 +8,7 @@
  */
 
 import { query, getClient } from '../database/postgres.js';
+import { hashWalletAddress, emailToUserId } from '../utils/hash.js';
 
 // Chain configuration
 export interface ChainConfig {
@@ -197,28 +198,29 @@ export async function processTransfer(chainId: number, transfer: TokenTransfer):
       return false;
     }
 
-    // Check if sender has a linked wallet
-    const walletResult = await query<{ user_email: string }>(
-      `SELECT user_email FROM user_wallets
-       WHERE wallet_address = $1 AND is_verified = 1`,
-      [transfer.from.toLowerCase()]
+    // Check if sender has a linked wallet (lookup by address hash)
+    const fromHash = hashWalletAddress(transfer.from);
+    const walletResult = await query<{ user_id: string }>(
+      `SELECT user_id FROM user_wallets
+       WHERE wallet_address_hash = $1 AND is_verified = 1`,
+      [fromHash]
     );
 
     const wallet = walletResult.rows[0];
 
     if (wallet) {
       // Auto-credit the user
-      await creditUser(wallet.user_email, amountFula, transfer.hash, chainId);
+      await creditUser(wallet.user_id, amountFula, transfer.hash, chainId);
 
-      // Update transaction with user email
+      // Update transaction with user_id (dual-write user_email for compat)
       await query(
         `UPDATE token_transactions
-         SET user_email = $1, claimed_at = NOW()
-         WHERE tx_hash = $2 AND chain_id = $3`,
-        [wallet.user_email, transfer.hash, chainId]
+         SET user_id = $1, user_email = $2, claimed_at = NOW()
+         WHERE tx_hash = $3 AND chain_id = $4`,
+        [wallet.user_id, wallet.user_id, transfer.hash, chainId]
       );
 
-      console.log(`[blockScanner] Auto-credited ${amountFula} FULA to ${wallet.user_email} from tx ${transfer.hash}`);
+      console.log(`[blockScanner] Auto-credited ${amountFula} FULA to user ${wallet.user_id} from tx ${transfer.hash}`);
     }
 
     return true;
@@ -229,15 +231,15 @@ export async function processTransfer(chainId: number, transfer: TokenTransfer):
 }
 
 // Credit FULA to a user's account
-async function creditUser(userEmail: string, amount: number, txHash: string, chainId: number): Promise<void> {
+async function creditUser(userId: string, amount: number, txHash: string, chainId: number): Promise<void> {
   const client = await getClient();
   try {
     await client.query('BEGIN');
 
     // Get or create user credits record
     const existingResult = await client.query<{ balance_fula: number }>(
-      'SELECT balance_fula FROM user_credits WHERE user_email = $1',
-      [userEmail]
+      'SELECT balance_fula FROM user_credits WHERE user_id = $1',
+      [userId]
     );
     const existing = existingResult.rows[0];
 
@@ -248,23 +250,23 @@ async function creditUser(userEmail: string, amount: number, txHash: string, cha
         `UPDATE user_credits
          SET balance_fula = $1, total_deposited_fula = total_deposited_fula + $2,
              is_suspended = 0, updated_at = NOW()
-         WHERE user_email = $3`,
-        [newBalance, amount, userEmail]
+         WHERE user_id = $3`,
+        [newBalance, amount, userId]
       );
     } else {
       newBalance = amount;
       await client.query(
-        `INSERT INTO user_credits (user_email, balance_fula, total_deposited_fula)
-         VALUES ($1, $2, $3)`,
-        [userEmail, amount, amount]
+        `INSERT INTO user_credits (user_id, user_email, balance_fula, total_deposited_fula)
+         VALUES ($1, $2, $3, $4)`,
+        [userId, userId, amount, amount]
       );
     }
 
-    // Log the deposit in credit history
+    // Log the deposit in credit history (dual-write user_id + user_email)
     await client.query(
-      `INSERT INTO credit_history (user_email, tx_type, amount_fula, balance_after, reference_id)
-       VALUES ($1, 'deposit', $2, $3, $4)`,
-      [userEmail, amount, newBalance, `${chainId}:${txHash}`]
+      `INSERT INTO credit_history (user_id, user_email, tx_type, amount_fula, balance_after, reference_id)
+       VALUES ($1, $2, 'deposit', $3, $4, $5)`,
+      [userId, userId, amount, newBalance, `${chainId}:${txHash}`]
     );
 
     await client.query('COMMIT');

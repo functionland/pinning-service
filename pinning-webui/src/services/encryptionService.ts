@@ -54,12 +54,6 @@ export async function deriveEncryptionKey(
   // Derive key using Argon2id via WASM (cross-platform consistent, brute-force resistant)
   const keyBytes = await deriveKeyFromCredentials('fula-files-v1', encoder.encode(input));
 
-  // Debug logging
-  console.log('[deriveEncryptionKey] Using Argon2id KDF');
-  console.log('[deriveEncryptionKey] Input:', input);
-  console.log('[deriveEncryptionKey] Key first 4 bytes:',
-    Array.from(keyBytes.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' '));
-
   // Import as AES-GCM key
   const derivedKey = await crypto.subtle.importKey(
     'raw',

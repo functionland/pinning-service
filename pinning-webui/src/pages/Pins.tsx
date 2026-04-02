@@ -8,6 +8,7 @@ import {
   derivePlaylistEncryptionKey,
   exportKey,
   importKey,
+  encrypt,
   fetchAndDecrypt,
   downloadBlob,
   getExtensionFromMimeType,
@@ -206,6 +207,9 @@ export default function Pins() {
   const [settingUpKey, setSettingUpKey] = useState(false);
   const [pendingDecryptPin, setPendingDecryptPin] = useState<Pin | null>(null);
 
+  // Decrypted pin names (keyed by request_id)
+  const [decryptedPinNames, setDecryptedPinNames] = useState<Record<string, string>>({});
+
   // Nodes modal state
   const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
   const [nodesModalData, setNodesModalData] = useState<{
@@ -296,10 +300,11 @@ export default function Pins() {
       );
       console.log('[Decryption] Decrypted successfully, mimeType:', mimeType);
 
-      // Generate filename
+      // Generate filename (use decrypted name if available)
       const ext = getExtensionFromMimeType(mimeType);
-      const filename = pin.name 
-        ? (pin.name.includes('.') ? pin.name : `${pin.name}${ext}`)
+      const displayName = decryptedPinNames[pin.request_id] || pin.name;
+      const filename = displayName
+        ? (displayName.includes('.') ? displayName : `${displayName}${ext}`)
         : `decrypted-${pin.cid.slice(0, 8)}${ext}`;
 
       // Trigger download
@@ -436,10 +441,11 @@ export default function Pins() {
       const mimeType = detectMimeType(data);
       console.log('[Decryption] Decrypted successfully, mimeType:', mimeType);
 
-      // Generate filename
+      // Generate filename (use decrypted name if available)
       const ext = getExtensionFromMimeType(mimeType);
-      const filename = pin.name
-        ? (pin.name.includes('.') ? pin.name : `${pin.name}${ext}`)
+      const displayName = decryptedPinNames[pin.request_id] || pin.name;
+      const filename = displayName
+        ? (displayName.includes('.') ? displayName : `${displayName}${ext}`)
         : `decrypted-${pin.cid.slice(0, 8)}${ext}`;
 
       // Trigger download
@@ -465,6 +471,18 @@ export default function Pins() {
     }
   };
 
+  // Try to decrypt a pin name; returns original if not encrypted or decryption fails
+  const tryDecryptPinName = async (name: string, key: CryptoKey): Promise<string> => {
+    if (!name) return '';
+    try {
+      const bytes = Uint8Array.from(atob(name), c => c.charCodeAt(0));
+      if (bytes.length < 28) return name; // too short for nonce+tag = legacy plaintext
+      return new TextDecoder().decode(await decrypt(bytes, key));
+    } catch {
+      return name; // legacy plaintext or invalid base64
+    }
+  };
+
   const fetchPins = async () => {
     setLoading(true);
     try {
@@ -476,6 +494,20 @@ export default function Pins() {
       if (!res.ok) throw new Error('Failed to fetch pins');
       const result = await res.json();
       setData(result);
+
+      // Decrypt pin names in background
+      if (user?.email && user?.id && result.pins?.length > 0) {
+        try {
+          const key = await deriveEncryptionKey(user.provider as 'google' | 'apple', user.id, user.email);
+          const names: Record<string, string> = {};
+          for (const pin of result.pins) {
+            if (pin.name) {
+              names[pin.request_id] = await tryDecryptPinName(pin.name, key);
+            }
+          }
+          setDecryptedPinNames(prev => ({ ...prev, ...names }));
+        } catch { /* key derivation failed, show raw names */ }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -1166,11 +1198,21 @@ export default function Pins() {
     setAdding(true);
     setError(null);
     try {
+      // Encrypt pin name client-side if possible (forward-only privacy)
+      let pinName = newName.trim();
+      if (pinName && user?.email && user?.id) {
+        try {
+          const key = await deriveEncryptionKey(user.provider as 'google' | 'apple', user.id, user.email);
+          const encrypted = await encrypt(new TextEncoder().encode(pinName), key);
+          pinName = btoa(String.fromCharCode(...encrypted));
+        } catch { /* encryption failed, send plaintext */ }
+      }
+
       const res = await fetch('/api/pins', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ cid: newCid.trim(), name: newName.trim() }),
+        body: JSON.stringify({ cid: newCid.trim(), name: pinName }),
       });
 
       if (!res.ok) {
@@ -1691,7 +1733,7 @@ export default function Pins() {
                         </div>
                       </td>
                       <td className="px-2 sm:px-4 py-2 sm:py-4 text-sm text-gray-600 hidden sm:table-cell max-w-[120px] truncate">
-                        {pin.name || <span className="text-gray-400">—</span>}
+                        {(decryptedPinNames[pin.request_id] || pin.name) || <span className="text-gray-400">—</span>}
                       </td>
                       <td className="px-2 sm:px-4 py-2 sm:py-4 text-sm text-gray-600 hidden md:table-cell whitespace-nowrap">
                         {formatDate(pin.created_at)}

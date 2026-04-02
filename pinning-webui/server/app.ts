@@ -9,6 +9,7 @@ import http from 'http';
 import { OAuth2Client } from 'google-auth-library';
 import { v4 as uuidv4 } from 'uuid';
 import jwt from 'jsonwebtoken';
+import { emailToUserId, hashWalletAddress, getUserId } from './utils/hash.js';
 import {
   getUserCreditStatus,
   getUserWallets,
@@ -18,7 +19,7 @@ import {
   creditUser,
   getSuspendedUsers,
   unsuspendUser,
-  isAdmin,
+  isAdminById,
   getSupportedChains,
   FREE_TIER_BYTES,
   FULA_PER_GB_MONTH,
@@ -50,7 +51,8 @@ import { getEnabledChains, processTransfer } from './services/blockScanner.js';
 // Session user type
 export interface SessionUser {
   id: string; // User ID (Google sub claim or Apple sub)
-  email: string;
+  userId: string; // SHA-256(email) — used for all DB lookups
+  email: string; // Ephemeral, from OAuth — NOT stored in DB, only in session memory
   name: string;
   picture: string;
   provider: 'google' | 'apple'; // Authentication provider
@@ -67,7 +69,7 @@ declare module 'express-session' {
 declare global {
   namespace Express {
     interface Request {
-      apiUser?: { email: string };
+      apiUser?: { email: string; userId: string };
     }
   }
 }
@@ -92,15 +94,15 @@ export interface AppConfig {
 
 // Database operations type (async for PostgreSQL)
 export interface DbOps {
-  getOrCreateUser(email: string, name: string, picture: string, referralCode?: string): Promise<any>;
-  getUserByEmail(email: string): Promise<any>;
-  getApiKeys(email: string): Promise<any[]>;
-  createApiKey(email: string): Promise<string>;
-  deleteApiKey(email: string, keyId: string): Promise<boolean>;
-  getUserPins(email: string, page: number, limit: number, search?: string): Promise<{ pins: any[]; total: number }>;
-  getUserStats(email: string): Promise<any>;
-  deleteUserProfile(email: string): Promise<void>;
-  addPin(email: string, cid: string, name?: string): Promise<string>;
+  getOrCreateUser(userId: string, email: string, name: string, picture: string, referralCode?: string): Promise<any>;
+  getUserById(userId: string): Promise<any>;
+  getApiKeys(userId: string): Promise<any[]>;
+  createApiKey(userId: string): Promise<string>;
+  deleteApiKey(userId: string, keyId: string): Promise<boolean>;
+  getUserPins(userId: string, page: number, limit: number, search?: string): Promise<{ pins: any[]; total: number }>;
+  getUserStats(userId: string): Promise<any>;
+  deleteUserProfile(userId: string): Promise<void>;
+  addPin(userId: string, cid: string, name?: string): Promise<string>;
 }
 
 // Initialize PostgreSQL database connection pool
@@ -137,6 +139,10 @@ export async function initializeDatabase(): Promise<void> {
     await query(`
       ALTER TABLE share_manifests DROP COLUMN IF EXISTS secret_key
     `).catch(() => { /* column may not exist on fresh installs */ });
+    // Migration: add encrypted_manifest column for privacy
+    await query(`
+      ALTER TABLE share_manifests ADD COLUMN IF NOT EXISTS encrypted_manifest TEXT
+    `).catch(() => { /* column may already exist */ });
     console.log('[webui] share_manifests table ready');
   } catch (error) {
     console.error('[webui] Failed to create share_manifests table:', error);
@@ -147,13 +153,159 @@ export async function initializeDatabase(): Promise<void> {
     await query(`
       CREATE TABLE IF NOT EXISTS collab_manifests (
         group_id TEXT PRIMARY KEY,
-        manifest_data TEXT NOT NULL,
+        manifest_data TEXT,
+        encrypted_manifest TEXT,
         updated_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);
+    // Migration: add encrypted_manifest column and make manifest_data nullable
+    await query(`
+      ALTER TABLE collab_manifests ADD COLUMN IF NOT EXISTS encrypted_manifest TEXT
+    `).catch(() => { /* column may already exist */ });
+    await query(`
+      ALTER TABLE collab_manifests ALTER COLUMN manifest_data DROP NOT NULL
+    `).catch(() => { /* already nullable */ });
     console.log('[webui] collab_manifests table ready');
   } catch (error) {
     console.error('[webui] Failed to create collab_manifests table:', error);
+  }
+
+  // Zero-knowledge migration: add user_id columns (SHA-256 hash of email)
+  try {
+    const zkMigrations = [
+      // Add user_id columns to all tables
+      `ALTER TABLE webui_users ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)`,
+      `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)`,
+      `ALTER TABLE pins ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)`,
+      `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)`,
+      `ALTER TABLE referral_codes ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)`,
+      `ALTER TABLE referrals ADD COLUMN IF NOT EXISTS referrer_id VARCHAR(64)`,
+      `ALTER TABLE referrals ADD COLUMN IF NOT EXISTS referred_id VARCHAR(64)`,
+      `ALTER TABLE user_credits ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)`,
+      `ALTER TABLE credit_history ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)`,
+      `ALTER TABLE token_transactions ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)`,
+      `ALTER TABLE user_wallets ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)`,
+      `ALTER TABLE user_wallets ADD COLUMN IF NOT EXISTS wallet_address_hash VARCHAR(64)`,
+      `ALTER TABLE user_wallets ADD COLUMN IF NOT EXISTS encrypted_wallet_address TEXT`,
+      `ALTER TABLE admin_audit_log ADD COLUMN IF NOT EXISTS actor_id VARCHAR(64)`,
+      `ALTER TABLE admin_audit_log ADD COLUMN IF NOT EXISTS target_id VARCHAR(64)`,
+      // Drop dead code column
+      `ALTER TABLE pins DROP COLUMN IF EXISTS name_lowercase`,
+    ];
+    for (const sql of zkMigrations) {
+      await query(sql).catch(() => { /* column may already exist or table may not exist */ });
+    }
+    console.log('[webui] Zero-knowledge schema columns ready');
+  } catch (error) {
+    console.error('[webui] Zero-knowledge migration error:', error);
+  }
+
+  // Backfill user_id columns from existing email data
+  try {
+    // Check if backfill is needed (any webui_users row with NULL user_id)
+    const needsBackfill = await query<{ count: string }>(
+      `SELECT COUNT(*) as count FROM webui_users WHERE user_id IS NULL`
+    ).catch(() => ({ rows: [{ count: '0' }] }));
+
+    if (parseInt(needsBackfill.rows[0]?.count || '0', 10) > 0) {
+      console.log('[webui] Backfilling user_id columns...');
+      // Import hash utility
+      const { emailToUserId: hashEmail, hashWalletAddress: hashAddr } = await import('./utils/hash.js');
+
+      // Backfill each table using Node.js crypto (no pgcrypto dependency)
+      const tables: Array<{ table: string; emailCol: string; idCol: string }> = [
+        { table: 'webui_users', emailCol: 'email', idCol: 'user_id' },
+        { table: 'api_keys', emailCol: 'user_email', idCol: 'user_id' },
+        { table: 'pins', emailCol: 'username', idCol: 'user_id' },
+        { table: 'users', emailCol: 'username', idCol: 'user_id' },
+        { table: 'sessions', emailCol: 'username', idCol: 'user_id' },
+        { table: 'referral_codes', emailCol: 'user_email', idCol: 'user_id' },
+        { table: 'user_credits', emailCol: 'user_email', idCol: 'user_id' },
+        { table: 'credit_history', emailCol: 'user_email', idCol: 'user_id' },
+        { table: 'user_wallets', emailCol: 'user_email', idCol: 'user_id' },
+      ];
+
+      for (const { table, emailCol, idCol } of tables) {
+        const rows = await query<{ email_val: string }>(
+          `SELECT DISTINCT ${emailCol} as email_val FROM ${table} WHERE ${idCol} IS NULL AND ${emailCol} IS NOT NULL`
+        ).catch(() => ({ rows: [] }));
+        for (const row of rows.rows) {
+          const hashed = hashEmail(row.email_val);
+          await query(`UPDATE ${table} SET ${idCol} = $1 WHERE ${emailCol} = $2 AND ${idCol} IS NULL`, [hashed, row.email_val]);
+        }
+      }
+
+      // Backfill token_transactions (user_email can be NULL for unclaimed txns)
+      const txRows = await query<{ email_val: string }>(
+        `SELECT DISTINCT user_email as email_val FROM token_transactions WHERE user_id IS NULL AND user_email IS NOT NULL`
+      ).catch(() => ({ rows: [] }));
+      for (const row of txRows.rows) {
+        const hashed = hashEmail(row.email_val);
+        await query(`UPDATE token_transactions SET user_id = $1 WHERE user_email = $2 AND user_id IS NULL`, [hashed, row.email_val]);
+      }
+
+      // Backfill referrals (two email columns)
+      const refRows = await query<{ re: string; rd: string }>(
+        `SELECT DISTINCT referrer_email as re, referred_email as rd FROM referrals WHERE referrer_id IS NULL`
+      ).catch(() => ({ rows: [] }));
+      for (const row of refRows.rows) {
+        await query(
+          `UPDATE referrals SET referrer_id = $1, referred_id = $2 WHERE referrer_email = $3 AND referred_email = $4 AND referrer_id IS NULL`,
+          [hashEmail(row.re), hashEmail(row.rd), row.re, row.rd]
+        );
+      }
+
+      // Backfill admin_audit_log
+      const auditRows = await query<{ actor: string; target_email: string | null }>(
+        `SELECT DISTINCT actor, target_email FROM admin_audit_log WHERE actor_id IS NULL`
+      ).catch(() => ({ rows: [] }));
+      for (const row of auditRows.rows) {
+        const actorId = row.actor.includes('@') ? hashEmail(row.actor) : row.actor;
+        const targetId = row.target_email ? hashEmail(row.target_email) : null;
+        await query(
+          `UPDATE admin_audit_log SET actor_id = $1, target_id = $2 WHERE actor = $3 AND actor_id IS NULL`,
+          [actorId, targetId, row.actor]
+        );
+      }
+
+      // Backfill wallet_address_hash
+      const walletRows = await query<{ addr: string }>(
+        `SELECT DISTINCT wallet_address as addr FROM user_wallets WHERE wallet_address_hash IS NULL AND wallet_address IS NOT NULL`
+      ).catch(() => ({ rows: [] }));
+      for (const row of walletRows.rows) {
+        const hashed = hashAddr(row.addr);
+        await query(`UPDATE user_wallets SET wallet_address_hash = $1 WHERE wallet_address = $2 AND wallet_address_hash IS NULL`, [hashed, row.addr]);
+      }
+
+      console.log('[webui] user_id backfill complete');
+    }
+  } catch (error) {
+    console.error('[webui] user_id backfill error:', error);
+  }
+
+  // Create indexes on user_id columns
+  try {
+    const indexes = [
+      `CREATE INDEX IF NOT EXISTS idx_webui_users_user_id ON webui_users(user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_pins_user_id ON pins(user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_user_credits_user_id ON user_credits(user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_credit_history_user_id ON credit_history(user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_user_wallets_user_id ON user_wallets(user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_user_wallets_hash ON user_wallets(wallet_address_hash)`,
+      `CREATE INDEX IF NOT EXISTS idx_referral_codes_user_id ON referral_codes(user_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_referrals_referrer_id ON referrals(referrer_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_referrals_referred_id ON referrals(referred_id)`,
+    ];
+    for (const sql of indexes) {
+      await query(sql).catch(() => { /* index may already exist */ });
+    }
+
+    // Migrate UNIQUE constraint from (user_email, wallet_address, chain_id) to (user_id, wallet_address_hash, chain_id)
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_wallets_uid_hash_chain ON user_wallets(user_id, wallet_address_hash, chain_id)`).catch(() => {});
+  } catch (error) {
+    console.error('[webui] Index creation error:', error);
   }
 }
 
@@ -175,10 +327,10 @@ export async function seedChainSyncState(): Promise<void> {
   }
 }
 
-// Generate JWT API key
-export function generateJwtApiKey(email: string, jwtSecret: string): string {
+// Generate JWT API key — sub is now userId (SHA-256 hash), not email
+export function generateJwtApiKey(userId: string, jwtSecret: string): string {
   const payload = {
-    sub: email,
+    sub: userId,
     iat: Math.floor(Date.now() / 1000),
     scope: 'storage:read storage:write',
     jti: uuidv4(),
@@ -197,57 +349,54 @@ function generateReferralCode(): string {
   return code;
 }
 
-// Mask email for privacy (show first 2 chars, mask middle, show last char before @)
 function maskEmail(email: string): string {
-  const [local, domain] = email.split('@');
-  if (!domain) return email;
-  if (local.length <= 4) {
-    return `${local[0]}${'*'.repeat(local.length - 1)}@${domain}`;
-  }
-  const start = local.slice(0, 2);
-  const end = local.slice(-1);
-  const masked = '*'.repeat(Math.min(4, local.length - 3));
-  return `${start}${masked}${end}@${domain}`;
+  const at = email.indexOf('@');
+  if (at <= 2) return '***' + email.slice(at);
+  return email.slice(0, 2) + '***' + email.slice(at);
 }
 
 // Create database operations using PostgreSQL
 // These functions wrap the postgres.ts module functions
-export function createDbOps(jwtSecret: string): DbOps {
+export function createDbOps(jwtSecret: string): DbOps & { getUserByEmail(email: string): Promise<any> } {
   return {
-    async getOrCreateUser(email: string, name: string, picture: string, referralCode?: string) {
-      return getOrCreateWebuiUser(email, name, picture, jwtSecret, generateJwtApiKey, referralCode);
+    async getOrCreateUser(userId: string, email: string, name: string, picture: string, referralCode?: string) {
+      return getOrCreateWebuiUser(userId, email, name, picture, jwtSecret, generateJwtApiKey, referralCode);
     },
 
     async getUserByEmail(email: string) {
       return getWebuiUserByEmail(email);
     },
 
-    async getApiKeys(email: string) {
-      return getApiKeys(email);
+    async getUserById(userId: string) {
+      return getWebuiUserByEmail(userId); // TODO: add getWebuiUserById to postgres.ts
     },
 
-    async createApiKey(email: string): Promise<string> {
-      return createApiKey(email, jwtSecret, generateJwtApiKey);
+    async getApiKeys(userId: string) {
+      return getApiKeys(userId);
     },
 
-    async deleteApiKey(email: string, keyId: string): Promise<boolean> {
-      return deleteApiKey(email, keyId);
+    async createApiKey(userId: string): Promise<string> {
+      return createApiKey(userId, jwtSecret, generateJwtApiKey);
     },
 
-    async getUserPins(email: string, page: number, limit: number, search?: string) {
-      return getUserPins(email, page, limit, search);
+    async deleteApiKey(userId: string, keyId: string): Promise<boolean> {
+      return deleteApiKey(userId, keyId);
     },
 
-    async getUserStats(email: string) {
-      return getUserStats(email);
+    async getUserPins(userId: string, page: number, limit: number, search?: string) {
+      return getUserPins(userId, page, limit, search);
     },
 
-    async deleteUserProfile(email: string) {
-      return deleteUserProfile(email);
+    async getUserStats(userId: string) {
+      return getUserStats(userId);
     },
 
-    async addPin(email: string, cid: string, name?: string) {
-      return addPin(email, cid, name);
+    async deleteUserProfile(userId: string) {
+      return deleteUserProfile(userId);
+    },
+
+    async addPin(userId: string, cid: string, name?: string) {
+      return addPin(userId, cid, name);
     },
   };
 }
@@ -498,7 +647,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(401).json({ error: 'Invalid or revoked API key' });
       }
 
-      req.apiUser = { email: userEmail };
+      const userId = getUserId(userEmail);
+      req.apiUser = { email: userEmail, userId };
       next();
     } catch (error) {
       console.error('[webui] API key verification error:', error);
@@ -530,10 +680,12 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Invalid token: missing user ID' });
       }
 
-      const user = await dbOps.getOrCreateUser(email, name || '', picture || '', referralCode || undefined);
+      const userId = emailToUserId(email);
+      const user = await dbOps.getOrCreateUser(userId, email, name || '', picture || '', referralCode || undefined);
 
       req.session.user = {
         id: sub,
+        userId,
         email: email,
         name: name || '',
         picture: picture || '',
@@ -592,10 +744,12 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         ? `${appleUser.name.firstName || ''} ${appleUser.name.lastName || ''}`.trim()
         : '';
 
-      const user = await dbOps.getOrCreateUser(userEmail, userName, '', referralCode || undefined);
+      const userId = emailToUserId(userEmail);
+      const user = await dbOps.getOrCreateUser(userId, userEmail, userName, '', referralCode || undefined);
 
       req.session.user = {
         id: sub,
+        userId,
         email: userEmail,
         name: userName || user.name || '',
         picture: '', // Apple doesn't provide profile pictures
@@ -634,7 +788,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // API routes
   app.get('/api/keys', requireAuth, async (req: Request, res: Response) => {
     try {
-      const keys = await dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.userId);
       res.json({ keys });
     } catch (error) {
       console.error('[webui] Error fetching API keys:', error);
@@ -644,7 +798,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
   app.post('/api/keys', requireAuth, async (req: Request, res: Response) => {
     try {
-      const keyId = await dbOps.createApiKey(req.session.user!.email);
+      const keyId = await dbOps.createApiKey(req.session.user!.userId);
       res.json({ keyId });
     } catch (error) {
       console.error('[webui] Error creating API key:', error);
@@ -655,7 +809,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.delete('/api/keys/:keyId', requireAuth, async (req: Request, res: Response) => {
     try {
       const { keyId } = req.params;
-      const success = await dbOps.deleteApiKey(req.session.user!.email, keyId);
+      const success = await dbOps.deleteApiKey(req.session.user!.userId, keyId);
 
       if (!success) {
         return res.status(404).json({ error: 'API key not found' });
@@ -670,11 +824,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
   app.get('/api/keys/active', requireAuth, async (req: Request, res: Response) => {
     try {
-      const email = req.session.user!.email;
-      let keys = await dbOps.getApiKeys(email);
+      const userId = req.session.user!.userId;
+      let keys = await dbOps.getApiKeys(userId);
 
       if (!keys || keys.length === 0) {
-        const newKeyId = await dbOps.createApiKey(email);
+        const newKeyId = await dbOps.createApiKey(userId);
         keys = [{ key_id: newKeyId, created_at: new Date().toISOString(), last_used_at: null }];
       }
 
@@ -691,7 +845,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
       const search = req.query.search as string | undefined;
 
-      const { pins, total } = await dbOps.getUserPins(req.session.user!.email, page, limit, search);
+      const { pins, total } = await dbOps.getUserPins(req.session.user!.userId, page, limit, search);
       res.json({ pins, total, page, limit, totalPages: Math.ceil(total / limit) });
     } catch (error) {
       console.error('[webui] Error fetching pins:', error);
@@ -711,7 +865,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Invalid CID format' });
       }
 
-      const keys = await dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.userId);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
       }
@@ -749,7 +903,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'requestIds array is required' });
       }
 
-      const keys = await dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.userId);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
       }
@@ -795,13 +949,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     try {
       const { requestId } = req.params;
 
-      const keys = await dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.userId);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
       }
 
       const fullUrl = `http://127.0.0.1:6000/pins/${requestId}`;
-      console.log(`[webui] Refreshing pin ${requestId} via ${fullUrl} (key: ${keys[0].key_id?.substring(0, 8)}...)`);
+      console.log(`[webui] Refreshing pin ${requestId}`);
 
       const response = await httpGet(fullUrl, {
         'Authorization': `Bearer ${keys[0].key_id}`
@@ -832,7 +986,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     try {
       const { requestId } = req.params;
 
-      const keys = await dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.userId);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
       }
@@ -860,7 +1014,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
   app.get('/api/stats', requireAuth, async (req: Request, res: Response) => {
     try {
-      const stats = await dbOps.getUserStats(req.session.user!.email);
+      const stats = await dbOps.getUserStats(req.session.user!.userId);
       res.json(stats);
     } catch (error) {
       console.error('[webui] Error fetching stats:', error);
@@ -876,7 +1030,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Please type "delete" to confirm' });
       }
 
-      await dbOps.deleteUserProfile(req.session.user!.email);
+      await dbOps.deleteUserProfile(req.session.user!.userId);
 
       req.session.destroy((err) => {
         if (err) {
@@ -894,7 +1048,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Get user's company/organization
   app.get('/api/profile/company', requireAuth, async (req: Request, res: Response) => {
     try {
-      const company = await getUserCompany(req.session.user!.email);
+      const company = await getUserCompany(req.session.user!.userId);
       res.json({ company: company || '' });
     } catch (error) {
       console.error('[webui] Error getting company:', error);
@@ -913,7 +1067,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       // Treat empty string as null
       const companyValue = company && company.trim() ? company.trim() : null;
-      await updateUserCompany(req.session.user!.email, companyValue);
+      await updateUserCompany(req.session.user!.userId, companyValue);
       res.json({ success: true, company: companyValue || '' });
     } catch (error) {
       console.error('[webui] Error updating company:', error);
@@ -1015,7 +1169,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.get('/api/playlists/:playlistId', requireAuth, async (req: Request, res: Response) => {
     try {
       const { playlistId } = req.params;
-      const keys = await dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.userId);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found' });
       }
@@ -1049,7 +1203,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.delete('/api/shares/:shareId', requireAuth, async (req: Request, res: Response) => {
     try {
       const { shareId } = req.params;
-      const keys = await dbOps.getApiKeys(req.session.user!.email);
+      const keys = await dbOps.getApiKeys(req.session.user!.userId);
       if (!keys || keys.length === 0) {
         return res.status(400).json({ error: 'No API key found' });
       }
@@ -1211,7 +1365,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
       const fetchUrl = `${s3BaseUrl}/admin/fetch/${bucket}/${storageKey}`;
 
-      console.log('[webui] V2 share fetch:', { bucket, storageKey, url: fetchUrl });
+      console.log('[webui] V2 share fetch:', { bucket });
 
       const s3Response = await fetch(fetchUrl, {
         headers: {
@@ -1257,25 +1411,37 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.put('/api/share/v2/manifest/:shareId', manifestLimiter, async (req: Request, res: Response) => {
     try {
       const { shareId } = req.params;
-      const { bucket, pathScope, tokenJson, files, shareMode, expiresAt } = req.body;
-
-      if (!shareId || !bucket || !pathScope || !tokenJson) {
-        return res.status(400).json({ error: 'Missing required fields' });
-      }
-
-      // Validate shareId format (UUID)
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       if (!uuidPattern.test(shareId)) {
         return res.status(400).json({ error: 'Invalid shareId format' });
       }
 
-      await query(
-        `INSERT INTO share_manifests (share_id, bucket, path_scope, token_json, files, share_mode, expires_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
-         ON CONFLICT (share_id) DO UPDATE SET
-           files = EXCLUDED.files, token_json = EXCLUDED.token_json, updated_at = NOW()`,
-        [shareId, bucket, pathScope, tokenJson, JSON.stringify(files || null), shareMode || 'temporal', expiresAt || null]
-      );
+      const { encryptedManifest, expiresAt } = req.body;
+
+      if (encryptedManifest) {
+        // Encrypted path: store opaque blob, no plaintext metadata
+        await query(
+          `INSERT INTO share_manifests (share_id, bucket, path_scope, token_json, files, share_mode, expires_at, encrypted_manifest)
+           VALUES ($1, '', '', '', NULL, '', $2, $3)
+           ON CONFLICT (share_id) DO UPDATE SET
+             encrypted_manifest = EXCLUDED.encrypted_manifest, expires_at = EXCLUDED.expires_at,
+             bucket = '', path_scope = '', token_json = '', files = NULL, updated_at = NOW()`,
+          [shareId, expiresAt || null, encryptedManifest]
+        );
+      } else {
+        // Legacy plaintext path (backward compat)
+        const { bucket, pathScope, tokenJson, files, shareMode } = req.body;
+        if (!bucket || !pathScope || !tokenJson) {
+          return res.status(400).json({ error: 'Missing required fields' });
+        }
+        await query(
+          `INSERT INTO share_manifests (share_id, bucket, path_scope, token_json, files, share_mode, expires_at)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+           ON CONFLICT (share_id) DO UPDATE SET
+             files = EXCLUDED.files, token_json = EXCLUDED.token_json, updated_at = NOW()`,
+          [shareId, bucket, pathScope, tokenJson, JSON.stringify(files || null), shareMode || 'temporal', expiresAt || null]
+        );
+      }
 
       console.log('[webui] Manifest upserted for share:', shareId);
       res.json({ ok: true });
@@ -1303,6 +1469,15 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const row = result.rows[0];
       if (row.expires_at && new Date(row.expires_at) < new Date()) {
         return res.status(410).json({ error: 'Expired' });
+      }
+
+      // Return encrypted manifest if available, otherwise legacy plaintext
+      if (row.encrypted_manifest) {
+        return res.json({
+          shareId: row.share_id,
+          encryptedManifest: row.encrypted_manifest,
+          expiresAt: row.expires_at,
+        });
       }
 
       res.json({
@@ -1353,8 +1528,6 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           return res.status(400).json({ error: 'Invalid group ID format' });
         }
 
-        const fileName = req.headers['x-collab-filename'] as string || 'unnamed';
-        const contentType = req.headers['x-collab-content-type'] as string || 'application/octet-stream';
         const fileId = req.headers['x-collab-file-id'] as string;
 
         if (!fileId) {
@@ -1377,7 +1550,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         const storageKey = `collab/${groupId}/${fileId}`;
         const uploadUrl = `${s3BaseUrl}/admin/upload/${bucket}/${storageKey}`;
 
-        console.log('[webui] Collab upload:', { groupId, fileId, fileName, size: body.length });
+        console.log('[webui] Collab upload:', { groupId, fileId, size: body.length });
 
         const s3Response = await fetch(uploadUrl, {
           method: 'PUT',
@@ -1398,7 +1571,6 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           storageKey,
           bucket,
           fileId,
-          fileName,
           size: body.length,
         });
       } catch (error) {
@@ -1476,18 +1648,29 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Invalid group ID format' });
       }
 
-      const { data } = req.body;
-      if (!data || typeof data !== 'string') {
+      const { data, encryptedManifest } = req.body;
+
+      if (encryptedManifest) {
+        // Encrypted path: store opaque blob, clear plaintext
+        await query(
+          `INSERT INTO collab_manifests (group_id, manifest_data, encrypted_manifest, updated_at)
+           VALUES ($1, NULL, $2, NOW())
+           ON CONFLICT (group_id) DO UPDATE SET
+             encrypted_manifest = EXCLUDED.encrypted_manifest, manifest_data = NULL, updated_at = NOW()`,
+          [groupId, encryptedManifest]
+        );
+      } else if (data && typeof data === 'string') {
+        // Legacy plaintext path
+        await query(
+          `INSERT INTO collab_manifests (group_id, manifest_data, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (group_id) DO UPDATE SET
+             manifest_data = EXCLUDED.manifest_data, updated_at = NOW()`,
+          [groupId, data]
+        );
+      } else {
         return res.status(400).json({ error: 'Missing manifest data' });
       }
-
-      await query(
-        `INSERT INTO collab_manifests (group_id, manifest_data, updated_at)
-         VALUES ($1, $2, NOW())
-         ON CONFLICT (group_id) DO UPDATE SET
-           manifest_data = EXCLUDED.manifest_data, updated_at = NOW()`,
-        [groupId, data]
-      );
 
       console.log('[webui] Collab manifest synced for group:', groupId);
       res.json({ ok: true });
@@ -1506,12 +1689,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Invalid group ID format' });
       }
 
-      const result = await query('SELECT manifest_data FROM collab_manifests WHERE group_id = $1', [groupId]);
+      const result = await query('SELECT manifest_data, encrypted_manifest FROM collab_manifests WHERE group_id = $1', [groupId]);
       if (result.rows.length === 0) {
         return res.status(404).json({ error: 'Not found' });
       }
 
-      res.json({ data: result.rows[0].manifest_data });
+      const row = result.rows[0];
+      if (row.encrypted_manifest) {
+        res.json({ encryptedManifest: row.encrypted_manifest });
+      } else {
+        res.json({ data: row.manifest_data });
+      }
     } catch (error) {
       console.error('[webui] Error fetching collab manifest:', error);
       res.status(500).json({ error: 'Failed to fetch manifest' });
@@ -1552,7 +1740,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Get credit status (balance, usage, can upload)
   app.get('/api/credits', requireAuth, async (req: Request, res: Response) => {
     try {
-      const status = await getUserCreditStatus(req.session.user!.email);
+      const status = await getUserCreditStatus(req.session.user!.userId);
       res.json(status);
     } catch (error) {
       console.error('[webui] Error getting credit status:', error);
@@ -1564,7 +1752,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.get('/api/credits/history', requireAuth, async (req: Request, res: Response) => {
     try {
       const limit = parseInt(req.query.limit as string) || 50;
-      const history = await getCreditHistory(req.session.user!.email, Math.min(limit, 100));
+      const history = await getCreditHistory(req.session.user!.userId, Math.min(limit, 100));
       res.json({ history });
     } catch (error) {
       console.error('[webui] Error getting credit history:', error);
@@ -1704,11 +1892,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
 
       // Check if user has this wallet linked
+      const userId = req.session.user!.userId;
       const userEmail = req.session.user!.email;
+      const fromAddressHash = hashWalletAddress(fromAddress);
       const walletResult = await query<{ count: string }>(
         `SELECT 1 FROM user_wallets
-         WHERE user_email = $1 AND wallet_address = $2 AND is_verified = 1`,
-        [userEmail, fromAddress]
+         WHERE user_id = $1 AND wallet_address_hash = $2 AND is_verified = 1`,
+        [userId, fromAddressHash]
       );
 
       if (!walletResult.rows[0]) {
@@ -1723,16 +1913,16 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         // Transaction exists but unclaimed - claim it
         await query(
           `UPDATE token_transactions
-           SET user_email = $1, claimed_at = NOW(), ingestion_source = 'manual'
-           WHERE tx_hash = $2 AND chain_id = $3`,
-          [userEmail, txHash.toLowerCase(), chainId]
+           SET user_email = $1, user_id = $2, claimed_at = NOW(), ingestion_source = 'manual'
+           WHERE tx_hash = $3 AND chain_id = $4`,
+          [userEmail, userId, txHash.toLowerCase(), chainId]
         );
       } else {
         // Insert new transaction
         await query(
           `INSERT INTO token_transactions
-             (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_email, claimed_at, ingestion_source)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), 'manual')`,
+             (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_email, user_id, claimed_at, ingestion_source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), 'manual')`,
           [
             txHash.toLowerCase(),
             chainId,
@@ -1742,17 +1932,18 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
             amountFula,
             parseInt(receipt.blockNumber, 16),
             Math.floor(Date.now() / 1000),
-            userEmail
+            userEmail,
+            userId
           ]
         );
       }
 
       // Credit the user
-      await creditUser(userEmail, amountFula, `${chainId}:${txHash}`);
+      await creditUser(userId, amountFula, `${chainId}:${txHash}`);
 
-      console.log(`[webui] Manual claim: credited ${amountFula} FULA to ${userEmail} from tx ${txHash}`);
+      console.log(`[webui] Manual claim: credited ${amountFula} FULA to ${maskEmail(userEmail)} from tx ${txHash}`);
 
-      const newStatus = await getUserCreditStatus(userEmail);
+      const newStatus = await getUserCreditStatus(userId);
       res.json({
         success: true,
         amountFula,
@@ -1767,7 +1958,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Get user's linked wallets
   app.get('/api/wallets', requireAuth, async (req: Request, res: Response) => {
     try {
-      const wallets = await getUserWallets(req.session.user!.email);
+      const wallets = await getUserWallets(req.session.user!.userId);
       const chains = await getSupportedChains();
       res.json({ wallets, supportedChains: chains });
     } catch (error) {
@@ -1779,7 +1970,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Connect/link a wallet (with signature verification)
   app.post('/api/wallets/connect', requireAuth, async (req: Request, res: Response) => {
     try {
-      const { address, chainId, signature, message } = req.body;
+      const { address, chainId, signature, message, encryptedAddress } = req.body;
 
       if (!address || !chainId || !signature || !message) {
         return res.status(400).json({ error: 'address, chainId, signature, and message are required' });
@@ -1792,9 +1983,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       const normalizedAddress = address.toLowerCase();
       const userEmail = req.session.user!.email;
+      const userId = req.session.user!.userId;
 
-      // Verify the message contains user email and wallet address (prevents replay attacks)
-      if (!message.includes(userEmail) || !message.toLowerCase().includes(normalizedAddress)) {
+      // Verify the message contains user email or userId and wallet address (prevents replay attacks)
+      if ((!message.includes(userEmail) && !message.includes(userId)) || !message.toLowerCase().includes(normalizedAddress)) {
         return res.status(400).json({ error: 'Invalid signature message - must include your email and wallet address' });
       }
 
@@ -1822,16 +2014,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
 
       // Check if this wallet is already linked to a DIFFERENT user
-      const existingLinkResult = await query<{ user_email: string }>(
-        `SELECT user_email FROM user_wallets WHERE wallet_address = $1 AND is_verified = 1`,
-        [normalizedAddress]
+      const walletHash = hashWalletAddress(normalizedAddress);
+      const existingLinkResult = await query<{ user_id: string }>(
+        `SELECT user_id FROM user_wallets WHERE wallet_address_hash = $1 AND is_verified = 1`,
+        [walletHash]
       );
       const existingLink = existingLinkResult.rows[0];
 
-      if (existingLink && existingLink.user_email !== userEmail) {
+      if (existingLink && existingLink.user_id !== userId) {
         return res.status(400).json({
-          error: 'Wallet already linked to another account',
-          message: 'This wallet is already verified and linked to a different user account.',
+          error: 'Wallet linking failed',
+          message: 'Wallet linking failed. Please try again or contact support.',
         });
       }
 
@@ -1841,10 +2034,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Unsupported or disabled chain' });
       }
 
-      // Link the wallet (verified)
-      await linkWallet(userEmail, normalizedAddress, chainId, true);
+      // Link the wallet (verified), pass client-encrypted address blob
+      await linkWallet(userId, normalizedAddress, chainId, true, encryptedAddress);
 
-      console.log(`[webui] Wallet ${normalizedAddress} linked to ${userEmail} on chain ${chainId} (signature verified)`);
+      console.log(`[webui] Wallet linked to user ${userId.slice(0, 8)}... on chain ${chainId} (signature verified)`);
 
       res.json({ success: true, address: normalizedAddress, chainId });
     } catch (error) {
@@ -1862,13 +2055,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Wallet address is required' });
       }
 
-      const success = await unlinkWallet(req.session.user!.email, address);
+      const success = await unlinkWallet(req.session.user!.userId, address);
 
       if (!success) {
         return res.status(404).json({ error: 'Wallet not found' });
       }
 
-      console.log(`[webui] Wallet ${address} unlinked from ${req.session.user!.email}`);
+      console.log(`[webui] Wallet ${address} unlinked from ${maskEmail(req.session.user!.email)}`);
 
       res.json({ success: true });
     } catch (error) {
@@ -1893,10 +2086,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Get user's referral info (codes + stats)
   app.get('/api/referral', requireAuth, async (req: Request, res: Response) => {
     try {
+      const userId = req.session.user!.userId;
       const email = req.session.user!.email;
 
       // Get all referral codes for user
-      let codes = await getUserReferralCodes(email);
+      let codes = await getUserReferralCodes(userId);
 
       // If no codes exist, create a default one (for existing users)
       if (codes.length === 0) {
@@ -1911,8 +2105,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           }
         }
         await query(
-          'INSERT INTO referral_codes (user_email, code, is_default) VALUES ($1, $2, TRUE)',
-          [email, code]
+          'INSERT INTO referral_codes (user_email, user_id, code, is_default) VALUES ($1, $2, $3, TRUE)',
+          [email, userId, code]
         );
         codes = [{
           code,
@@ -1929,12 +2123,12 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // Get referral stats with 3-level breakdown using recursive CTE
       const levelStatsResult = await query<{ level: number; count: string; credits: string }>(`
         WITH RECURSIVE referral_chain AS (
-          SELECT referred_email, 1 as level
-          FROM referrals WHERE referrer_email = $1
+          SELECT referred_id, 1 as level
+          FROM referrals WHERE referrer_id = $1
           UNION ALL
-          SELECT r.referred_email, rc.level + 1
+          SELECT r.referred_id, rc.level + 1
           FROM referrals r
-          JOIN referral_chain rc ON r.referrer_email = rc.referred_email
+          JOIN referral_chain rc ON r.referrer_id = rc.referred_id
           WHERE rc.level < 3
         )
         SELECT
@@ -1942,10 +2136,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           COUNT(*)::text as count,
           COALESCE(SUM(uc.total_deposited_fula), 0)::text as credits
         FROM referral_chain rc
-        LEFT JOIN user_credits uc ON rc.referred_email = uc.user_email
+        LEFT JOIN user_credits uc ON rc.referred_id = uc.user_id
         GROUP BY rc.level
         ORDER BY rc.level
-      `, [email]);
+      `, [userId]);
       const levelStats = levelStatsResult.rows;
 
       // Build stats object with level breakdown
@@ -1996,10 +2190,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Create a new referral code
   app.post('/api/referral/codes', requireAuth, async (req: Request, res: Response) => {
     try {
-      const email = req.session.user!.email;
+      const userId = req.session.user!.userId;
       const { name } = req.body;
 
-      const result = await createUserReferralCode(email, name || null);
+      const result = await createUserReferralCode(userId, name || null);
 
       if (result.error) {
         return res.status(400).json({ error: result.error });
@@ -2015,11 +2209,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Update a referral code's name
   app.put('/api/referral/codes/:code', requireAuth, async (req: Request, res: Response) => {
     try {
-      const email = req.session.user!.email;
+      const userId = req.session.user!.userId;
       const { code } = req.params;
       const { name } = req.body;
 
-      const result = await updateReferralCodeName(email, code, name || null);
+      const result = await updateReferralCodeName(userId, code, name || null);
 
       if (!result.success) {
         return res.status(400).json({ error: result.error });
@@ -2035,10 +2229,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Delete a referral code
   app.delete('/api/referral/codes/:code', requireAuth, async (req: Request, res: Response) => {
     try {
-      const email = req.session.user!.email;
+      const userId = req.session.user!.userId;
       const { code } = req.params;
 
-      const result = await deleteUserReferralCode(email, code);
+      const result = await deleteUserReferralCode(userId, code);
 
       if (!result.success) {
         return res.status(400).json({ error: result.error });
@@ -2054,7 +2248,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Get list of users referred by current user (paginated)
   app.get('/api/referral/referred', requireAuth, async (req: Request, res: Response) => {
     try {
-      const email = req.session.user!.email;
+      const userId = req.session.user!.userId;
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
@@ -2073,15 +2267,15 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           COALESCE(wu.app_downloaded, 0) as app_downloaded,
           wu.app_downloaded_at
         FROM referrals r
-        JOIN webui_users wu ON r.referred_email = wu.email
-        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
-        WHERE r.referrer_email = $1
+        JOIN webui_users wu ON r.referred_id = wu.user_id
+        LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
+        WHERE r.referrer_id = $1
         ORDER BY r.referred_at DESC
         LIMIT $2 OFFSET $3
-      `, [email, limit, offset]);
+      `, [userId, limit, offset]);
       const referred = referredResult.rows;
 
-      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_email = $1', [email]);
+      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_id = $1', [userId]);
       const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       res.json({
@@ -2106,14 +2300,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Mark app as downloaded (called when user clicks download link)
   app.post('/api/user/app-downloaded', requireAuth, async (req: Request, res: Response) => {
     try {
-      const email = req.session.user!.email;
+      const userId = req.session.user!.userId;
 
       // Update the user's app_downloaded status
       await query(`
         UPDATE webui_users
         SET app_downloaded = 1, app_downloaded_at = NOW()
-        WHERE email = $1 AND app_downloaded = 0
-      `, [email]);
+        WHERE user_id = $1 AND app_downloaded = 0
+      `, [userId]);
 
       res.json({ success: true });
     } catch (error) {
@@ -2126,27 +2320,28 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // User can only view their own referral chain
   app.get('/api/referral/chain/:email', requireAuth, async (req: Request, res: Response) => {
     try {
-      const currentUserEmail = req.session.user!.email;
+      const currentUserId = req.session.user!.userId;
       const targetEmail = decodeURIComponent(req.params.email);
+      const targetUserId = emailToUserId(targetEmail);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
 
-      // Verify the target email is in the current user's referral chain (up to 3 levels)
+      // Verify the target is in the current user's referral chain (up to 3 levels)
       const isInChainResult = await query(`
         WITH RECURSIVE referral_chain AS (
-          SELECT referred_email, 1 as level
-          FROM referrals WHERE referrer_email = $1
+          SELECT referred_id, 1 as level
+          FROM referrals WHERE referrer_id = $1
           UNION ALL
-          SELECT r.referred_email, rc.level + 1
+          SELECT r.referred_id, rc.level + 1
           FROM referrals r
-          JOIN referral_chain rc ON r.referrer_email = rc.referred_email
+          JOIN referral_chain rc ON r.referrer_id = rc.referred_id
           WHERE rc.level < 3
         )
-        SELECT 1 FROM referral_chain WHERE referred_email = $2
+        SELECT 1 FROM referral_chain WHERE referred_id = $2
         UNION
         SELECT 1 WHERE $3 = $4
-      `, [currentUserEmail, targetEmail, currentUserEmail, targetEmail]);
+      `, [currentUserId, targetUserId, currentUserId, targetUserId]);
 
       if (isInChainResult.rows.length === 0) {
         return res.status(403).json({ error: 'Access denied' });
@@ -2166,17 +2361,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased,
           COALESCE(wu.app_downloaded, 0) as app_downloaded,
           wu.app_downloaded_at,
-          (SELECT COUNT(*)::text FROM referrals WHERE referrer_email = r.referred_email) as referral_count
+          (SELECT COUNT(*)::text FROM referrals WHERE referrer_id = r.referred_id) as referral_count
         FROM referrals r
-        JOIN webui_users wu ON r.referred_email = wu.email
-        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
-        WHERE r.referrer_email = $1
+        JOIN webui_users wu ON r.referred_id = wu.user_id
+        LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
+        WHERE r.referrer_id = $1
         ORDER BY r.referred_at DESC
         LIMIT $2 OFFSET $3
-      `, [targetEmail, limit, offset]);
+      `, [targetUserId, limit, offset]);
       const referred = referredResult.rows;
 
-      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_email = $1', [targetEmail]);
+      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_id = $1', [targetUserId]);
       const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       res.json({
@@ -2207,7 +2402,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     if (!req.session.user) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    if (!isAdmin(req.session.user.email)) {
+    if (!isAdminById(req.session.user.userId)) {
       return res.status(403).json({ error: 'Admin access required' });
     }
     next();
@@ -2229,7 +2424,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     if (!req.session.user) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    if (!isAdmin(req.session.user.email)) {
+    if (!isAdminById(req.session.user.userId)) {
       return res.status(403).json({ error: 'Admin access required' });
     }
     next();
@@ -2238,9 +2433,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Admin audit logging helper
   async function logAdminAction(actor: string, action: string, targetEmail?: string, details?: Record<string, unknown>) {
     try {
+      const actorId = actor.includes('@') ? emailToUserId(actor) : actor;
+      const targetId = targetEmail ? (targetEmail.includes('@') ? emailToUserId(targetEmail) : targetEmail) : null;
       await query(
-        `INSERT INTO admin_audit_log (actor, action, target_email, details) VALUES ($1, $2, $3, $4)`,
-        [actor, action, targetEmail || null, details ? JSON.stringify(details) : null]
+        `INSERT INTO admin_audit_log (actor, action, target_email, details, actor_id, target_id) VALUES ($1, $2, $3, $4, $5, $6)`,
+        [actor, action, targetEmail || null, details ? JSON.stringify(details) : null, actorId, targetId]
       );
     } catch (err) {
       console.error('[audit] Failed to log admin action:', err);
@@ -2274,7 +2471,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
 
       const adminEmail = req.session.user!.email;
-      console.log(`[webui] Admin ${adminEmail} unsuspended ${email}`);
+      console.log(`[webui] Admin ${maskEmail(adminEmail)} unsuspended ${maskEmail(email)}`);
       await logAdminAction(adminEmail, 'unsuspend', email);
 
       res.json({ success: true });
@@ -2301,13 +2498,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // Determine caller for audit log
       const isSystemCall = (req as any).isSystemCall;
       const caller = isSystemCall ? 'system:x402' : `admin:${req.session.user!.email}`;
+      const targetUserId = emailToUserId(email);
 
-      await creditUser(email, numAmount, `${caller}:${reason}`, 'adjustment');
+      await creditUser(targetUserId, numAmount, `${caller}:${reason}`, 'adjustment');
 
-      console.log(`[webui] ${caller} adjusted ${email} by ${numAmount} FULA: ${reason}`);
+      console.log(`[webui] ${caller} adjusted ${maskEmail(email)} by ${numAmount} FULA: ${reason}`);
       await logAdminAction(caller, 'adjust', email, { amount: numAmount, reason });
 
-      const newStatus = await getUserCreditStatus(email);
+      const newStatus = await getUserCreditStatus(targetUserId);
 
       res.json({
         success: true,
@@ -2371,7 +2569,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         results.push({ block, transfers: logs.length, credited });
       }
 
-      console.log(`[admin] ${req.session.user!.email} scanned ${blocks.length} blocks on chain ${chainId}:`, results);
+      console.log(`[admin] ${maskEmail(req.session.user!.email)} scanned ${blocks.length} blocks on chain ${chainId}:`, results);
       res.json({ results });
     } catch (error) {
       console.error('[admin] Error scanning blocks:', error);
@@ -2389,6 +2587,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       return res.status(400).json({ error: 'Email required' });
     }
 
+    const userId = emailToUserId(email);
+
     try {
       // 1. Check if user exists in webui_users
       let user = await dbOps.getUserByEmail(email);
@@ -2396,22 +2596,22 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       if (!user) {
         // 2. Create user in webui_users (simplified version - no OAuth data)
         await query(
-          `INSERT INTO webui_users (email, name, picture) VALUES ($1, $2, $3)`,
-          [email, email.split('@')[0], null]
+          `INSERT INTO webui_users (email, user_id, name, picture) VALUES ($1, $2, $3, $4)`,
+          [email, userId, email.split('@')[0], null]
         );
 
         // Also create in main users table for pinning service compatibility
         await query(
-          `INSERT INTO users (username, password_hash, pool_id) VALUES ($1, $2, 1)
+          `INSERT INTO users (username, user_id, password_hash, pool_id) VALUES ($1, $2, $3, 1)
            ON CONFLICT (username) DO NOTHING`,
-          [email, 'x402-wallet-user-' + uuidv4()]
+          [email, userId, 'x402-wallet-user-' + uuidv4()]
         );
 
-        console.log(`[webui] Created x402 wallet user: ${email}`);
+        console.log(`[webui] Created x402 wallet user: ${maskEmail(email)}`);
       }
 
       // 3. Check if user has an API key
-      const existingKeys = await dbOps.getApiKeys(email);
+      const existingKeys = await dbOps.getApiKeys(userId);
 
       let apiKey: string;
       if (existingKeys.length > 0) {
@@ -2419,8 +2619,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         apiKey = existingKeys[0].key_id;
       } else {
         // Create new API key
-        apiKey = await dbOps.createApiKey(email);
-        console.log(`[webui] Created API key for x402 user: ${email}`);
+        apiKey = await dbOps.createApiKey(userId);
+        console.log(`[webui] Created API key for x402 user: ${maskEmail(email)}`);
       }
 
       const caller = (req as any).isSystemCall ? 'system:x402' : `admin:${req.session.user?.email || 'unknown'}`;
@@ -2436,7 +2636,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
   // Check if current user is admin (for frontend)
   app.get('/api/admin/check', requireAuth, (req: Request, res: Response) => {
-    if (isAdmin(req.session.user!.email)) {
+    if (isAdminById(req.session.user!.userId)) {
       res.json({ isAdmin: true });
     } else {
       res.status(403).json({ isAdmin: false });
@@ -2466,8 +2666,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           COUNT(r.id)::text as totalReferred,
           COALESCE(SUM(uc.total_deposited_fula), 0)::text as totalCreditsFromReferrals
         FROM referral_codes rc
-        LEFT JOIN referrals r ON rc.user_email = r.referrer_email
-        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
+        LEFT JOIN referrals r ON rc.user_id = r.referrer_id
+        LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
         GROUP BY rc.user_email, rc.code, rc.created_at
         ${includeZero ? '' : 'HAVING COUNT(r.id) > 0'}
         ORDER BY COUNT(r.id) DESC, rc.created_at DESC
@@ -2484,10 +2684,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // Get total count
       const countResult = await query<{ total: string }>(`
         SELECT COUNT(*)::text as total FROM (
-          SELECT rc.user_email
+          SELECT rc.user_id
           FROM referral_codes rc
-          LEFT JOIN referrals r ON rc.user_email = r.referrer_email
-          GROUP BY rc.user_email
+          LEFT JOIN referrals r ON rc.user_id = r.referrer_id
+          GROUP BY rc.user_id
           ${includeZero ? '' : 'HAVING COUNT(r.id) > 0'}
         ) subq
       `);
@@ -2525,9 +2725,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           r.referred_at,
           COALESCE(uc.total_deposited_fula, 0) as credits_purchased
         FROM referral_codes rc
-        LEFT JOIN referrals r ON rc.user_email = r.referrer_email
-        LEFT JOIN webui_users wu ON r.referred_email = wu.email
-        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
+        LEFT JOIN referrals r ON rc.user_id = r.referrer_id
+        LEFT JOIN webui_users wu ON r.referred_id = wu.user_id
+        LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
         ORDER BY rc.user_email, r.referred_at
         LIMIT 100000
       `);
@@ -2562,6 +2762,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.get('/api/admin/referrals/chain/:email', requireAdmin, async (req: Request, res: Response) => {
     try {
       const targetEmail = decodeURIComponent(req.params.email);
+      const targetUserId = emailToUserId(targetEmail);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
@@ -2582,17 +2783,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased,
           COALESCE(wu.app_downloaded, 0) as app_downloaded,
           wu.app_downloaded_at,
-          (SELECT COUNT(*)::text FROM referrals WHERE referrer_email = r.referred_email) as referral_count
+          (SELECT COUNT(*)::text FROM referrals WHERE referrer_id = r.referred_id) as referral_count
         FROM referrals r
-        JOIN webui_users wu ON r.referred_email = wu.email
-        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
-        WHERE r.referrer_email = $1
+        JOIN webui_users wu ON r.referred_id = wu.user_id
+        LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
+        WHERE r.referrer_id = $1
         ORDER BY r.referred_at DESC
         LIMIT $2 OFFSET $3
-      `, [targetEmail, limit, offset]);
+      `, [targetUserId, limit, offset]);
       const referred = referredResult.rows;
 
-      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_email = $1', [targetEmail]);
+      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_id = $1', [targetUserId]);
       const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       res.json({
@@ -2620,6 +2821,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.get('/api/admin/referrals/:email', requireAdmin, async (req: Request, res: Response) => {
     try {
       const referrerEmail = decodeURIComponent(req.params.email);
+      const referrerUserId = emailToUserId(referrerEmail);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
@@ -2640,19 +2842,19 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           COALESCE(wu.app_downloaded, 0) as appDownloaded,
           wu.app_downloaded_at as appDownloadedAt
         FROM referrals r
-        JOIN webui_users wu ON r.referred_email = wu.email
-        LEFT JOIN user_credits uc ON r.referred_email = uc.user_email
-        WHERE r.referrer_email = $1
+        JOIN webui_users wu ON r.referred_id = wu.user_id
+        LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
+        WHERE r.referrer_id = $1
         ORDER BY r.referred_at DESC
         LIMIT $2 OFFSET $3
-      `, [referrerEmail, limit, offset]);
+      `, [referrerUserId, limit, offset]);
       const referred = referredResult.rows;
 
-      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_email = $1', [referrerEmail]);
+      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_id = $1', [referrerUserId]);
       const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       // Get referrer info
-      const referrerInfoResult = await query<{ code: string }>('SELECT code FROM referral_codes WHERE user_email = $1', [referrerEmail]);
+      const referrerInfoResult = await query<{ code: string }>('SELECT code FROM referral_codes WHERE user_id = $1', [referrerUserId]);
       const referrerInfo = referrerInfoResult.rows[0];
 
       res.json({
@@ -2684,7 +2886,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // GET /api/v1/userinfo - User information (company/organization)
   app.get('/api/v1/userinfo', requireApiAuth, async (req: Request, res: Response) => {
     try {
-      const company = await getUserCompany(req.apiUser!.email);
+      const company = await getUserCompany(req.apiUser!.userId);
       res.json({ org: company || '' });
     } catch (error) {
       console.error('[webui] Error getting userinfo:', error);
@@ -2695,7 +2897,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // GET /api/v1/storage - Storage usage and credit info
   app.get('/api/v1/storage', requireApiAuth, async (req: Request, res: Response) => {
     try {
-      const status = await getUserCreditStatus(req.apiUser!.email);
+      const status = await getUserCreditStatus(req.apiUser!.userId);
 
       // Calculate paid storage from FULA balance
       const paidStorageBytes = Math.floor((status.balanceFula / FULA_PER_GB_MONTH) * 1024 * 1024 * 1024);
@@ -2727,7 +2929,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // GET /api/v1/wallets - User's linked wallets
   app.get('/api/v1/wallets', requireApiAuth, async (req: Request, res: Response) => {
     try {
-      const wallets = await getUserWallets(req.apiUser!.email);
+      const wallets = await getUserWallets(req.apiUser!.userId);
       const chains = await getSupportedChains();
       res.json({
         wallets: wallets.map(w => ({
@@ -2752,7 +2954,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // POST /api/v1/wallets/link - Link wallet with signature verification
   app.post('/api/v1/wallets/link', requireApiAuth, async (req: Request, res: Response) => {
     try {
-      const { address, chainId, signature, message } = req.body;
+      const { address, chainId, signature, message, encryptedAddress } = req.body;
 
       if (!address || !chainId || !signature || !message) {
         return res.status(400).json({ error: 'address, chainId, signature, and message are required' });
@@ -2765,9 +2967,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       const normalizedAddress = address.toLowerCase();
       const userEmail = req.apiUser!.email;
+      const userId = req.apiUser!.userId;
 
-      // Verify the message contains user email and wallet address (prevents replay attacks)
-      if (!message.includes(userEmail) || !message.toLowerCase().includes(normalizedAddress)) {
+      // Verify the message contains user email or userId and wallet address (prevents replay attacks)
+      if ((!message.includes(userEmail) && !message.includes(userId)) || !message.toLowerCase().includes(normalizedAddress)) {
         return res.status(400).json({ error: 'Invalid signature message - must include your email and wallet address' });
       }
 
@@ -2794,15 +2997,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
 
       // Check if this wallet is already linked to a DIFFERENT user
-      const existingLinkResult = await query<{ user_email: string }>(
-        `SELECT user_email FROM user_wallets WHERE wallet_address = $1 AND is_verified = 1`,
-        [normalizedAddress]
+      const walletHash = hashWalletAddress(normalizedAddress);
+      const existingLinkResult = await query<{ user_id: string }>(
+        `SELECT user_id FROM user_wallets WHERE wallet_address_hash = $1 AND is_verified = 1`,
+        [walletHash]
       );
       const existingLink = existingLinkResult.rows[0];
 
-      if (existingLink && existingLink.user_email !== userEmail) {
+      if (existingLink && existingLink.user_id !== userId) {
         return res.status(400).json({
-          error: 'Wallet already linked to another account',
+          error: 'Wallet linking failed',
+          message: 'Wallet linking failed. Please try again or contact support.',
         });
       }
 
@@ -2812,10 +3017,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Unsupported or disabled chain' });
       }
 
-      // Link the wallet (verified)
-      await linkWallet(userEmail, normalizedAddress, chainId, true);
+      // Link the wallet (verified), pass client-encrypted address blob
+      await linkWallet(userId, normalizedAddress, chainId, true, encryptedAddress);
 
-      console.log(`[api/v1] Wallet ${normalizedAddress} linked to ${userEmail} on chain ${chainId}`);
+      console.log(`[api/v1] Wallet linked to user ${userId.slice(0, 8)}... on chain ${chainId}`);
 
       res.json({ success: true, address: normalizedAddress, chainId });
     } catch (error) {
@@ -2938,9 +3143,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       // Check if user has this wallet linked
       const userEmail = req.apiUser!.email;
+      const userId = req.apiUser!.userId;
+      const fromAddressHash = hashWalletAddress(fromAddress);
       const walletResult = await query(
-        `SELECT 1 FROM user_wallets WHERE user_email = $1 AND wallet_address = $2 AND is_verified = 1`,
-        [userEmail, fromAddress]
+        `SELECT 1 FROM user_wallets WHERE user_id = $1 AND wallet_address_hash = $2 AND is_verified = 1`,
+        [userId, fromAddressHash]
       );
 
       if (walletResult.rows.length === 0) {
@@ -2954,15 +3161,15 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       if (existing) {
         await query(
           `UPDATE token_transactions
-           SET user_email = $1, claimed_at = NOW(), ingestion_source = 'manual'
-           WHERE tx_hash = $2 AND chain_id = $3`,
-          [userEmail, txHash.toLowerCase(), chainId]
+           SET user_email = $1, user_id = $2, claimed_at = NOW(), ingestion_source = 'manual'
+           WHERE tx_hash = $3 AND chain_id = $4`,
+          [userEmail, userId, txHash.toLowerCase(), chainId]
         );
       } else {
         await query(
           `INSERT INTO token_transactions
-            (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_email, claimed_at, ingestion_source)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), 'manual')`,
+            (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_email, user_id, claimed_at, ingestion_source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), 'manual')`,
           [
             txHash.toLowerCase(),
             chainId,
@@ -2972,17 +3179,18 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
             amountFula,
             parseInt(receipt.blockNumber, 16),
             Math.floor(Date.now() / 1000),
-            userEmail
+            userEmail,
+            userId
           ]
         );
       }
 
       // Credit the user
-      await creditUser(userEmail, amountFula, `${chainId}:${txHash}`);
+      await creditUser(userId, amountFula, `${chainId}:${txHash}`);
 
-      console.log(`[api/v1] Claim: credited ${amountFula} FULA to ${userEmail} from tx ${txHash}`);
+      console.log(`[api/v1] Claim: credited ${amountFula} FULA to ${maskEmail(userEmail)} from tx ${txHash}`);
 
-      const newStatus = await getUserCreditStatus(userEmail);
+      const newStatus = await getUserCreditStatus(userId);
       res.json({
         success: true,
         amountFula,
@@ -3001,12 +3209,12 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
 
-      const userEmail = req.apiUser!.email;
+      const userId = req.apiUser!.userId;
 
       // Get total count
       const countResult = await query<{ total: string }>(
-        `SELECT COUNT(*)::text as total FROM credit_history WHERE user_email = $1`,
-        [userEmail]
+        `SELECT COUNT(*)::text as total FROM credit_history WHERE user_id = $1`,
+        [userId]
       );
 
       const total = parseInt(countResult.rows[0]?.total || '0', 10);
@@ -3023,10 +3231,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         SELECT tx_type as txType, amount_fula as amountFula, balance_after as balanceAfter,
                reference_id as referenceId, created_at as createdAt
         FROM credit_history
-        WHERE user_email = $1
+        WHERE user_id = $1
         ORDER BY created_at DESC
         LIMIT $2 OFFSET $3
-      `, [userEmail, limit, offset]);
+      `, [userId, limit, offset]);
       const history = historyResult.rows.map(r => ({
         txType: r.txtype,
         amountFula: r.amountfula,

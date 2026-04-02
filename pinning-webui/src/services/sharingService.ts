@@ -240,8 +240,6 @@ export function parseShareUrl(url: string): { shareId: string; payload: SharePay
     console.log('[parseShareUrl] Decoded JSON:', payloadJson.substring(0, 200));
 
     const payload = JSON.parse(payloadJson) as SharePayload;
-    console.log('[parseShareUrl] Parsed payload keys:', Object.keys(payload));
-
     return { shareId, payload };
   } catch (error) {
     console.error('[parseShareUrl] Failed to parse share URL:', error);
@@ -332,8 +330,6 @@ export async function decryptPasswordProtectedPayload(
     console.log('[decryptPasswordProtectedPayload] Decrypted inner payload length:', innerJson.length);
 
     const innerPayload = JSON.parse(innerJson) as SharePayload;
-    console.log('[decryptPasswordProtectedPayload] Inner payload keys:', Object.keys(innerPayload));
-
     return innerPayload;
   } catch (error) {
     console.error('[decryptPasswordProtectedPayload] Decryption failed:', error);
@@ -397,8 +393,6 @@ export async function processSharePayloadV2(
   if (!storageKey) {
     throw new Error('V2 share: no storage key found in payload.cid, snapshot_binding, or path_scope');
   }
-  console.log('[processSharePayloadV2] Using storage key:', storageKey, '(from', payload.cid ? 'payload.cid' : (token.snapshot_binding?.storage_key ? 'snapshot_binding' : 'path_scope'), ')');
-
   // Decode secret key
   const secretKey = base64ToUint8Array(payload.sk);
   if (secretKey.length !== 32) {
@@ -571,35 +565,24 @@ export async function processSharePayload(
   }
 
   // Decode the secret key (link private key)
-  console.log('[processSharePayload] Decoding secret key (sk)...');
   const skBytes = base64ToUint8Array(payload.sk);
-  console.log('[processSharePayload] Secret key length:', skBytes.length, 'bytes');
 
   // Decode the ephemeral public key
-  console.log('[processSharePayload] Decoding ephemeral public key...');
   const ephemeralPublicKeyBytes = base64ToUint8Array(tokenData.ephemeralPublicKey);
-  console.log('[processSharePayload] Ephemeral public key length:', ephemeralPublicKeyBytes.length, 'bytes');
 
   // Derive shared secret using X25519 ECDH
-  console.log('[processSharePayload] Deriving shared secret via X25519...');
   const sharedSecret = await deriveSharedSecret(skBytes, ephemeralPublicKeyBytes);
-  console.log('[processSharePayload] Shared secret length:', sharedSecret.length, 'bytes');
 
   // Derive wrap key from shared secret using HKDF
-  console.log('[processSharePayload] Deriving wrap key via HKDF...');
   const wrapKeyBytes = await deriveWrapKey(sharedSecret);
-  console.log('[processSharePayload] Wrap key length:', wrapKeyBytes.length, 'bytes');
 
   // Import the wrap key as AES key
   const wrapKey = await importKey(wrapKeyBytes);
 
   // Decrypt the wrapped DEK
-  console.log('[processSharePayload] Decrypting wrapped DEK...');
   const wrappedDekBytes = base64ToUint8Array(tokenData.wrappedDek);
-  console.log('[processSharePayload] Wrapped DEK length:', wrappedDekBytes.length, 'bytes');
 
   const dekBytes = await decrypt(wrappedDekBytes, wrapKey);
-  console.log('[processSharePayload] Decrypted DEK length:', dekBytes.length, 'bytes');
 
   // Import the DEK
   const dek = await importKey(dekBytes);
@@ -1184,6 +1167,46 @@ export async function decryptCollabFile(
 }
 
 /**
+ * Derive AES-256-GCM key for manifest encryption (domain-separated from file keys)
+ */
+export async function deriveManifestKey(linkSecret: Uint8Array, scopeId: string): Promise<CryptoKey> {
+  const baseKey = await crypto.subtle.importKey('raw', linkSecret, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: new Uint8Array(0),
+      info: new TextEncoder().encode(`manifest-enc-v1:${scopeId}`),
+    },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+/**
+ * Encrypt manifest object → "ENC1:{base64}" wire format
+ */
+export async function encryptManifestPayload(data: object, linkSecret: Uint8Array, scopeId: string): Promise<string> {
+  const key = await deriveManifestKey(linkSecret, scopeId);
+  const plaintext = new TextEncoder().encode(JSON.stringify(data));
+  const encrypted = await encryptCollabFile(plaintext as unknown as ArrayBuffer, key);
+  return 'ENC1:' + btoa(String.fromCharCode(...encrypted));
+}
+
+/**
+ * Decrypt "ENC1:{base64}" wire format → parsed object
+ */
+export async function decryptManifestPayload(wire: string, linkSecret: Uint8Array, scopeId: string): Promise<unknown> {
+  if (!wire.startsWith('ENC1:')) throw new Error('Not an encrypted manifest');
+  const encrypted = Uint8Array.from(atob(wire.slice(5)), c => c.charCodeAt(0));
+  const key = await deriveManifestKey(linkSecret, scopeId);
+  const decrypted = await decryptCollabFile(encrypted, key);
+  return JSON.parse(new TextDecoder().decode(new Uint8Array(decrypted)));
+}
+
+/**
  * Fetch a collaboration manifest from the server
  */
 export async function fetchCollabManifest(
@@ -1205,16 +1228,14 @@ export async function fetchCollabManifest(
 export async function uploadCollabFile(
   groupId: string,
   fileId: string,
-  fileName: string,
-  contentType: string,
+  _fileName: string,
+  _contentType: string,
   encryptedData: Uint8Array
 ): Promise<{ storageKey: string; bucket: string }> {
   const response = await fetch(`/api/collab/${groupId}/upload`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/octet-stream',
-      'x-collab-filename': fileName,
-      'x-collab-content-type': contentType,
       'x-collab-file-id': fileId,
     },
     body: encryptedData,
@@ -1231,19 +1252,44 @@ export async function uploadCollabFile(
  */
 export async function updateCollabManifest(
   groupId: string,
-  manifest: CollaborationManifest
+  manifest: CollaborationManifest,
+  linkSecret?: Uint8Array
 ): Promise<void> {
-  const body = new TextEncoder().encode(JSON.stringify(manifest));
+  let bodyBytes: Uint8Array;
+  if (linkSecret) {
+    // Encrypt manifest before sending to server
+    const encrypted = await encryptManifestPayload(manifest, linkSecret, groupId);
+    bodyBytes = new TextEncoder().encode(encrypted);
+  } else {
+    bodyBytes = new TextEncoder().encode(JSON.stringify(manifest));
+  }
+
   const response = await fetch(`/api/collab/${groupId}/manifest`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/octet-stream',
     },
-    body,
+    body: bodyBytes,
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({ error: 'Manifest update failed' }));
     throw new Error(err.error || `Manifest update failed: ${response.status}`);
+  }
+
+  // Also sync to DB endpoint so portal reads work (the S3 upload above is a separate store)
+  if (linkSecret) {
+    const encrypted = await encryptManifestPayload(manifest, linkSecret, groupId);
+    await fetch(`/api/collab/${groupId}/manifest-sync`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ encryptedManifest: encrypted }),
+    });
+  } else {
+    await fetch(`/api/collab/${groupId}/manifest-sync`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: JSON.stringify(manifest) }),
+    });
   }
 }
 

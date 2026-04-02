@@ -95,7 +95,6 @@ export async function storeEncryptionKey(
   encryptionKey: Uint8Array,
   userEmail: string
 ): Promise<void> {
-  console.log('[SecureStorage] storeEncryptionKey called, keyId:', keyId, 'keyLength:', encryptionKey.length);
   const database = await openDB();
   const sessionKey = await deriveSessionKey(userEmail);
   
@@ -108,8 +107,6 @@ export async function storeEncryptionKey(
     sessionKey,
     encryptionKey.buffer as ArrayBuffer
   );
-  console.log('[SecureStorage] Encrypted key, length:', encrypted.byteLength);
-  
   const storedKey: StoredKey = {
     id: keyId,
     encryptedKey: uint8ArrayToBase64(new Uint8Array(encrypted)),
@@ -156,8 +153,6 @@ export async function retrieveEncryptionKey(
     
     request.onsuccess = async () => {
       const storedKey = request.result as StoredKey | undefined;
-      console.log('[SecureStorage] Retrieved stored key:', storedKey ? 'found' : 'not found');
-      
       if (!storedKey) {
         resolve(null);
         return;
@@ -175,12 +170,9 @@ export async function retrieveEncryptionKey(
       }
       
       try {
-        console.log('[SecureStorage] Deriving session key for decryption...');
         const sessionKey = await deriveSessionKey(userEmail);
         const iv = base64ToUint8Array(storedKey.iv);
         const encryptedKey = base64ToUint8Array(storedKey.encryptedKey);
-        console.log('[SecureStorage] Decrypting stored key, iv length:', iv.length, 'encrypted length:', encryptedKey.length);
-        
         const decrypted = await crypto.subtle.decrypt(
           { name: 'AES-GCM', iv: iv.buffer as ArrayBuffer },
           sessionKey,

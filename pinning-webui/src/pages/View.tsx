@@ -219,37 +219,48 @@ export default function View() {
 
   // Load and decrypt content (v2 - using fula_client)
   const loadContentV2 = useCallback(async (shareDataV2: ProcessedShareDataV2) => {
-    // For folder shares, skip content loading — show file listing instead
-    if (shareDataV2.isFolder && shareDataV2.files?.length) {
-      console.log('[View] Folder share detected with', shareDataV2.files.length, 'files');
+    // For folder shares, fetch file manifest from server and show listing
+    if (shareDataV2.isFolder) {
+      console.log('[View] Folder share detected, fetching manifest from server');
 
-      // For temporal folder shares, fetch server manifest for updated file list
+      // Fetch server manifest (canonical source for temporal folder shares)
       try {
         const resp = await fetch(`/api/share/v2/manifest/${shareDataV2.shareId}`);
         if (resp.ok) {
           const manifest = await resp.json();
           if (manifest.files && Array.isArray(manifest.files)) {
-            // Map server manifest format to FolderFileEntry
             shareDataV2.files = manifest.files.map((f: { n: string; c: string; s: number; t?: string } | FolderFileEntry) => {
-              // Server stores same format as URL fragment
               if ('name' in f) return f;
               return { name: f.n, cid: f.c, size: f.s, tokenJson: f.t || undefined };
             });
-            console.log('[View] Updated folder manifest from server:', shareDataV2.files.length, 'files');
+            console.log('[View] Loaded folder manifest from server:', shareDataV2.files.length, 'files');
           }
+        } else {
+          console.log('[View] Manifest fetch returned', resp.status, '- using URL fragment fallback');
         }
       } catch (e) {
         console.log('[View] Manifest fetch failed, using URL fragment fallback:', e);
       }
 
+      // If we have files (from server or URL fragment fallback), show folder view
+      if (shareDataV2.files?.length) {
+        setState(s => ({
+          ...s,
+          loading: false,
+          needsPassword: false,
+          shareDataV2,
+          expiresAt: shareDataV2.expiresAt
+            ? new Date(shareDataV2.expiresAt * 1000).toISOString()
+            : null,
+        }));
+        return;
+      }
+
+      // No files from server or fragment — show error
       setState(s => ({
         ...s,
         loading: false,
-        needsPassword: false,
-        shareDataV2,
-        expiresAt: shareDataV2.expiresAt
-          ? new Date(shareDataV2.expiresAt * 1000).toISOString()
-          : null,
+        error: 'Folder manifest not available. The share may have expired or the server is unreachable.',
       }));
       return;
     }

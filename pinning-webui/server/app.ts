@@ -165,6 +165,9 @@ export async function initializeDatabase(): Promise<void> {
     await query(`
       ALTER TABLE collab_manifests ALTER COLUMN manifest_data DROP NOT NULL
     `).catch(() => { /* already nullable */ });
+    await query(`
+      ALTER TABLE collab_manifests ADD COLUMN IF NOT EXISTS creator_id VARCHAR(64)
+    `).catch(() => { /* column may already exist */ });
     console.log('[webui] collab_manifests table ready');
   } catch (error) {
     console.error('[webui] Failed to create collab_manifests table:', error);
@@ -1515,6 +1518,33 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     message: { error: 'Too many updates, please try again later' },
   });
 
+  // Resolve S3 JWT for collab operations: creator → session → admin
+  async function getCollabS3Jwt(groupId: string, req: Request): Promise<string | undefined> {
+    // Priority 1: Creator's JWT
+    try {
+      const result = await query<{ creator_id: string | null }>(
+        'SELECT creator_id FROM collab_manifests WHERE group_id = $1',
+        [groupId]
+      );
+      const creatorId = result.rows[0]?.creator_id;
+      if (creatorId) {
+        const keys = await getApiKeys(creatorId);
+        if (keys?.length > 0) return keys[0].key_id;
+      }
+    } catch (e) {
+      console.warn('[webui] Failed to look up creator JWT for collab:', groupId);
+    }
+    // Priority 2: Session user's JWT
+    if (req.session.user?.userId) {
+      try {
+        const keys = await getApiKeys(req.session.user.userId);
+        if (keys?.length > 0) return keys[0].key_id;
+      } catch {}
+    }
+    // Priority 3: Admin JWT
+    return config.s3AdminJwt;
+  }
+
   // Upload encrypted file for collaboration (public - link-authorized)
   app.post('/api/collab/:groupId/upload',
     collabUploadLimiter,
@@ -1540,19 +1570,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           return res.status(400).json({ error: 'Empty file body' });
         }
 
-        // Use logged-in user's JWT if available, fall back to admin JWT
-        let s3Jwt: string | undefined;
-        if (req.session.user?.userId) {
-          const keys = await dbOps.getApiKeys(req.session.user.userId);
-          if (keys && keys.length > 0) {
-            s3Jwt = keys[0].key_id;
-          }
-        }
+        const s3Jwt = await getCollabS3Jwt(groupId, req);
         if (!s3Jwt) {
-          s3Jwt = config.s3AdminJwt;
-        }
-        if (!s3Jwt) {
-          console.error('[webui] No S3 JWT available (no session and S3_ADMIN_JWT not configured)');
+          console.error('[webui] No S3 JWT available for collab upload');
           return res.status(500).json({ error: 'Upload not configured' });
         }
 
@@ -1610,19 +1630,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           return res.status(400).json({ error: 'Empty manifest body' });
         }
 
-        // Use logged-in user's JWT if available, fall back to admin JWT
-        let s3Jwt: string | undefined;
-        if (req.session.user?.userId) {
-          const keys = await dbOps.getApiKeys(req.session.user.userId);
-          if (keys && keys.length > 0) {
-            s3Jwt = keys[0].key_id;
-          }
-        }
+        const s3Jwt = await getCollabS3Jwt(groupId, req);
         if (!s3Jwt) {
-          s3Jwt = config.s3AdminJwt;
-        }
-        if (!s3Jwt) {
-          console.error('[webui] No S3 JWT available for manifest update');
+          console.error('[webui] No S3 JWT available for collab manifest update');
           return res.status(500).json({ error: 'Manifest update not configured' });
         }
 
@@ -1669,25 +1679,41 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Invalid group ID format' });
       }
 
+      // Extract creator identity from Bearer token or session
+      let creatorId: string | null = null;
+      const authHeader = req.headers.authorization;
+      if (authHeader?.startsWith('Bearer ')) {
+        try {
+          creatorId = await verifyApiKey(authHeader.substring(7));
+        } catch {}
+      }
+      if (!creatorId && req.session.user?.userId) {
+        creatorId = req.session.user.userId;
+      }
+
       const { data, encryptedManifest } = req.body;
 
       if (encryptedManifest) {
         // Encrypted path: store opaque blob, clear plaintext
         await query(
-          `INSERT INTO collab_manifests (group_id, manifest_data, encrypted_manifest, updated_at)
-           VALUES ($1, NULL, $2, NOW())
+          `INSERT INTO collab_manifests (group_id, manifest_data, encrypted_manifest, creator_id, updated_at)
+           VALUES ($1, NULL, $2, $3, NOW())
            ON CONFLICT (group_id) DO UPDATE SET
-             encrypted_manifest = EXCLUDED.encrypted_manifest, manifest_data = NULL, updated_at = NOW()`,
-          [groupId, encryptedManifest]
+             encrypted_manifest = EXCLUDED.encrypted_manifest, manifest_data = NULL,
+             creator_id = COALESCE(EXCLUDED.creator_id, collab_manifests.creator_id),
+             updated_at = NOW()`,
+          [groupId, encryptedManifest, creatorId]
         );
       } else if (data && typeof data === 'string') {
         // Legacy plaintext path
         await query(
-          `INSERT INTO collab_manifests (group_id, manifest_data, updated_at)
-           VALUES ($1, $2, NOW())
+          `INSERT INTO collab_manifests (group_id, manifest_data, creator_id, updated_at)
+           VALUES ($1, $2, $3, NOW())
            ON CONFLICT (group_id) DO UPDATE SET
-             manifest_data = EXCLUDED.manifest_data, updated_at = NOW()`,
-          [groupId, data]
+             manifest_data = EXCLUDED.manifest_data,
+             creator_id = COALESCE(EXCLUDED.creator_id, collab_manifests.creator_id),
+             updated_at = NOW()`,
+          [groupId, data, creatorId]
         );
       } else {
         return res.status(400).json({ error: 'Missing manifest data' });

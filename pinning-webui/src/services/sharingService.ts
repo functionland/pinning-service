@@ -1234,6 +1234,7 @@ export async function uploadCollabFile(
 ): Promise<{ storageKey: string; bucket: string }> {
   const response = await fetch(`/api/collab/${groupId}/upload`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/octet-stream',
       'x-collab-file-id': fileId,
@@ -1266,6 +1267,7 @@ export async function updateCollabManifest(
 
   const response = await fetch(`/api/collab/${groupId}/manifest`, {
     method: 'PUT',
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/octet-stream',
     },
@@ -1283,6 +1285,7 @@ export async function updateCollabManifest(
       : { data: JSON.stringify(manifest) };
     const syncResp = await fetch(`/api/collab/${groupId}/manifest-sync`, {
       method: 'PUT',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(syncBody),
     });

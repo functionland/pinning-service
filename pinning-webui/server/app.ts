@@ -141,6 +141,20 @@ export async function initializeDatabase(): Promise<void> {
   } catch (error) {
     console.error('[webui] Failed to create share_manifests table:', error);
   }
+
+  // Create collab_manifests table for collaboration group manifest sync
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS collab_manifests (
+        group_id TEXT PRIMARY KEY,
+        manifest_data TEXT NOT NULL,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    console.log('[webui] collab_manifests table ready');
+  } catch (error) {
+    console.error('[webui] Failed to create collab_manifests table:', error);
+  }
 }
 
 // Seed chain_sync_state with supported chains (if empty)
@@ -1452,6 +1466,57 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
     }
   );
+
+  // Sync collaboration manifest JSON to DB (called by Flutter after manifest updates)
+  app.put('/api/collab/:groupId/manifest-sync', collabManifestLimiter, async (req: Request, res: Response) => {
+    try {
+      const { groupId } = req.params;
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(groupId)) {
+        return res.status(400).json({ error: 'Invalid group ID format' });
+      }
+
+      const { data } = req.body;
+      if (!data || typeof data !== 'string') {
+        return res.status(400).json({ error: 'Missing manifest data' });
+      }
+
+      await query(
+        `INSERT INTO collab_manifests (group_id, manifest_data, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (group_id) DO UPDATE SET
+           manifest_data = EXCLUDED.manifest_data, updated_at = NOW()`,
+        [groupId, data]
+      );
+
+      console.log('[webui] Collab manifest synced for group:', groupId);
+      res.json({ ok: true });
+    } catch (error) {
+      console.error('[webui] Error syncing collab manifest:', error);
+      res.status(500).json({ error: 'Failed to sync manifest' });
+    }
+  });
+
+  // Fetch collaboration manifest JSON from DB (called by portal)
+  app.get('/api/collab/:groupId/manifest-sync', collabManifestLimiter, async (req: Request, res: Response) => {
+    try {
+      const { groupId } = req.params;
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(groupId)) {
+        return res.status(400).json({ error: 'Invalid group ID format' });
+      }
+
+      const result = await query('SELECT manifest_data FROM collab_manifests WHERE group_id = $1', [groupId]);
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      res.json({ data: result.rows[0].manifest_data });
+    } catch (error) {
+      console.error('[webui] Error fetching collab manifest:', error);
+      res.status(500).json({ error: 'Failed to fetch manifest' });
+    }
+  });
 
   // Health check
   app.get('/api/health', (_req: Request, res: Response) => {

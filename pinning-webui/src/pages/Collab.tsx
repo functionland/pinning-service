@@ -68,18 +68,35 @@ export default function Collab() {
 
       setState(s => ({ ...s, payload: parsed.payload }));
 
-      // Fetch and decrypt manifest using share token (manifest is fula-encrypted)
-      const linkSecret = Uint8Array.from(atob(parsed.payload.sk), c => c.charCodeAt(0));
-      const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch`;
-      const client = await createShareClient(linkSecret, proxyEndpoint);
-      const accepted = await acceptShareToken(client, parsed.payload.t);
+      let manifest: CollaborationManifest | null = null;
 
-      // Extract CID from the share token's path_scope
-      const tokenData = JSON.parse(parsed.payload.t);
-      const manifestCid = tokenData.path_scope;
+      // Try server-synced manifest first (always up-to-date, avoids stale CID issue)
+      try {
+        const groupId = parsed.payload.g;
+        const syncResp = await fetch(`/api/collab/${groupId}/manifest-sync`);
+        if (syncResp.ok) {
+          const { data } = await syncResp.json();
+          manifest = JSON.parse(data) as CollaborationManifest;
+          console.log('[Collab] Loaded manifest from server sync');
+        }
+      } catch (syncErr) {
+        console.warn('[Collab] Server sync fetch failed, falling back to fula:', syncErr);
+      }
 
-      const decryptedBytes = await decryptWithAcceptedShare(client, parsed.payload.b, manifestCid, accepted);
-      const manifest = JSON.parse(new TextDecoder().decode(new Uint8Array(decryptedBytes))) as CollaborationManifest;
+      // Fallback: decrypt from fula using the embedded share token
+      if (!manifest) {
+        const linkSecret = Uint8Array.from(atob(parsed.payload.sk), c => c.charCodeAt(0));
+        const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch`;
+        const client = await createShareClient(linkSecret, proxyEndpoint);
+        const accepted = await acceptShareToken(client, parsed.payload.t);
+
+        const tokenData = JSON.parse(parsed.payload.t);
+        const manifestCid = tokenData.path_scope;
+
+        const decryptedBytes = await decryptWithAcceptedShare(client, parsed.payload.b, manifestCid, accepted);
+        manifest = JSON.parse(new TextDecoder().decode(new Uint8Array(decryptedBytes))) as CollaborationManifest;
+        console.log('[Collab] Loaded manifest from fula (fallback)');
+      }
 
       setState(s => ({
         ...s,

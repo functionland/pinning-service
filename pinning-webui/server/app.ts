@@ -1202,6 +1202,153 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
+  // ============ Collaboration Endpoints ============
+
+  // Rate limiter for collaboration uploads
+  const collabUploadLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many uploads, please try again later' },
+  });
+
+  const collabManifestLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many updates, please try again later' },
+  });
+
+  // Upload encrypted file for collaboration (public - link-authorized)
+  app.post('/api/collab/:groupId/upload',
+    collabUploadLimiter,
+    express.raw({ type: 'application/octet-stream', limit: '100mb' }),
+    async (req: Request, res: Response) => {
+      try {
+        const { groupId } = req.params;
+
+        // Validate groupId is UUID format
+        const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidPattern.test(groupId)) {
+          return res.status(400).json({ error: 'Invalid group ID format' });
+        }
+
+        const fileName = req.headers['x-collab-filename'] as string || 'unnamed';
+        const contentType = req.headers['x-collab-content-type'] as string || 'application/octet-stream';
+        const fileId = req.headers['x-collab-file-id'] as string;
+
+        if (!fileId) {
+          return res.status(400).json({ error: 'Missing x-collab-file-id header' });
+        }
+
+        const body = req.body as Buffer;
+        if (!body || body.length === 0) {
+          return res.status(400).json({ error: 'Empty file body' });
+        }
+
+        const s3Jwt = config.s3AdminJwt;
+        if (!s3Jwt) {
+          console.error('[webui] S3_ADMIN_JWT not configured');
+          return res.status(500).json({ error: 'Upload not configured' });
+        }
+
+        const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
+        const bucket = 'files';
+        const storageKey = `collab/${groupId}/${fileId}`;
+        const uploadUrl = `${s3BaseUrl}/admin/upload/${bucket}/${storageKey}`;
+
+        console.log('[webui] Collab upload:', { groupId, fileId, fileName, size: body.length });
+
+        const s3Response = await fetch(uploadUrl, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `Bearer ${s3Jwt}`,
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': body.length.toString(),
+          },
+          body: body,
+        });
+
+        if (!s3Response.ok) {
+          console.error('[webui] S3 upload failed:', s3Response.status, await s3Response.text());
+          return res.status(s3Response.status).json({ error: 'Failed to upload file' });
+        }
+
+        return res.json({
+          storageKey,
+          bucket,
+          fileId,
+          fileName,
+          size: body.length,
+        });
+      } catch (error) {
+        console.error('[webui] Error in collab upload:', error);
+        res.status(500).json({ error: 'Failed to upload file' });
+      }
+    }
+  );
+
+  // Update collaboration manifest (public - link-authorized)
+  app.put('/api/collab/:groupId/manifest',
+    collabManifestLimiter,
+    express.raw({ type: 'application/octet-stream', limit: '1mb' }),
+    async (req: Request, res: Response) => {
+      try {
+        const { groupId } = req.params;
+
+        // Validate groupId is UUID format
+        const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidPattern.test(groupId)) {
+          return res.status(400).json({ error: 'Invalid group ID format' });
+        }
+
+        const body = req.body as Buffer;
+        if (!body || body.length === 0) {
+          return res.status(400).json({ error: 'Empty manifest body' });
+        }
+
+        const s3Jwt = config.s3AdminJwt;
+        if (!s3Jwt) {
+          console.error('[webui] S3_ADMIN_JWT not configured');
+          return res.status(500).json({ error: 'Manifest update not configured' });
+        }
+
+        const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
+        const bucket = 'fula-metadata';
+        const storageKey = `.fula/collab/${groupId}/manifest.json`;
+        const uploadUrl = `${s3BaseUrl}/admin/upload/${bucket}/${encodeURIComponent(storageKey)}`;
+
+        console.log('[webui] Collab manifest update:', { groupId, size: body.length });
+
+        const s3Response = await fetch(uploadUrl, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `Bearer ${s3Jwt}`,
+            'Content-Type': 'application/json',
+            'Content-Length': body.length.toString(),
+          },
+          body: body,
+        });
+
+        if (!s3Response.ok) {
+          console.error('[webui] S3 manifest upload failed:', s3Response.status, await s3Response.text());
+          return res.status(s3Response.status).json({ error: 'Failed to update manifest' });
+        }
+
+        return res.json({
+          storageKey,
+          bucket,
+          groupId,
+        });
+      } catch (error) {
+        console.error('[webui] Error in collab manifest update:', error);
+        res.status(500).json({ error: 'Failed to update manifest' });
+      }
+    }
+  );
+
   // Health check
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });

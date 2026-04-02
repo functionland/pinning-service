@@ -53,6 +53,9 @@ export interface SharePayload {
   cid?: string;        // Storage key/CID (v2 only: for fetching from IPFS)
   l?: string;          // Label/name
   f?: string;          // Filename (v2 only)
+  // Folder share fields
+  folder?: boolean;    // true if this is a folder share
+  files?: Array<{ n: string; c: string; s: number }>; // File manifest: name, CID, size
   // Password-protected fields
   p?: boolean;         // Password protected flag
   s?: string;          // Base64 salt (16 bytes)
@@ -121,6 +124,12 @@ export interface ProcessedShareData {
 /**
  * Processed share data for v2 format (fula_client)
  */
+export interface FolderFileEntry {
+  name: string;        // Relative file name within the folder
+  cid: string;         // Storage key / CID
+  size: number;        // File size in bytes
+}
+
 export interface ProcessedShareDataV2 {
   version: 2;
   shareId: string;
@@ -132,6 +141,8 @@ export interface ProcessedShareDataV2 {
   secretKey: Uint8Array; // Link private key
   expiresAt?: number;  // Unix timestamp
   contentType?: string;
+  isFolder?: boolean;  // true if this is a folder share
+  files?: FolderFileEntry[]; // File manifest for folder shares
 }
 
 /**
@@ -403,6 +414,20 @@ export async function processSharePayloadV2(
   }
   console.log('[processSharePayloadV2] Original path:', originalPath);
 
+  // Parse folder manifest if present
+  const isFolder = payload.folder === true;
+  const files: FolderFileEntry[] | undefined = isFolder && Array.isArray(payload.files)
+    ? payload.files.map((f: { n: string; c: string; s: number }) => ({
+        name: f.n,
+        cid: f.c,
+        size: f.s,
+      }))
+    : undefined;
+
+  if (isFolder) {
+    console.log('[processSharePayloadV2] Folder share with', files?.length ?? 0, 'files');
+  }
+
   return {
     version: 2,
     shareId,
@@ -414,6 +439,8 @@ export async function processSharePayloadV2(
     secretKey,
     expiresAt: token.expires_at,
     contentType: undefined, // V2 tokens don't include content type in the standard format
+    isFolder,
+    files,
   };
 }
 
@@ -997,6 +1024,227 @@ export function parseOutgoingShares(data: unknown[]): OutgoingShare[] {
 /**
  * Parse raw playlists data from API
  */
+// ============================================================================
+// COLLABORATION TYPES & HELPERS
+// ============================================================================
+
+/**
+ * Collaboration payload (in URL fragment for /collab/:groupId links)
+ */
+export interface CollaborationPayload {
+  v: number;
+  type: 'collab';
+  g: string;        // Group ID
+  t: string;        // Manifest share token (fula_client JSON)
+  sk: string;       // Base64 secret key (link private key)
+  b: string;        // Manifest bucket
+  k: string;        // Manifest key (path)
+  n: string;        // Group name
+}
+
+/**
+ * A file entry in the collaboration manifest
+ */
+export interface CollaborationFile {
+  id: string;
+  fileName: string;
+  contentType?: string;
+  bucket: string;
+  storageKey: string;
+  pathScope?: string;
+  addedByPublicKey: string;
+  addedAt: string;
+  fileSize: number;
+  encType: 'fula' | 'collab';
+  shareTokenJson?: string;
+}
+
+/**
+ * Collaboration group manifest (stored in cloud)
+ */
+export interface CollaborationManifest {
+  id: string;
+  name: string;
+  ownerPublicKey: string;
+  manifestBucket: string;
+  manifestKey: string;
+  createdAt: string;
+  expiresAt?: string;
+  isRevoked: boolean;
+  files: CollaborationFile[];
+  version: number;
+  updatedAt: string;
+}
+
+/**
+ * Check if a decoded payload is a collaboration payload
+ */
+export function isCollabPayload(payload: Record<string, unknown>): payload is CollaborationPayload {
+  return payload.type === 'collab' && typeof payload.g === 'string';
+}
+
+/**
+ * Parse the current page URL as a collaboration link
+ * URL format: /collab/:groupId#{base64url-payload}
+ */
+export function parseCollabUrl(): { groupId: string; payload: CollaborationPayload } | null {
+  try {
+    const path = window.location.pathname;
+    const match = path.match(/^\/collab\/([^/]+)/);
+    if (!match) return null;
+
+    const groupId = match[1];
+    const fragment = window.location.hash.slice(1); // Remove leading #
+    if (!fragment) return null;
+
+    const decoded = base64UrlDecode(fragment);
+    const payload = JSON.parse(decoded);
+
+    if (!isCollabPayload(payload)) return null;
+
+    return { groupId, payload };
+  } catch (e) {
+    console.error('[parseCollabUrl] Failed:', e);
+    return null;
+  }
+}
+
+/**
+ * Derive a per-file encryption key from the link secret using HKDF
+ *
+ * Must match the Flutter/Dart implementation:
+ * HKDF-SHA256, info="collab-file-v1:{fileId}", salt=empty
+ */
+export async function deriveCollabFileKey(
+  linkSecret: Uint8Array,
+  fileId: string
+): Promise<CryptoKey> {
+  const baseKey = await crypto.subtle.importKey(
+    'raw',
+    linkSecret,
+    'HKDF',
+    false,
+    ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: new Uint8Array(0),
+      info: new TextEncoder().encode(`collab-file-v1:${fileId}`),
+    },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+/**
+ * Encrypt file data with AES-256-GCM using a collab-derived key
+ *
+ * Output format: [12-byte nonce][ciphertext][16-byte tag]
+ * (tag is appended by WebCrypto automatically in the ciphertext output)
+ */
+export async function encryptCollabFile(
+  data: ArrayBuffer,
+  key: CryptoKey
+): Promise<Uint8Array> {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce },
+    key,
+    data
+  );
+  // WebCrypto returns ciphertext + tag concatenated
+  const result = new Uint8Array(nonce.length + encrypted.byteLength);
+  result.set(nonce, 0);
+  result.set(new Uint8Array(encrypted), nonce.length);
+  return result;
+}
+
+/**
+ * Decrypt file data encrypted with collab key
+ *
+ * Input format: [12-byte nonce][ciphertext + 16-byte tag]
+ */
+export async function decryptCollabFile(
+  encrypted: Uint8Array,
+  key: CryptoKey
+): Promise<ArrayBuffer> {
+  const nonce = encrypted.slice(0, 12);
+  const ciphertext = encrypted.slice(12);
+  return crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: nonce },
+    key,
+    ciphertext
+  );
+}
+
+/**
+ * Fetch a collaboration manifest from the server
+ */
+export async function fetchCollabManifest(
+  bucket: string,
+  manifestKey: string
+): Promise<CollaborationManifest> {
+  const url = `/api/share/v2/fetch/${encodeURIComponent(bucket)}/${encodeURIComponent(manifestKey)}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch manifest: ${response.status}`);
+  }
+  const text = await response.text();
+  return JSON.parse(text) as CollaborationManifest;
+}
+
+/**
+ * Upload an encrypted file to the collaboration endpoint
+ */
+export async function uploadCollabFile(
+  groupId: string,
+  fileId: string,
+  fileName: string,
+  contentType: string,
+  encryptedData: Uint8Array
+): Promise<{ storageKey: string; bucket: string }> {
+  const response = await fetch(`/api/collab/${groupId}/upload`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'x-collab-filename': fileName,
+      'x-collab-content-type': contentType,
+      'x-collab-file-id': fileId,
+    },
+    body: encryptedData,
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Upload failed' }));
+    throw new Error(err.error || `Upload failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+/**
+ * Update a collaboration manifest on the server
+ */
+export async function updateCollabManifest(
+  groupId: string,
+  manifest: CollaborationManifest
+): Promise<void> {
+  const body = new TextEncoder().encode(JSON.stringify(manifest));
+  const response = await fetch(`/api/collab/${groupId}/manifest`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+    },
+    body,
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Manifest update failed' }));
+    throw new Error(err.error || `Manifest update failed: ${response.status}`);
+  }
+}
+
 export function parsePlaylists(data: unknown[]): Playlist[] {
   if (!Array.isArray(data)) return [];
 

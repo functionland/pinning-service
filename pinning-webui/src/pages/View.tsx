@@ -16,8 +16,10 @@ import {
   type SharePayload,
   type ProcessedShareData,
   type ProcessedShareDataV2,
+  type FolderFileEntry,
   type ViewerType,
 } from '../services/sharingService';
+import { createShareClient, acceptShareToken, decryptWithAcceptedShare } from '../services/fulaClientService';
 import { downloadBlob } from '../services/encryptionService';
 import LanguageSelector from '../components/LanguageSelector';
 
@@ -217,6 +219,21 @@ export default function View() {
 
   // Load and decrypt content (v2 - using fula_client)
   const loadContentV2 = useCallback(async (shareDataV2: ProcessedShareDataV2) => {
+    // For folder shares, skip content loading — show file listing instead
+    if (shareDataV2.isFolder && shareDataV2.files?.length) {
+      console.log('[View] Folder share detected with', shareDataV2.files.length, 'files');
+      setState(s => ({
+        ...s,
+        loading: false,
+        needsPassword: false,
+        shareDataV2,
+        expiresAt: shareDataV2.expiresAt
+          ? new Date(shareDataV2.expiresAt * 1000).toISOString()
+          : null,
+      }));
+      return;
+    }
+
     setState(s => ({ ...s, loading: true, error: null }));
 
     try {
@@ -517,7 +534,124 @@ export default function View() {
     );
   }
 
+  // Folder listing view
+  if (state.shareDataV2?.isFolder && state.shareDataV2?.files?.length) {
+    return (
+      <FolderView
+        shareData={state.shareDataV2}
+        expiresAt={state.expiresAt}
+      />
+    );
+  }
+
   return null;
+}
+
+// Folder view component for shared folders
+function FolderView({ shareData, expiresAt }: { shareData: ProcessedShareDataV2; expiresAt: string | null }) {
+  const { t } = useLanguage();
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const files = shareData.files || [];
+  const folderName = shareData.name || 'Shared Folder';
+  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+
+  function formatSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+
+  function getFileIcon(name: string): string {
+    const ext = name.split('.').pop()?.toLowerCase() || '';
+    const icons: Record<string, string> = {
+      jpg: '\ud83d\uddbc\ufe0f', jpeg: '\ud83d\uddbc\ufe0f', png: '\ud83d\uddbc\ufe0f', gif: '\ud83d\uddbc\ufe0f', webp: '\ud83d\uddbc\ufe0f', svg: '\ud83d\uddbc\ufe0f',
+      mp4: '\ud83c\udfac', mov: '\ud83c\udfac', avi: '\ud83c\udfac', mkv: '\ud83c\udfac', webm: '\ud83c\udfac',
+      mp3: '\ud83c\udfb5', wav: '\ud83c\udfb5', flac: '\ud83c\udfb5', aac: '\ud83c\udfb5', ogg: '\ud83c\udfb5',
+      pdf: '\ud83d\udcc4', doc: '\ud83d\udcc4', docx: '\ud83d\udcc4', txt: '\ud83d\udcc4', rtf: '\ud83d\udcc4',
+      zip: '\ud83d\udce6', rar: '\ud83d\udce6', '7z': '\ud83d\udce6', tar: '\ud83d\udce6', gz: '\ud83d\udce6',
+    };
+    return icons[ext] || '\ud83d\udcc1';
+  }
+
+  async function handleDownloadFile(file: FolderFileEntry) {
+    setDownloading(file.cid);
+    setError(null);
+
+    try {
+      const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch`;
+      const client = await createShareClient(shareData.secretKey, proxyEndpoint);
+      const acceptedShare = await acceptShareToken(client, shareData.tokenJson);
+      const decryptedData = await decryptWithAcceptedShare(client, shareData.bucket, file.cid, acceptedShare);
+
+      downloadBlob(new Uint8Array(decryptedData), file.name, '');
+    } catch (err) {
+      console.error('[FolderView] Download error for', file.name, err);
+      setError(`Failed to download "${file.name}": ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setDownloading(null);
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <div className="bg-white border-b border-gray-200 px-4 sm:px-6 py-4">
+        <div className="max-w-3xl mx-auto flex items-center justify-between">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-lg sm:text-xl font-bold text-gray-900 truncate">
+              {folderName}
+            </h1>
+            <p className="text-sm text-gray-500 mt-1">
+              {files.length} file{files.length !== 1 ? 's' : ''} &middot; {formatSize(totalSize)}
+              {expiresAt && (
+                <span className="ml-2">
+                  &middot; {t.view?.expiresIn || 'Expires in'}: {formatExpiryFromDate(expiresAt)}
+                </span>
+              )}
+            </p>
+          </div>
+          <LanguageSelector />
+        </div>
+      </div>
+
+      {/* Error banner */}
+      {error && (
+        <div className="max-w-3xl mx-auto px-4 sm:px-6 mt-4">
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm">
+            {error}
+          </div>
+        </div>
+      )}
+
+      {/* File list */}
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-4">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 divide-y divide-gray-100">
+          {files.map((file) => (
+            <div
+              key={file.cid}
+              className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
+            >
+              <span className="text-xl flex-shrink-0">{getFileIcon(file.name)}</span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-gray-900 truncate">{file.name}</p>
+                <p className="text-xs text-gray-500">{formatSize(file.size)}</p>
+              </div>
+              <button
+                onClick={() => handleDownloadFile(file)}
+                disabled={downloading === file.cid}
+                className="flex-shrink-0 bg-primary-600 hover:bg-primary-700 disabled:bg-gray-300 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+              >
+                {downloading === file.cid ? 'Downloading...' : (t.view?.download || 'Download')}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // Content viewer component

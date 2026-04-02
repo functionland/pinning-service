@@ -1527,21 +1527,25 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         [groupId]
       );
       const creatorId = result.rows[0]?.creator_id;
+      console.log('[webui] getCollabS3Jwt: groupId=%s creatorId=%s', groupId, creatorId ?? 'NULL');
       if (creatorId) {
         const keys = await getApiKeys(creatorId);
+        console.log('[webui] getCollabS3Jwt: creator keys count=%d', keys?.length ?? 0);
         if (keys?.length > 0) return keys[0].key_id;
       }
     } catch (e) {
-      console.warn('[webui] Failed to look up creator JWT for collab:', groupId);
+      console.warn('[webui] Failed to look up creator JWT for collab:', groupId, e);
     }
     // Priority 2: Session user's JWT
     if (req.session.user?.userId) {
       try {
         const keys = await getApiKeys(req.session.user.userId);
+        console.log('[webui] getCollabS3Jwt: session user keys count=%d', keys?.length ?? 0);
         if (keys?.length > 0) return keys[0].key_id;
       } catch {}
     }
-    // Priority 3: Admin JWT
+    // Priority 3: Admin JWT fallback
+    console.log('[webui] getCollabS3Jwt: falling back to admin JWT (exists=%s)', !!config.s3AdminJwt);
     return config.s3AdminJwt;
   }
 

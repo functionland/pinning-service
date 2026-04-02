@@ -134,7 +134,11 @@ export default function Collab() {
     setState(s => ({ ...s, downloading: file.id }));
     try {
       // Fetch encrypted file content from server
-      const url = `/api/share/v2/fetch/${encodeURIComponent(file.bucket)}/${encodeURIComponent(file.storageKey)}`;
+      // For collab-uploaded files, use the dedicated collab fetch endpoint (uses creator's JWT)
+      // For fula-synced files, use the share/v2/fetch endpoint
+      const url = file.encType === 'collab'
+        ? `/api/collab/${state.payload!.g}/file/${file.id}`
+        : `/api/share/v2/fetch/${encodeURIComponent(file.bucket)}/${encodeURIComponent(file.storageKey)}`;
       const response = await fetch(url);
       if (!response.ok) throw new Error(`Failed to fetch file: ${response.status}`);
 

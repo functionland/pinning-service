@@ -1580,8 +1580,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         }
 
         const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
-        const bucket = 'files';
-        const storageKey = `collab/${groupId}/${fileId}`;
+        const bucket = 'fula-metadata';
+        const storageKey = `.fula/collab/${groupId}/files/${fileId}`;
         const uploadUrl = `${s3BaseUrl}/${bucket}/${storageKey}`;
 
         console.log('[webui] Collab upload:', { groupId, fileId, size: body.length });
@@ -1613,6 +1613,44 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
     }
   );
+
+  // Download encrypted collab file using creator's JWT (public - link-authorized)
+  app.get('/api/collab/:groupId/file/:fileId', collabManifestLimiter, async (req: Request, res: Response) => {
+    try {
+      const { groupId, fileId } = req.params;
+
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(groupId) || !uuidPattern.test(fileId)) {
+        return res.status(400).json({ error: 'Invalid ID format' });
+      }
+
+      const s3Jwt = await getCollabS3Jwt(groupId, req);
+      if (!s3Jwt) {
+        return res.status(500).json({ error: 'Download not configured' });
+      }
+
+      const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
+      const storageKey = `.fula/collab/${groupId}/files/${fileId}`;
+      const fetchUrl = `${s3BaseUrl}/fula-metadata/${storageKey}`;
+
+      const s3Response = await fetch(fetchUrl, {
+        headers: { 'Authorization': `Bearer ${s3Jwt}` },
+      });
+
+      if (!s3Response.ok) {
+        console.error('[webui] Collab file fetch failed:', s3Response.status);
+        return res.status(s3Response.status === 404 ? 404 : 500).json({ error: 'File not found' });
+      }
+
+      const buffer = Buffer.from(await s3Response.arrayBuffer());
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', buffer.length.toString());
+      res.send(buffer);
+    } catch (error) {
+      console.error('[webui] Error fetching collab file:', error);
+      res.status(500).json({ error: 'Failed to fetch file' });
+    }
+  });
 
   // Update collaboration manifest (public - link-authorized)
   app.put('/api/collab/:groupId/manifest',

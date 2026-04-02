@@ -606,6 +606,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
     // Skip for API key / system key auth (CSRF-immune, no cookies)
     if (req.headers.authorization || req.headers['x-system-key']) return next();
+    // Skip for collab and share endpoints (link-secret authorized, no session/cookies)
+    if (req.path.startsWith('/collab/') || req.path.startsWith('/share/')) return next();
     const origin = req.headers.origin;
     if (origin) {
       const allowedOrigins = config.nodeEnv === 'production'

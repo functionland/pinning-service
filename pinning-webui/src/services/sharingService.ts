@@ -1277,19 +1277,20 @@ export async function updateCollabManifest(
   }
 
   // Also sync to DB endpoint so portal reads work (the S3 upload above is a separate store)
-  if (linkSecret) {
-    const encrypted = await encryptManifestPayload(manifest, linkSecret, groupId);
-    await fetch(`/api/collab/${groupId}/manifest-sync`, {
+  try {
+    const syncBody = linkSecret
+      ? { encryptedManifest: await encryptManifestPayload(manifest, linkSecret, groupId) }
+      : { data: JSON.stringify(manifest) };
+    const syncResp = await fetch(`/api/collab/${groupId}/manifest-sync`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ encryptedManifest: encrypted }),
+      body: JSON.stringify(syncBody),
     });
-  } else {
-    await fetch(`/api/collab/${groupId}/manifest-sync`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: JSON.stringify(manifest) }),
-    });
+    if (!syncResp.ok) {
+      console.warn('[updateCollabManifest] manifest-sync failed:', syncResp.status);
+    }
+  } catch (syncErr) {
+    console.warn('[updateCollabManifest] manifest-sync error (non-fatal):', syncErr);
   }
 }
 

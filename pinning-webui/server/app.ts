@@ -615,6 +615,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         ? [`https://${req.hostname}`]
         : ['http://localhost:5173', 'http://localhost:3001', `http://${req.hostname}:${config.port}`];
       if (!allowedOrigins.some(o => origin === o)) {
+        console.warn(`[CSRF] Blocked ${req.method} ${fullPath} | origin=${origin} hostname=${req.hostname} allowed=${JSON.stringify(allowedOrigins)}`);
         return res.status(403).json({ error: 'Invalid origin' });
       }
     }

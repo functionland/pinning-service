@@ -2,11 +2,11 @@ import { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   parseCollabUrl,
-  fetchCollabManifest,
   type CollaborationManifest,
   type CollaborationPayload,
   type CollaborationFile,
 } from '../services/sharingService';
+import { createShareClient, acceptShareToken, decryptWithAcceptedShare } from '../services/fulaClientService';
 import { downloadBlob } from '../services/encryptionService';
 import CollabUploader from '../components/CollabUploader';
 
@@ -68,11 +68,18 @@ export default function Collab() {
 
       setState(s => ({ ...s, payload: parsed.payload }));
 
-      // Fetch manifest from cloud
-      const manifest = await fetchCollabManifest(
-        parsed.payload.b,
-        parsed.payload.k
-      );
+      // Fetch and decrypt manifest using share token (manifest is fula-encrypted)
+      const linkSecret = Uint8Array.from(atob(parsed.payload.sk), c => c.charCodeAt(0));
+      const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch`;
+      const client = await createShareClient(linkSecret, proxyEndpoint);
+      const accepted = await acceptShareToken(client, parsed.payload.t);
+
+      // Extract CID from the share token's path_scope
+      const tokenData = JSON.parse(parsed.payload.t);
+      const manifestCid = tokenData.path_scope;
+
+      const decryptedBytes = await decryptWithAcceptedShare(client, parsed.payload.b, manifestCid, accepted);
+      const manifest = JSON.parse(new TextDecoder().decode(new Uint8Array(decryptedBytes))) as CollaborationManifest;
 
       setState(s => ({
         ...s,
@@ -119,10 +126,9 @@ export default function Collab() {
       } else {
         // fula-encrypted files: use share token for decryption
         if (file.shareTokenJson) {
-          const { createShareClient, decryptWithAcceptedShare } = await import('../services/fulaClientService');
           const linkSecret = Uint8Array.from(atob(state.payload.sk), c => c.charCodeAt(0));
-          const client = await createShareClient(linkSecret);
-          const { acceptShareToken } = await import('../services/fulaClientService');
+          const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch`;
+          const client = await createShareClient(linkSecret, proxyEndpoint);
           const accepted = await acceptShareToken(client, file.shareTokenJson);
           const decrypted = await decryptWithAcceptedShare(client, file.bucket, file.storageKey, accepted);
           downloadBlob(

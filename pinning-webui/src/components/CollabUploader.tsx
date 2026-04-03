@@ -14,6 +14,7 @@ interface CollabUploaderProps {
   groupId: string;
   payload: CollaborationPayload;
   manifest: CollaborationManifest;
+  currentPath: string;
   onUploadComplete: () => void;
 }
 
@@ -30,6 +31,7 @@ export default function CollabUploader({
   groupId,
   payload,
   manifest,
+  currentPath,
   onUploadComplete,
 }: CollabUploaderProps) {
   const [isDragOver, setIsDragOver] = useState(false);
@@ -96,6 +98,7 @@ export default function CollabUploader({
           contentType: file.type || undefined,
           bucket: result.bucket,
           storageKey: result.storageKey,
+          pathScope: currentPath || undefined,
           addedByPublicKey: 'web-collaborator',
           addedAt: new Date().toISOString(),
           fileSize: file.size,
@@ -139,7 +142,7 @@ export default function CollabUploader({
 
     // Clear progress after delay
     setTimeout(() => setUploads([]), 3000);
-  }, [groupId, payload, manifest, onUploadComplete, isUploading]);
+  }, [groupId, payload, manifest, currentPath, onUploadComplete, isUploading]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();

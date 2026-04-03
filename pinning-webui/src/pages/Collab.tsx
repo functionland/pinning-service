@@ -1,8 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
+import { v4 as uuidv4 } from 'uuid';
 import {
   parseCollabUrl,
   decryptManifestPayload,
+  updateCollabManifest,
   type CollaborationManifest,
   type CollaborationPayload,
   type CollaborationFile,
@@ -58,6 +60,7 @@ export default function Collab() {
     manifest: null,
     downloading: null,
   });
+  const [currentPath, setCurrentPath] = useState<string>('');
 
   const loadManifest = useCallback(async () => {
     try {
@@ -186,6 +189,124 @@ export default function Collab() {
     loadManifest();
   }, [loadManifest]);
 
+  const handleCreateFolder = useCallback(async () => {
+    if (!manifest || !state.payload) return;
+
+    const name = prompt('Folder name:');
+    if (!name || !name.trim()) return;
+    const trimmed = name.trim();
+
+    if (trimmed.includes('/') || trimmed === '.' || trimmed === '..') {
+      alert('Invalid folder name');
+      return;
+    }
+
+    const newPath = currentPath ? `${currentPath}/${trimmed}` : trimmed;
+
+    // Check for duplicate folder at this level
+    const exists = manifest.files.some(
+      f => f.contentType === 'application/x-directory' && f.pathScope === newPath
+    );
+    if (exists) {
+      alert('A folder with this name already exists');
+      return;
+    }
+
+    // Add folder marker to manifest
+    const folderMarker: CollaborationFile = {
+      id: uuidv4(),
+      fileName: '.folder',
+      contentType: 'application/x-directory',
+      bucket: '',
+      storageKey: '',
+      pathScope: newPath,
+      addedByPublicKey: 'web-collaborator',
+      addedAt: new Date().toISOString(),
+      fileSize: 0,
+      encType: 'collab',
+    };
+
+    const updated: CollaborationManifest = {
+      ...manifest,
+      files: [...manifest.files, folderMarker],
+      version: manifest.version + 1,
+      updatedAt: new Date().toISOString(),
+    };
+
+    try {
+      const linkSecret = Uint8Array.from(atob(state.payload.sk), c => c.charCodeAt(0));
+      await updateCollabManifest(manifest.id, updated, linkSecret);
+      loadManifest();
+    } catch (err) {
+      console.error('[Collab] Failed to create folder:', err);
+      alert('Failed to create folder');
+    }
+  }, [manifest, state.payload, currentPath, loadManifest]);
+
+  // Compute folders and files at current path
+  const { folders, filesAtPath } = useMemo(() => {
+    if (!manifest) return { folders: [] as string[], filesAtPath: [] as CollaborationFile[] };
+
+    const folderSet = new Set<string>();
+    const files: CollaborationFile[] = [];
+
+    for (const file of manifest.files) {
+      const filePath = file.pathScope || '';
+
+      if (currentPath === '') {
+        // At root
+        if (!filePath) {
+          // File at root level
+          if (file.contentType !== 'application/x-directory') {
+            files.push(file);
+          }
+        } else {
+          // File in a subfolder — extract top-level folder name
+          const topFolder = filePath.split('/')[0];
+          folderSet.add(topFolder);
+        }
+      } else {
+        if (filePath === currentPath && file.contentType !== 'application/x-directory') {
+          // File directly at current path
+          files.push(file);
+        } else if (filePath.startsWith(currentPath + '/')) {
+          // File in a deeper subfolder
+          const remainder = filePath.slice(currentPath.length + 1);
+          const nextSegment = remainder.split('/')[0];
+          folderSet.add(nextSegment);
+        }
+      }
+    }
+
+    // Also add explicit folder markers
+    for (const file of manifest.files) {
+      if (file.contentType === 'application/x-directory' && file.pathScope) {
+        const parentPath = file.pathScope.lastIndexOf('/') >= 0
+          ? file.pathScope.slice(0, file.pathScope.lastIndexOf('/'))
+          : '';
+        if (parentPath === currentPath) {
+          const folderName = file.pathScope.slice(parentPath ? parentPath.length + 1 : 0);
+          if (folderName && !folderName.includes('/')) {
+            folderSet.add(folderName);
+          }
+        }
+      }
+    }
+
+    return {
+      folders: Array.from(folderSet).sort((a, b) => a.localeCompare(b)),
+      filesAtPath: files.sort((a, b) => a.addedAt.localeCompare(b.addedAt)),
+    };
+  }, [manifest, currentPath]);
+
+  // Count items inside a folder (files + subfolders, recursive)
+  const countFolderItems = useCallback((folderPath: string): number => {
+    if (!manifest) return 0;
+    return manifest.files.filter(f =>
+      (f.pathScope || '') === folderPath || (f.pathScope || '').startsWith(folderPath + '/')
+    ).filter(f => f.contentType !== 'application/x-directory').length;
+  }, [manifest]);
+
   // Loading state
   if (state.loading) {
     return (
@@ -250,23 +371,115 @@ export default function Collab() {
         </p>
       </div>
 
+      {/* Breadcrumb navigation */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: '4px',
+        marginBottom: '16px', fontSize: '14px', flexWrap: 'wrap',
+      }}>
+        <span
+          onClick={() => setCurrentPath('')}
+          style={{
+            cursor: 'pointer', color: currentPath ? '#3b82f6' : '#1e293b',
+            fontWeight: currentPath ? 400 : 600,
+          }}
+        >
+          {'\u{1F3E0}'} Root
+        </span>
+        {currentPath && currentPath.split('/').map((segment, i, arr) => {
+          const path = arr.slice(0, i + 1).join('/');
+          const isLast = i === arr.length - 1;
+          return (
+            <span key={path} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#94a3b8' }}>/</span>
+              <span
+                onClick={() => !isLast && setCurrentPath(path)}
+                style={{
+                  cursor: isLast ? 'default' : 'pointer',
+                  color: isLast ? '#1e293b' : '#3b82f6',
+                  fontWeight: isLast ? 600 : 400,
+                }}
+              >
+                {segment}
+              </span>
+            </span>
+          );
+        })}
+      </div>
+
       {/* File list */}
       <div style={{ marginBottom: '24px' }}>
-        <h2 style={{ fontSize: '18px', marginBottom: '12px', color: '#1e293b' }}>
-          Files
-        </h2>
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          marginBottom: '12px',
+        }}>
+          <h2 style={{ fontSize: '18px', margin: 0, color: '#1e293b' }}>
+            {currentPath ? currentPath.split('/').pop() : 'Files'}
+          </h2>
+          {!manifest.isRevoked && state.payload && (
+            <button
+              onClick={handleCreateFolder}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '6px',
+                padding: '6px 14px', background: '#f1f5f9', border: '1px solid #e2e8f0',
+                borderRadius: '8px', cursor: 'pointer', fontSize: '13px', color: '#475569',
+                fontWeight: 500, transition: 'background 0.15s',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = '#e2e8f0')}
+              onMouseLeave={e => (e.currentTarget.style.background = '#f1f5f9')}
+            >
+              {'\u{1F4C1}'} New Folder
+            </button>
+          )}
+        </div>
 
-        {manifest.files.length === 0 ? (
+        {folders.length === 0 && filesAtPath.length === 0 ? (
           <div style={{
             textAlign: 'center', padding: '48px 24px', color: '#94a3b8',
             border: '2px dashed #e2e8f0', borderRadius: '12px',
           }}>
-            <p style={{ fontSize: '16px', marginBottom: '8px' }}>No files yet</p>
-            <p style={{ fontSize: '14px' }}>Upload files below to get started</p>
+            <p style={{ fontSize: '16px', marginBottom: '8px' }}>
+              {currentPath ? 'This folder is empty' : 'No files yet'}
+            </p>
+            <p style={{ fontSize: '14px' }}>
+              {currentPath ? 'Upload files or create a subfolder' : 'Upload files below to get started'}
+            </p>
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {manifest.files.map(file => (
+            {/* Folders first */}
+            {folders.map(folderName => {
+              const folderPath = currentPath ? `${currentPath}/${folderName}` : folderName;
+              const itemCount = countFolderItems(folderPath);
+              return (
+                <div key={`folder-${folderName}`} style={{
+                  display: 'flex', alignItems: 'center', gap: '12px',
+                  padding: '12px 16px', background: '#fffbeb',
+                  borderRadius: '10px', border: '1px solid #fde68a',
+                  cursor: 'pointer', transition: 'background 0.15s',
+                }}
+                  onClick={() => setCurrentPath(folderPath)}
+                  onMouseEnter={e => (e.currentTarget.style.background = '#fef3c7')}
+                  onMouseLeave={e => (e.currentTarget.style.background = '#fffbeb')}
+                >
+                  <span style={{ fontSize: '24px' }}>{'\u{1F4C2}'}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{
+                      fontWeight: 500, color: '#1e293b',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}>
+                      {folderName}
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#94a3b8' }}>
+                      {itemCount} file{itemCount === 1 ? '' : 's'}
+                    </div>
+                  </div>
+                  <span style={{ color: '#94a3b8', fontSize: '18px' }}>{'\u203A'}</span>
+                </div>
+              );
+            })}
+
+            {/* Files */}
+            {filesAtPath.map(file => (
               <div key={file.id} style={{
                 display: 'flex', alignItems: 'center', gap: '12px',
                 padding: '12px 16px', background: '#f8fafc',
@@ -321,6 +534,7 @@ export default function Collab() {
           groupId={manifest.id}
           payload={state.payload}
           manifest={manifest}
+          currentPath={currentPath}
           onUploadComplete={handleUploadComplete}
         />
       )}

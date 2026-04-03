@@ -1652,6 +1652,54 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
+  // Proxy fetch for fula files in a collab group using creator's JWT (public - link-authorized)
+  app.get('/api/collab/:groupId/fula-fetch', collabManifestLimiter, async (req: Request, res: Response) => {
+    try {
+      const { groupId } = req.params;
+      const bucket = req.query.bucket as string;
+      const key = req.query.key as string;
+
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(groupId)) {
+        return res.status(400).json({ error: 'Invalid group ID' });
+      }
+      if (!bucket || !key) {
+        return res.status(400).json({ error: 'Missing bucket or key' });
+      }
+
+      const safeBucketPattern = /^[a-zA-Z0-9_\-\.]+$/;
+      const safeKeyPattern = /^[a-zA-Z0-9_\-\.\/]+$/;
+      if (!safeBucketPattern.test(bucket) || !safeKeyPattern.test(key)) {
+        return res.status(400).json({ error: 'Invalid bucket or key format' });
+      }
+
+      const s3Jwt = await getCollabS3Jwt(groupId, req);
+      if (!s3Jwt) {
+        return res.status(500).json({ error: 'Download not configured' });
+      }
+
+      const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
+      const fetchUrl = `${s3BaseUrl}/${bucket}/${key}`;
+
+      const s3Response = await fetch(fetchUrl, {
+        headers: { 'Authorization': `Bearer ${s3Jwt}` },
+      });
+
+      if (!s3Response.ok) {
+        console.error('[webui] Collab fula-fetch failed:', s3Response.status);
+        return res.status(s3Response.status === 404 ? 404 : 500).json({ error: 'File not found' });
+      }
+
+      const buffer = Buffer.from(await s3Response.arrayBuffer());
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', buffer.length.toString());
+      res.send(buffer);
+    } catch (error) {
+      console.error('[webui] Error in collab fula-fetch:', error);
+      res.status(500).json({ error: 'Failed to fetch file' });
+    }
+  });
+
   // Update collaboration manifest (public - link-authorized)
   app.put('/api/collab/:groupId/manifest',
     collabManifestLimiter,

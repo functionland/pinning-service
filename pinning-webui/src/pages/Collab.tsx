@@ -252,7 +252,9 @@ export default function Collab() {
     const files: CollaborationFile[] = [];
 
     for (const file of manifest.files) {
-      const filePath = file.pathScope || '';
+      // Only collab-uploaded files use pathScope as folder path.
+      // Fula files have pathScope as storage key (e.g. "images/bafyabc") — show at root.
+      const filePath = (file.encType === 'collab' ? file.pathScope : '') || '';
 
       if (currentPath === '') {
         // At root
@@ -303,9 +305,10 @@ export default function Collab() {
   // Count items inside a folder (files + subfolders, recursive)
   const countFolderItems = useCallback((folderPath: string): number => {
     if (!manifest) return 0;
-    return manifest.files.filter(f =>
-      (f.pathScope || '') === folderPath || (f.pathScope || '').startsWith(folderPath + '/')
-    ).filter(f => f.contentType !== 'application/x-directory').length;
+    return manifest.files.filter(f => {
+      const p = (f.encType === 'collab' ? f.pathScope : '') || '';
+      return p === folderPath || p.startsWith(folderPath + '/');
+    }).filter(f => f.contentType !== 'application/x-directory').length;
   }, [manifest]);
 
   // Loading state

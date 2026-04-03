@@ -12,6 +12,7 @@ import {
 import { createShareClient, acceptShareToken, decryptWithAcceptedShare } from '../services/fulaClientService';
 import { downloadBlob } from '../services/encryptionService';
 import CollabUploader from '../components/CollabUploader';
+import { useAuth } from '../context/AuthContext';
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -52,6 +53,8 @@ interface CollabState {
 
 export default function Collab() {
   const { groupId } = useParams<{ groupId: string }>();
+  const { user } = useAuth();
+  const isSignedIn = !!user;
 
   const [state, setState] = useState<CollabState>({
     loading: true,
@@ -374,6 +377,29 @@ export default function Collab() {
         </p>
       </div>
 
+      {/* Sign-in banner for unauthenticated users */}
+      {!isSignedIn && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '12px 16px', background: '#fffbeb', border: '1px solid #fde68a',
+          borderRadius: '10px', marginBottom: '16px', fontSize: '14px',
+        }}>
+          <span style={{ color: '#92400e' }}>
+            Sign in to upload files and create folders
+          </span>
+          <a
+            href={`/login?redirect=${encodeURIComponent(window.location.pathname + window.location.hash)}`}
+            style={{
+              padding: '6px 16px', background: '#3b82f6', color: 'white',
+              borderRadius: '6px', textDecoration: 'none', fontWeight: 500,
+              fontSize: '13px',
+            }}
+          >
+            Sign In
+          </a>
+        </div>
+      )}
+
       {/* Breadcrumb navigation */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: '4px',
@@ -418,7 +444,7 @@ export default function Collab() {
           <h2 style={{ fontSize: '18px', margin: 0, color: '#1e293b' }}>
             {currentPath ? currentPath.split('/').pop() : 'Files'}
           </h2>
-          {!manifest.isRevoked && state.payload && (
+          {!manifest.isRevoked && state.payload && isSignedIn && (
             <button
               onClick={handleCreateFolder}
               style={{
@@ -531,8 +557,8 @@ export default function Collab() {
         )}
       </div>
 
-      {/* Upload section */}
-      {!manifest.isRevoked && state.payload && (
+      {/* Upload section (requires sign-in) */}
+      {!manifest.isRevoked && state.payload && isSignedIn && (
         <CollabUploader
           groupId={manifest.id}
           payload={state.payload}

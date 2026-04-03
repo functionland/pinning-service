@@ -632,6 +632,29 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     next();
   }
 
+  // Auth middleware that accepts EITHER session cookie OR Bearer API key.
+  // Used for endpoints accessible from both webui (session) and Flutter (Bearer).
+  async function requireSessionOrBearer(req: Request, res: Response, next: NextFunction) {
+    // Check session first (webui)
+    if (req.session.user) {
+      return next();
+    }
+    // Check Bearer token (Flutter / external apps)
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ')) {
+      try {
+        const token = authHeader.substring(7);
+        const userEmail = await verifyApiKey(token);
+        if (userEmail) {
+          const userId = getUserId(userEmail);
+          req.apiUser = { email: userEmail, userId };
+          return next();
+        }
+      } catch (_) { /* fall through to 401 */ }
+    }
+    return res.status(401).json({ error: 'Authentication required. Sign in or provide a valid API key.' });
+  }
+
   // API token auth middleware (Bearer token for external apps)
   // Looks up token in api_keys table - same approach as Go pinning service
   async function requireApiAuth(req: Request, res: Response, next: NextFunction) {
@@ -1412,7 +1435,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   });
 
   // Upsert share manifest (called by Flutter at share creation and on temporal updates)
-  app.put('/api/share/v2/manifest/:shareId', manifestLimiter, async (req: Request, res: Response) => {
+  app.put('/api/share/v2/manifest/:shareId', requireSessionOrBearer, manifestLimiter, async (req: Request, res: Response) => {
     try {
       const { shareId } = req.params;
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1550,6 +1573,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
   // Upload encrypted file for collaboration (public - link-authorized)
   app.post('/api/collab/:groupId/upload',
+    requireSessionOrBearer,
     collabUploadLimiter,
     express.raw({ type: 'application/octet-stream', limit: '100mb' }),
     async (req: Request, res: Response) => {
@@ -1672,6 +1696,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       if (!safeBucketPattern.test(bucket) || !safeKeyPattern.test(key)) {
         return res.status(400).json({ error: 'Invalid bucket or key format' });
       }
+      // Prevent path traversal attacks
+      if (key.includes('..')) {
+        return res.status(400).json({ error: 'Invalid key: path traversal not allowed' });
+      }
 
       const s3Jwt = await getCollabS3Jwt(groupId, req);
       if (!s3Jwt) {
@@ -1702,6 +1730,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
   // Update collaboration manifest (public - link-authorized)
   app.put('/api/collab/:groupId/manifest',
+    requireSessionOrBearer,
     collabManifestLimiter,
     express.raw({ type: 'application/octet-stream', limit: '1mb' }),
     async (req: Request, res: Response) => {
@@ -1760,7 +1789,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   );
 
   // Sync collaboration manifest JSON to DB (called by Flutter after manifest updates)
-  app.put('/api/collab/:groupId/manifest-sync', collabManifestLimiter, async (req: Request, res: Response) => {
+  app.put('/api/collab/:groupId/manifest-sync', requireSessionOrBearer, collabManifestLimiter, async (req: Request, res: Response) => {
     try {
       const { groupId } = req.params;
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

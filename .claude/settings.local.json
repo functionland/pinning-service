@@ -27,7 +27,8 @@
       "Bash(cast code:*)",
       "Bash(curl:*)",
       "Bash(git log:*)",
-      "Bash(wait b88qomlu5:*)"
+      "Bash(wait b88qomlu5:*)",
+      "Bash(git:*)"
     ]
   }
 }

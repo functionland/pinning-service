@@ -61,6 +61,7 @@ export default function Collab() {
     downloading: null,
   });
   const [currentPath, setCurrentPath] = useState<string>('');
+  const manifest = state.manifest;
 
   const loadManifest = useCallback(async () => {
     try {
@@ -342,7 +343,6 @@ export default function Collab() {
     );
   }
 
-  const manifest = state.manifest;
   if (!manifest) return null;
 
   return (

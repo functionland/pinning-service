@@ -1784,12 +1784,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       if (encryptedManifest) {
         // Encrypted path: store opaque blob, clear plaintext
+        // Keep original creator_id once set — all collab files are stored under creator's S3 namespace
         await query(
           `INSERT INTO collab_manifests (group_id, manifest_data, encrypted_manifest, creator_id, updated_at)
            VALUES ($1, NULL, $2, $3, NOW())
            ON CONFLICT (group_id) DO UPDATE SET
              encrypted_manifest = EXCLUDED.encrypted_manifest, manifest_data = NULL,
-             creator_id = COALESCE(EXCLUDED.creator_id, collab_manifests.creator_id),
+             creator_id = COALESCE(collab_manifests.creator_id, EXCLUDED.creator_id),
              updated_at = NOW()`,
           [groupId, encryptedManifest, creatorId]
         );
@@ -1800,7 +1801,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
            VALUES ($1, $2, $3, NOW())
            ON CONFLICT (group_id) DO UPDATE SET
              manifest_data = EXCLUDED.manifest_data,
-             creator_id = COALESCE(EXCLUDED.creator_id, collab_manifests.creator_id),
+             creator_id = COALESCE(collab_manifests.creator_id, EXCLUDED.creator_id),
              updated_at = NOW()`,
           [groupId, data, creatorId]
         );

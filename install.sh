@@ -1075,11 +1075,14 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    
+
+    # Client body size for file uploads (collab, shares, etc.)
+    client_max_body_size 800M;
+
     # Logging
     access_log /var/log/nginx/${domain}_access.log;
     error_log /var/log/nginx/${domain}_error.log;
-    
+
     # Proxy all requests to WebUI
     location / {
         proxy_pass http://webui_service;
@@ -1090,6 +1093,11 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
+
+        # Timeouts for large file uploads
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
     }
 }
 EOF

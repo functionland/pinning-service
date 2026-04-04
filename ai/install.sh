@@ -398,6 +398,7 @@ install_and_build() {
         rollback_on_failure
         exit 1
     fi
+    npm audit fix
 
     print_step "Building application..."
 

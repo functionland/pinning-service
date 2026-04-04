@@ -174,9 +174,10 @@ async function executeJob(jobId: string, userToken: string, signal: AbortSignal)
     try {
       const job = await getGeneration(jobId);
       if (job && job.credits_charged > 0) {
-        const refundResult = await refundCredits(job.user_email, jobId, job.credits_charged);
+        const refundUserId = job.user_id || job.user_email;
+        const refundResult = await refundCredits(refundUserId, jobId, job.credits_charged);
         if (!refundResult.success) {
-          console.error(`[generation] CRITICAL: Refund failed for job ${jobId}, user ${job.user_email}, amount ${job.credits_charged}: ${refundResult.error}`);
+          console.error(`[generation] CRITICAL: Refund failed for job ${jobId}, user ${refundUserId.slice(0, 8)}..., amount ${job.credits_charged}: ${refundResult.error}`);
         }
       }
     } catch (refundError) {

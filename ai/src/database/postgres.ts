@@ -88,6 +88,7 @@ export async function verifyConnection(): Promise<boolean> {
 
 export interface AiGeneration {
   id: string;
+  user_id: string | null;
   user_email: string;
   prompt: string;
   status: 'pending' | 'generating' | 'publishing' | 'completed' | 'error';
@@ -102,19 +103,19 @@ export interface AiGeneration {
   completed_at: string | null;
 }
 
-// Create a new generation record
+// Create a new generation record (stores userId hash, not plain-text email)
 export async function createGeneration(
   id: string,
-  email: string,
+  userId: string,
   prompt: string,
   assets: any[],
   creditsCharged: number
 ): Promise<string> {
   const result = await query(
-    `INSERT INTO ai_generations (id, user_email, prompt, assets, credits_charged, status, status_message)
+    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message)
      VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation')
      RETURNING id`,
-    [id, email, prompt, JSON.stringify(assets), creditsCharged]
+    [id, userId, prompt, JSON.stringify(assets), creditsCharged]
   );
   return result.rows[0].id;
 }
@@ -173,9 +174,9 @@ export async function getGeneration(id: string): Promise<AiGeneration | null> {
   return result.rows[0] || null;
 }
 
-// Get paginated generations for a user
+// Get paginated generations for a user (matches by user_id hash or legacy user_email)
 export async function getGenerationsByUser(
-  email: string,
+  userId: string,
   page: number = 1,
   limit: number = 20
 ): Promise<{ generations: AiGeneration[]; total: number }> {
@@ -184,14 +185,14 @@ export async function getGenerationsByUser(
   const [dataResult, countResult] = await Promise.all([
     query<AiGeneration>(
       `SELECT * FROM ai_generations
-       WHERE user_email = $1
+       WHERE (user_id = $1 OR user_email = $1)
        ORDER BY created_at DESC
        LIMIT $2 OFFSET $3`,
-      [email, limit, offset]
+      [userId, limit, offset]
     ),
     query<{ count: string }>(
-      `SELECT COUNT(*) as count FROM ai_generations WHERE user_email = $1`,
-      [email]
+      `SELECT COUNT(*) as count FROM ai_generations WHERE (user_id = $1 OR user_email = $1)`,
+      [userId]
     ),
   ]);
 
@@ -203,26 +204,26 @@ export async function getGenerationsByUser(
 
 // Count recent jobs by user (for rate limiting)
 export async function countRecentJobsByUser(
-  email: string,
+  userId: string,
   sinceHours: number = 1
 ): Promise<number> {
   const result = await query<{ count: string }>(
     `SELECT COUNT(*) as count FROM ai_generations
-     WHERE user_email = $1
+     WHERE (user_id = $1 OR user_email = $1)
      AND created_at > CURRENT_TIMESTAMP - INTERVAL '1 hour' * $2`,
-    [email, sinceHours]
+    [userId, sinceHours]
   );
   return parseInt(result.rows[0].count, 10);
 }
 
 // Count free completed generations for a user (for free tier eligibility)
 export async function countFreeCompletedGenerations(
-  email: string
+  userId: string
 ): Promise<number> {
   const result = await query<{ count: string }>(
     `SELECT COUNT(*) as count FROM ai_generations
-     WHERE user_email = $1 AND credits_charged = 0 AND status = 'completed'`,
-    [email]
+     WHERE (user_id = $1 OR user_email = $1) AND credits_charged = 0 AND status = 'completed'`,
+    [userId]
   );
   return parseInt(result.rows[0].count, 10);
 }

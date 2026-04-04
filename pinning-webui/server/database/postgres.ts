@@ -157,11 +157,20 @@ export async function getOrCreateWebuiUser(
   );
 
   if (existing.rows[0]) {
+    // Decrypt name/picture from DB (legacy rows store plain-text, new rows are encrypted)
+    const row = existing.rows[0];
+    let decName = row.name, decPicture = row.picture;
+    try { const d = decryptApiKey(row.name); if (d) decName = d; } catch { /* legacy plain-text */ }
+    try { const d = decryptApiKey(row.picture); if (d) decPicture = d; } catch { /* legacy plain-text */ }
+
+    // Re-encrypt with fresh values from OAuth and update
+    const encryptedName = encryptApiKey(name) || name;
+    const encryptedPicture = encryptApiKey(picture) || picture;
     await query(
       'UPDATE webui_users SET last_login_at = NOW(), name = $1, picture = $2 WHERE user_id = $3',
-      [name, picture, userId]
+      [encryptedName, encryptedPicture, userId]
     );
-    return { ...existing.rows[0], isNew: false };
+    return { ...row, name: decName, picture: decPicture, isNew: false };
   }
 
   // Look up referrer's code name for inheritance (do this first so we can set company)
@@ -179,17 +188,20 @@ export async function getOrCreateWebuiUser(
 
   // Insert new user — no plain-text email; store encrypted_email for OAuth recovery
   const encryptedEmail = encryptApiKey(email); // reuses AES-256-GCM encryption
+  const encryptedName = encryptApiKey(name) || name;
+  const encryptedPicture = encryptApiKey(picture) || picture;
   await query(
     'INSERT INTO webui_users (user_id, encrypted_email, name, picture, last_login_at, company) VALUES ($1, $2, $3, $4, NOW(), $5)',
-    [userId, encryptedEmail, name, picture, inheritedName]
+    [userId, encryptedEmail, encryptedName, encryptedPicture, inheritedName]
   );
 
-  // Create first API key automatically — no plain-text email in user_email
+  // Create first API key automatically — no plain-text key_id for new records
   const keyId = generateJwtApiKey(userId, jwtSecret);
   const encryptedKey = encryptApiKey(keyId);
+  const keyHash = hashToken(keyId);
   await query(
-    'INSERT INTO api_keys (key_id, user_id, encrypted_key) VALUES ($1, $2, $3)',
-    [keyId, userId, encryptedKey]
+    'INSERT INTO api_keys (key_hash, user_id, encrypted_key) VALUES ($1, $2, $3)',
+    [keyHash, userId, encryptedKey]
   );
 
   // Also create entry in main users/sessions tables for pinning service compatibility
@@ -284,7 +296,7 @@ export async function getApiKeys(userId: string): Promise<any[]> {
   });
 }
 
-// Create API key
+// Create API key (no plain-text key_id for new records)
 export async function createApiKey(
   userId: string,
   jwtSecret: string,
@@ -292,9 +304,10 @@ export async function createApiKey(
 ): Promise<string> {
   const keyId = generateJwtApiKey(userId, jwtSecret);
   const encryptedKey = encryptApiKey(keyId);
+  const keyHash = hashToken(keyId);
   await query(
-    'INSERT INTO api_keys (key_id, user_id, user_email, encrypted_key) VALUES ($1, $2, $3, $4)',
-    [keyId, userId, userId, encryptedKey]
+    'INSERT INTO api_keys (key_hash, user_id, user_email, encrypted_key) VALUES ($1, $2, $3, $4)',
+    [keyHash, userId, userId, encryptedKey]
   );
 
   // Also create corresponding session for pinning service (hash only, no plain-text token)
@@ -309,11 +322,12 @@ export async function createApiKey(
   return keyId;
 }
 
-// Delete API key
+// Delete API key (match by key_hash or legacy key_id)
 export async function deleteApiKey(userId: string, keyId: string): Promise<boolean> {
+  const keyHash = hashToken(keyId);
   const result = await query(
-    'UPDATE api_keys SET is_deleted = 1, deleted_at = NOW() WHERE user_id = $1 AND key_id = $2 AND is_deleted = 0',
-    [userId, keyId]
+    'UPDATE api_keys SET is_deleted = 1, deleted_at = NOW() WHERE user_id = $1 AND (key_hash = $2 OR key_id = $3) AND is_deleted = 0',
+    [userId, keyHash, keyId]
   );
 
   // Remove from sessions table (match by token_hash or legacy session_token)
@@ -638,16 +652,27 @@ export function decryptApiKey(stored: string): string | null {
 // ============================================
 
 export async function verifyApiKey(keyId: string): Promise<string | null> {
-  const result = await query<{ user_id: string | null; user_email: string }>(
-    'SELECT user_id, user_email FROM api_keys WHERE key_id = $1 AND is_deleted = 0',
-    [keyId]
+  const keyHash = hashToken(keyId);
+
+  // Primary: lookup by key_hash
+  let result = await query<{ user_id: string | null; user_email: string }>(
+    'SELECT user_id, user_email FROM api_keys WHERE key_hash = $1 AND is_deleted = 0',
+    [keyHash]
   );
+
+  // Fallback: legacy key_id (pre-migration rows without key_hash)
+  if (!result.rows[0]) {
+    result = await query<{ user_id: string | null; user_email: string }>(
+      'SELECT user_id, user_email FROM api_keys WHERE key_id = $1 AND is_deleted = 0',
+      [keyId]
+    );
+  }
 
   if (result.rows[0]) {
     // Update last_used_at
     await query(
-      'UPDATE api_keys SET last_used_at = NOW() WHERE key_id = $1',
-      [keyId]
+      'UPDATE api_keys SET last_used_at = NOW() WHERE key_hash = $1 OR key_id = $2',
+      [keyHash, keyId]
     );
     // Return user_id if available, otherwise compute from user_email for legacy keys
     return result.rows[0].user_id || emailToUserId(result.rows[0].user_email);

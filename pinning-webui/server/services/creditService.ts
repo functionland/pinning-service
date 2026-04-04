@@ -232,7 +232,7 @@ export async function linkWallet(
      VALUES ($1, $2, $3, $4, $5, $6, NOW())
      ON CONFLICT (user_id, wallet_address_hash, chain_id) DO UPDATE
      SET is_verified = $6, connected_at = NOW(), encrypted_wallet_address = COALESCE($4, user_wallets.encrypted_wallet_address)`,
-    [userId, walletAddress.toLowerCase(), addressHash, encryptedAddress || null, chainId, isVerified ? 1 : 0]
+    [userId, null, addressHash, encryptedAddress || null, chainId, isVerified ? 1 : 0]
   );
 }
 

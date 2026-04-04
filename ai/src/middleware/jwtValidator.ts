@@ -1,12 +1,18 @@
 /**
  * JWT Validator Middleware
  *
- * Validates JWT tokens and extracts user email for AI service.
+ * Validates JWT tokens and extracts user identity for AI service.
+ * Hashes email to userId (SHA-256) — no plain-text email stored.
  */
 
+import crypto from 'crypto';
 import { createMiddleware } from 'hono/factory';
 import * as jose from 'jose';
 import { config } from '../config/index.js';
+
+function emailToUserId(email: string): string {
+  return crypto.createHash('sha256').update(email.toLowerCase()).digest('hex');
+}
 
 interface JwtPayload {
   email?: string;
@@ -19,7 +25,7 @@ interface JwtPayload {
 
 interface Env {
   Variables: {
-    userEmail: string;
+    userId: string;
     userToken: string;
     requestId: string;
     requestStartTime: number;
@@ -30,7 +36,7 @@ interface Env {
  * JWT Validator Middleware
  *
  * Extracts and optionally validates JWT from Authorization header.
- * Sets userEmail in context for downstream handlers.
+ * Sets userId (hashed) in context for downstream handlers.
  */
 export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
   const authHeader = c.req.header('Authorization');
@@ -54,7 +60,7 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
     // Decode the JWT to extract claims
     const decoded = jose.decodeJwt(token) as JwtPayload;
 
-    // Extract email from claims
+    // Extract email from claims and hash to userId
     const email = decoded.email || decoded.sub || '';
 
     if (!email) {
@@ -66,8 +72,11 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
       return c.json({ error: 'Token expired', code: 'TOKEN_EXPIRED' }, 401);
     }
 
-    // Store user email and token in context
-    c.set('userEmail', email);
+    // Hash email to userId — no plain-text email stored or passed downstream
+    const userId = email.includes('@') ? emailToUserId(email) : email;
+
+    // Store userId and token in context
+    c.set('userId', userId);
     c.set('userToken', token);
   } catch (error) {
     console.error('[jwt] Token decode/verify error:', error);

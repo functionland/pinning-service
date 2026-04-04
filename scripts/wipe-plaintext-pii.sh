@@ -133,6 +133,7 @@ wipe_column "token_transactions" "user_email"     "user_id"
 wipe_column "user_wallets"       "user_email"     "user_id"
 wipe_column "admin_audit_log"    "actor"          "actor_id"
 wipe_column "admin_audit_log"    "target_email"   "target_id"
+wipe_column "ai_generations"     "user_email"     "user_id"
 
 # ---- Usernames (same as emails) ----
 echo ""
@@ -146,6 +147,11 @@ wipe_column "users"    "username" "user_id"
 echo ""
 echo "=== Wallet Addresses ==="
 wipe_column "user_wallets" "wallet_address" "wallet_address_hash"
+
+# ---- API key plain-text ----
+echo ""
+echo "=== API Keys ==="
+wipe_column "api_keys" "key_id" "key_hash"
 
 # ---- IP addresses & user agents (logins) ----
 echo ""

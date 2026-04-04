@@ -163,6 +163,7 @@ MIGRATION_FILES=(
     "010_ensure_user_id_columns.sql"
     "011_referral_fk_to_user_id.sql"
     "012_nullable_legacy_columns.sql"
+    "013_api_key_hash.sql"
 )
 
 migrations_applied=0
@@ -297,6 +298,8 @@ if [ "$DRY_RUN" = false ]; then
         log_warn "users.username is still NOT NULL — migration 012 may not be applied"
         ALL_OK=false
     fi
+    # Migration 013
+    check_column "api_keys" "key_hash" "migration 013"
 
     # Check ENCRYPTION_KEY is set (required for new user encrypted_email)
     ENC_KEY=""

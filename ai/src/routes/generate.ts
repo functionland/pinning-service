@@ -23,7 +23,7 @@ import { startGeneration } from '../services/generationService.js';
 
 interface Env {
   Variables: {
-    userEmail: string;
+    userId: string;
     userToken: string;
     requestId: string;
     requestStartTime: number;
@@ -59,7 +59,7 @@ const generateRequestSchema = z.object({
 // ============================================
 
 generateRoutes.post('/generate', async (c) => {
-  const userEmail = c.get('userEmail');
+  const userId = c.get('userId');
 
   // Parse and validate request body
   let body: z.infer<typeof generateRequestSchema>;
@@ -77,7 +77,7 @@ generateRoutes.post('/generate', async (c) => {
   }
 
   // Rate limit check
-  const recentCount = await countRecentJobsByUser(userEmail, 1);
+  const recentCount = await countRecentJobsByUser(userId, 1);
   if (recentCount >= config.maxJobsPerUserPerHour) {
     return c.json(
       {
@@ -92,16 +92,16 @@ generateRoutes.post('/generate', async (c) => {
   const jobId = uuidv4();
 
   // Free tier check: skip credit deduction if user has unused free generations
-  const freeCompletedCount = await countFreeCompletedGenerations(userEmail);
+  const freeCompletedCount = await countFreeCompletedGenerations(userId);
   const isFreeGeneration = freeCompletedCount < config.freeGenerationsPerUser;
 
   if (isFreeGeneration) {
-    console.log(`[generate] Free generation for user ${userEmail} (${freeCompletedCount}/${config.freeGenerationsPerUser} used)`);
+    console.log(`[generate] Free generation for user ${userId.slice(0, 8)}... (${freeCompletedCount}/${config.freeGenerationsPerUser} used)`);
   }
 
   // Deduct credits atomically — skip for free generations
   if (!isFreeGeneration) {
-    const deduction = await deductCredits(userEmail, jobId, config.generationCostFula);
+    const deduction = await deductCredits(userId, jobId, config.generationCostFula);
     if (!deduction.success) {
       if (deduction.insufficientBalance) {
         return c.json(
@@ -131,7 +131,7 @@ generateRoutes.post('/generate', async (c) => {
   try {
     await createGeneration(
       jobId,
-      userEmail,
+      userId,
       body.prompt,
       body.assets,
       creditsCharged
@@ -144,10 +144,10 @@ generateRoutes.post('/generate', async (c) => {
     if (!isFreeGeneration) {
       console.error(`[generate] Job ${jobId} setup failed, refunding credits:`, error);
       try {
-        await refundCredits(userEmail, jobId, config.generationCostFula);
+        await refundCredits(userId, jobId, config.generationCostFula);
       } catch (refundError) {
         // Log loudly — this means credits are lost and need manual recovery
-        console.error(`[generate] CRITICAL: Refund failed for job ${jobId}, user ${userEmail}, amount ${config.generationCostFula}:`, refundError);
+        console.error(`[generate] CRITICAL: Refund failed for job ${jobId}, user ${userId.slice(0, 8)}..., amount ${config.generationCostFula}:`, refundError);
       }
     } else {
       console.error(`[generate] Job ${jobId} setup failed (free generation):`, error);
@@ -158,7 +158,7 @@ generateRoutes.post('/generate', async (c) => {
     );
   }
 
-  console.log(`[generate] Job ${jobId} accepted for user ${userEmail}`);
+  console.log(`[generate] Job ${jobId} accepted for user ${userId.slice(0, 8)}...`);
 
   return c.json({ jobId, status: 'accepted' }, 202);
 });
@@ -168,12 +168,12 @@ generateRoutes.post('/generate', async (c) => {
 // ============================================
 
 generateRoutes.get('/status/:id', async (c) => {
-  const userEmail = c.get('userEmail');
+  const userId = c.get('userId');
   const jobId = c.req.param('id');
 
   const job = await getGeneration(jobId);
 
-  if (!job || job.user_email !== userEmail) {
+  if (!job || (job.user_id !== userId && job.user_email !== userId)) {
     return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
   }
 
@@ -194,11 +194,11 @@ generateRoutes.get('/status/:id', async (c) => {
 // ============================================
 
 generateRoutes.get('/generations', async (c) => {
-  const userEmail = c.get('userEmail');
+  const userId = c.get('userId');
   const page = parseInt(c.req.query('page') || '1', 10);
   const limit = Math.min(parseInt(c.req.query('limit') || '20', 10), 100);
 
-  const { generations, total } = await getGenerationsByUser(userEmail, page, limit);
+  const { generations, total } = await getGenerationsByUser(userId, page, limit);
 
   return c.json({
     generations: generations.map((g) => ({

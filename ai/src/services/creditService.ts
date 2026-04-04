@@ -14,21 +14,16 @@ export interface CreditOperationResult {
   error?: string;
 }
 
-/** Truncate email for safe logging: "foo***" */
-function safeEmail(email: string): string {
-  return email.length > 3 ? `${email.slice(0, 3)}***` : '***';
-}
-
 /**
  * Core credit adjustment via pinning-webui /api/admin/adjust.
  *
- * @param userEmail - User email
- * @param jobId    - Job ID for logging/reference
- * @param amount   - Positive = add credits, negative = deduct credits
- * @param reason   - Reason string stored in credit history
+ * @param userId  - User ID (SHA-256 hash of email)
+ * @param jobId   - Job ID for logging/reference
+ * @param amount  - Positive = add credits, negative = deduct credits
+ * @param reason  - Reason string stored in credit history
  */
 async function adjustCredits(
-  userEmail: string,
+  userId: string,
   jobId: string,
   amount: number,
   reason: string,
@@ -43,7 +38,7 @@ async function adjustCredits(
         'Content-Type': 'application/json',
         'X-System-Key': config.pinningSystemKey,
       },
-      body: JSON.stringify({ email: userEmail, amount, reason }),
+      body: JSON.stringify({ userId, amount, reason }),
       signal: controller.signal,
     });
 
@@ -63,7 +58,7 @@ async function adjustCredits(
     if (amount < 0 && result.newBalance < 0) {
       // Balance went negative — reverse the deduction immediately
       console.warn(
-        `[credits] Insufficient balance for ${safeEmail(userEmail)} job ${jobId}, reversing deduction`,
+        `[credits] Insufficient balance for ${userId.slice(0, 8)}... job ${jobId}, reversing deduction`,
       );
       const reverseController = new AbortController();
       const reverseTimeout = setTimeout(() => reverseController.abort(), 10_000);
@@ -75,7 +70,7 @@ async function adjustCredits(
             'X-System-Key': config.pinningSystemKey,
           },
           body: JSON.stringify({
-            email: userEmail,
+            userId,
             amount: -amount,
             reason: `ai:reverse:${jobId}`,
           }),
@@ -83,7 +78,7 @@ async function adjustCredits(
         });
       } catch (reverseErr) {
         console.error(
-          `[credits] CRITICAL: Failed to reverse deduction for job ${jobId}, ${safeEmail(userEmail)}, amount ${amount}:`,
+          `[credits] CRITICAL: Failed to reverse deduction for job ${jobId}, ${userId.slice(0, 8)}..., amount ${amount}:`,
           reverseErr,
         );
       } finally {
@@ -94,7 +89,7 @@ async function adjustCredits(
 
     const action = amount < 0 ? 'Deducted' : 'Refunded';
     console.log(
-      `[credits] ${action} ${Math.abs(amount)} FULA for ${safeEmail(userEmail)} job ${jobId}, new balance: ${result.newBalance}`,
+      `[credits] ${action} ${Math.abs(amount)} FULA for ${userId.slice(0, 8)}... job ${jobId}, new balance: ${result.newBalance}`,
     );
 
     return { success: true, newBalance: result.newBalance };
@@ -118,20 +113,20 @@ async function adjustCredits(
  * Returns insufficientBalance: true if the user doesn't have enough.
  */
 export async function deductCredits(
-  userEmail: string,
+  userId: string,
   jobId: string,
   amount: number,
 ): Promise<CreditOperationResult> {
-  return adjustCredits(userEmail, jobId, -amount, `ai:generation:${jobId}`);
+  return adjustCredits(userId, jobId, -amount, `ai:generation:${jobId}`);
 }
 
 /**
  * Refund credits to user account (on generation failure).
  */
 export async function refundCredits(
-  userEmail: string,
+  userId: string,
   jobId: string,
   amount: number,
 ): Promise<CreditOperationResult> {
-  return adjustCredits(userEmail, jobId, amount, `ai:refund:${jobId}`);
+  return adjustCredits(userId, jobId, amount, `ai:refund:${jobId}`);
 }

@@ -3,7 +3,7 @@ import { useLanguage } from '../context/LanguageContext';
 import ReferralTree from '../components/ReferralTree';
 
 interface Referrer {
-  email: string;
+  userId: string;
   code: string;
   codeCreatedAt: string;
   totalReferred: number;
@@ -52,11 +52,16 @@ export default function AdminReferrals() {
     window.location.href = '/api/admin/referrals/export/csv';
   };
 
-  const handleSelectReferrer = (email: string) => {
-    if (selectedReferrer === email) {
+  const truncateHash = (hash: string): string => {
+    if (hash.length <= 16) return hash;
+    return `${hash.slice(0, 8)}...${hash.slice(-4)}`;
+  };
+
+  const handleSelectReferrer = (userId: string) => {
+    if (selectedReferrer === userId) {
       setSelectedReferrer(null);
     } else {
-      setSelectedReferrer(email);
+      setSelectedReferrer(userId);
     }
   };
 
@@ -134,13 +139,15 @@ export default function AdminReferrals() {
                   {referrers.items.map((referrer) => (
                     <>
                       <tr
-                        key={referrer.email}
+                        key={referrer.userId}
                         className={`hover:bg-gray-50 cursor-pointer ${
-                          selectedReferrer === referrer.email ? 'bg-primary-50' : ''
+                          selectedReferrer === referrer.userId ? 'bg-primary-50' : ''
                         }`}
-                        onClick={() => handleSelectReferrer(referrer.email)}
+                        onClick={() => handleSelectReferrer(referrer.userId)}
                       >
-                        <td className="px-4 py-3 text-sm text-gray-900">{referrer.email}</td>
+                        <td className="px-4 py-3 text-sm text-gray-900 font-mono" title={referrer.userId}>
+                          {truncateHash(referrer.userId)}
+                        </td>
                         <td className="px-4 py-3 font-mono text-sm text-gray-600">{referrer.code}</td>
                         <td className="px-4 py-3 text-sm text-right font-medium text-primary-600">
                           {referrer.totalReferred}
@@ -153,10 +160,10 @@ export default function AdminReferrals() {
                             className="text-primary-600 hover:text-primary-800 text-sm font-medium"
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleSelectReferrer(referrer.email);
+                              handleSelectReferrer(referrer.userId);
                             }}
                           >
-                            {selectedReferrer === referrer.email
+                            {selectedReferrer === referrer.userId
                               ? (t.adminReferrals?.hideDetails || 'Hide')
                               : (t.adminReferrals?.viewDetails || 'View Details')}
                           </button>
@@ -164,18 +171,18 @@ export default function AdminReferrals() {
                       </tr>
 
                       {/* Expanded Row - Referral Tree */}
-                      {selectedReferrer === referrer.email && (
+                      {selectedReferrer === referrer.userId && (
                         <tr>
                           <td colSpan={5} className="px-4 py-4 bg-gray-50">
                             <div className="space-y-3">
                               <h3 className="font-medium text-gray-900">
-                                {t.adminReferrals?.referredBy || 'Users referred by'} {referrer.email}
+                                {t.adminReferrals?.referredBy || 'Users referred by'} <span className="font-mono text-sm">{truncateHash(referrer.userId)}</span>
                                 <span className="text-sm font-normal text-gray-500 ml-2">
                                   ({t.referrals?.expandHint || 'Click arrow to expand referral chain'})
                                 </span>
                               </h3>
                               <ReferralTree
-                                email={referrer.email}
+                                userId={referrer.userId}
                                 level={1}
                                 maxLevel={3}
                                 isAdmin={true}

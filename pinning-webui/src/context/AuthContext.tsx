@@ -3,6 +3,7 @@ import { clearAllKeys } from '../services/secureStorage';
 
 interface User {
   id: string; // User ID for encryption key derivation (Google sub or Apple sub)
+  userId: string; // SHA-256 hash of email (zero-knowledge identifier)
   email: string;
   name: string;
   picture: string;

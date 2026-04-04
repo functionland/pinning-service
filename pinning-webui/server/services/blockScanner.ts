@@ -8,7 +8,7 @@
  */
 
 import { query, getClient } from '../database/postgres.js';
-import { hashWalletAddress, emailToUserId } from '../utils/hash.js';
+import { hashWalletAddress } from '../utils/hash.js';
 
 // Chain configuration
 export interface ChainConfig {
@@ -212,12 +212,12 @@ export async function processTransfer(chainId: number, transfer: TokenTransfer):
       // Auto-credit the user
       await creditUser(wallet.user_id, amountFula, transfer.hash, chainId);
 
-      // Update transaction with user_id (dual-write user_email for compat)
+      // Update transaction with user_id — no plain-text email
       await query(
         `UPDATE token_transactions
-         SET user_id = $1, user_email = $2, claimed_at = NOW()
-         WHERE tx_hash = $3 AND chain_id = $4`,
-        [wallet.user_id, wallet.user_id, transfer.hash, chainId]
+         SET user_id = $1, claimed_at = NOW()
+         WHERE tx_hash = $2 AND chain_id = $3`,
+        [wallet.user_id, transfer.hash, chainId]
       );
 
       console.log(`[blockScanner] Auto-credited ${amountFula} FULA to user ${wallet.user_id} from tx ${transfer.hash}`);
@@ -256,17 +256,17 @@ async function creditUser(userId: string, amount: number, txHash: string, chainI
     } else {
       newBalance = amount;
       await client.query(
-        `INSERT INTO user_credits (user_id, user_email, balance_fula, total_deposited_fula)
-         VALUES ($1, $2, $3, $4)`,
-        [userId, userId, amount, amount]
+        `INSERT INTO user_credits (user_id, balance_fula, total_deposited_fula)
+         VALUES ($1, $2, $3)`,
+        [userId, amount, amount]
       );
     }
 
-    // Log the deposit in credit history (dual-write user_id + user_email)
+    // Log the deposit in credit history — no plain-text email
     await client.query(
-      `INSERT INTO credit_history (user_id, user_email, tx_type, amount_fula, balance_after, reference_id)
-       VALUES ($1, $2, 'deposit', $3, $4, $5)`,
-      [userId, userId, amount, newBalance, `${chainId}:${txHash}`]
+      `INSERT INTO credit_history (user_id, tx_type, amount_fula, balance_after, reference_id)
+       VALUES ($1, 'deposit', $2, $3, $4)`,
+      [userId, amount, newBalance, `${chainId}:${txHash}`]
     );
 
     await client.query('COMMIT');

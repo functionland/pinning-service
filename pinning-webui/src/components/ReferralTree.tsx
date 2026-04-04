@@ -2,8 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useLanguage } from '../context/LanguageContext';
 
 interface ReferredUser {
-  email: string;
-  rawEmail?: string; // Actual email for API calls (non-admin only)
+  userId: string;
   joinedAt: string;
   referredAt?: string;
   totalCreditsPurchased: number;
@@ -21,41 +20,40 @@ interface ReferredResponse {
 }
 
 interface ReferralTreeProps {
-  email: string;
+  userId: string;
   level?: number;
   maxLevel?: number;
   isAdmin?: boolean;
-  maskEmail?: (email: string) => string;
+  highlightUserId?: string; // userId hash to highlight (from email search)
 }
 
-const defaultMaskEmail = (email: string): string => {
-  const [local, domain] = email.split('@');
-  if (!domain) return email;
-  const maskedLocal = local.length <= 2 ? local : local.slice(0, 2) + '****' + local.slice(-1);
-  return `${maskedLocal}@${domain}`;
+// Display a truncated userId hash: first 8 + ... + last 4
+const truncateHash = (hash: string): string => {
+  if (hash.length <= 16) return hash;
+  return `${hash.slice(0, 8)}...${hash.slice(-4)}`;
 };
 
 export default function ReferralTree({
-  email,
+  userId,
   level = 1,
   maxLevel = 3,
   isAdmin = false,
-  maskEmail = defaultMaskEmail,
+  highlightUserId,
 }: ReferralTreeProps) {
   const { t } = useLanguage();
   const [data, setData] = useState<ReferredResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  const [expandedEmails, setExpandedEmails] = useState<Set<string>>(new Set());
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
   const fetchReferrals = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
       const endpoint = isAdmin
-        ? `/api/admin/referrals/chain/${encodeURIComponent(email)}?page=${page}&limit=20`
-        : `/api/referral/chain/${encodeURIComponent(email)}?page=${page}&limit=20`;
+        ? `/api/admin/referrals/chain/${encodeURIComponent(userId)}?page=${page}&limit=20`
+        : `/api/referral/chain/${encodeURIComponent(userId)}?page=${page}&limit=20`;
 
       const res = await fetch(endpoint, { credentials: 'include' });
       if (!res.ok) {
@@ -71,19 +69,19 @@ export default function ReferralTree({
     } finally {
       setLoading(false);
     }
-  }, [email, page, isAdmin]);
+  }, [userId, page, isAdmin]);
 
   useEffect(() => {
     fetchReferrals();
   }, [fetchReferrals]);
 
-  const toggleExpand = (userEmail: string) => {
-    setExpandedEmails(prev => {
+  const toggleExpand = (id: string) => {
+    setExpandedIds(prev => {
       const next = new Set(prev);
-      if (next.has(userEmail)) {
-        next.delete(userEmail);
+      if (next.has(id)) {
+        next.delete(id);
       } else {
-        next.add(userEmail);
+        next.add(id);
       }
       return next;
     });
@@ -95,10 +93,6 @@ export default function ReferralTree({
       month: 'short',
       day: 'numeric',
     });
-  };
-
-  const displayEmail = (email: string) => {
-    return isAdmin ? email : maskEmail(email);
   };
 
   // Indentation based on level
@@ -137,7 +131,7 @@ export default function ReferralTree({
         <thead className={level === 1 ? 'bg-gray-50 border-b border-gray-100' : ''}>
           <tr className="text-xs text-gray-500">
             <th className="text-left px-3 py-2 w-8"></th>
-            <th className="text-left px-3 py-2">{t.referrals?.email || 'Email'}</th>
+            <th className="text-left px-3 py-2">{t.referrals?.userId || 'User ID'}</th>
             <th className="text-left px-3 py-2">{t.referrals?.joinedAt || 'Joined'}</th>
             <th className="text-center px-3 py-2">{t.referrals?.appDownloaded || 'App'}</th>
             <th className="text-right px-3 py-2">{t.referrals?.creditsPurchased || 'Credits'}</th>
@@ -145,18 +139,16 @@ export default function ReferralTree({
         </thead>
         <tbody className="divide-y divide-gray-100">
           {data.items.map((user, idx) => {
-            const emailKey = user.rawEmail || user.email;
             return (
               <ReferralRow
-                key={`${emailKey}-${idx}`}
+                key={`${user.userId}-${idx}`}
                 user={user}
                 level={level}
                 maxLevel={maxLevel}
                 isAdmin={isAdmin}
-                maskEmail={maskEmail}
-                isExpanded={expandedEmails.has(emailKey)}
-                onToggle={() => toggleExpand(emailKey)}
-                displayEmail={displayEmail}
+                highlightUserId={highlightUserId}
+                isExpanded={expandedIds.has(user.userId)}
+                onToggle={() => toggleExpand(user.userId)}
                 formatDate={formatDate}
                 t={t}
               />
@@ -198,10 +190,9 @@ interface ReferralRowProps {
   level: number;
   maxLevel: number;
   isAdmin: boolean;
-  maskEmail: (email: string) => string;
+  highlightUserId?: string;
   isExpanded: boolean;
   onToggle: () => void;
-  displayEmail: (email: string) => string;
   formatDate: (date: string) => string;
   t: ReturnType<typeof useLanguage>['t'];
 }
@@ -211,18 +202,18 @@ function ReferralRow({
   level,
   maxLevel,
   isAdmin,
-  maskEmail,
+  highlightUserId,
   isExpanded,
   onToggle,
-  displayEmail,
   formatDate,
   t,
 }: ReferralRowProps) {
   const canExpand = user.referralCount > 0 && level < maxLevel;
+  const isHighlighted = highlightUserId && user.userId === highlightUserId;
 
   return (
     <>
-      <tr className="hover:bg-gray-50/80">
+      <tr className={`hover:bg-gray-50/80 ${isHighlighted ? 'bg-yellow-50 ring-1 ring-yellow-200' : ''}`}>
         {/* Expand button */}
         <td className="px-3 py-2 w-8">
           {canExpand ? (
@@ -248,10 +239,10 @@ function ReferralRow({
           )}
         </td>
 
-        {/* Email */}
+        {/* User ID (truncated hash) */}
         <td className="px-3 py-2 text-sm text-gray-900">
           <div className="flex items-center gap-2">
-            <span className="font-mono">{displayEmail(user.email)}</span>
+            <span className="font-mono text-xs" title={user.userId}>{truncateHash(user.userId)}</span>
             {canExpand && (
               <span className="text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
                 {user.referralCount}
@@ -291,11 +282,11 @@ function ReferralRow({
           <td colSpan={5} className="p-0">
             <div className="border-l-2 border-primary-200 ml-4">
               <ReferralTree
-                email={user.rawEmail || user.email}
+                userId={user.userId}
                 level={level + 1}
                 maxLevel={maxLevel}
                 isAdmin={isAdmin}
-                maskEmail={maskEmail}
+                highlightUserId={highlightUserId}
               />
             </div>
           </td>

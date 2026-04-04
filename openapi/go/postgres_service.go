@@ -2,7 +2,9 @@ package openapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,13 @@ import (
 
 	_ "github.com/lib/pq"
 )
+
+// hashToken returns the SHA-256 hex digest of a session token.
+// Used to store and look up tokens without keeping the raw value.
+func hashToken(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
 
 // PostgresService provides database operations using PostgreSQL
 type PostgresService struct {
@@ -124,7 +133,9 @@ func (s *PostgresService) ensureIndexes() error {
 		`CREATE INDEX IF NOT EXISTS idx_pins_username_created ON pins(username, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_pins_cid ON pins(cid)`,
 		`CREATE INDEX IF NOT EXISTS idx_pins_session_token ON pins(session_token)`,
+		`CREATE INDEX IF NOT EXISTS idx_pins_token_hash ON pins(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(session_token)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions(username)`,
 	}
 	for _, ddl := range indexes {
@@ -171,14 +182,22 @@ func (s *PostgresService) AddPinWithSize(ctx context.Context, username string, p
 
 	createdAt := time.Now().UTC()
 
+	var th string
+	if sessionToken != "" {
+		th = hashToken(sessionToken)
+	}
+
+	uid := hashToken(username) // user_id = SHA-256(email)
+
+	// New entries: no plain-text username or session_token stored.
+	// Old entries retain their plain-text values for fallback during migration.
 	query := `
-		INSERT INTO pins (requestid, username, cid, name, name_lowercase, origins, meta, status, upload_status, size, session_token, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $10, $11)
+		INSERT INTO pins (requestid, cid, name, name_lowercase, origins, meta, status, upload_status, size, session_token, token_hash, user_id, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $9, $10, $11)
 	`
 
 	_, err = s.db.ExecContext(ctx, query,
 		requestId,
-		username,
 		pin.Cid,
 		pin.Name,
 		strings.ToLower(pin.Name),
@@ -186,7 +205,8 @@ func (s *PostgresService) AddPinWithSize(ctx context.Context, username string, p
 		string(metaJSON),
 		uploadStatus,
 		size,
-		sessionToken,
+		th,
+		uid,
 		createdAt,
 	)
 	if err != nil {
@@ -324,10 +344,11 @@ func (s *PostgresService) GetExistingPinByCID(ctx context.Context, username, cid
 		return nil, nil
 	}
 
+	uid := hashToken(username)
 	query := `
 		SELECT requestid, cid, name, origins, meta, status, delegates, info, created_at
 		FROM pins
-		WHERE username = $1 AND cid = $2 AND status != 'deleted'
+		WHERE (user_id = $1 OR username = $3) AND cid = $2 AND status != 'deleted'
 		ORDER BY created_at DESC
 		LIMIT 1
 	`
@@ -339,7 +360,7 @@ func (s *PostgresService) GetExistingPinByCID(ctx context.Context, username, cid
 		createdAt                   time.Time
 	)
 
-	err := s.db.QueryRowContext(ctx, query, username, cid).Scan(
+	err := s.db.QueryRowContext(ctx, query, uid, cid, username).Scan(
 		&reqID, &cidVal, &name, &originsJSON, &metaJSON,
 		&status, &delegatesJSON, &infoJSON, &createdAt,
 	)
@@ -440,10 +461,11 @@ func (s *PostgresService) GetPins(ctx context.Context, username string, cid []st
 		return nil, 0, errors.New("username cannot be empty")
 	}
 
-	// Build WHERE clause
-	whereClause := "username = $1 AND status != 'deleted'"
-	whereArgs := []interface{}{username}
-	argNum := 2
+	// Build WHERE clause — use user_id with fallback to username for old entries
+	uid := hashToken(username)
+	whereClause := "(user_id = $1 OR username = $2) AND status != 'deleted'"
+	whereArgs := []interface{}{uid, username}
+	argNum := 3
 
 	// CID filter
 	if len(cid) > 0 {
@@ -575,25 +597,47 @@ func (s *PostgresService) GetPins(ctx context.Context, username string, cid []st
 	return pins, totalCount, nil
 }
 
-// GetUserIDFromToken retrieves the username from a session token
+// GetUserIDFromToken retrieves the username or user_id from a session token
 func (s *PostgresService) GetUserIDFromToken(ctx context.Context, token string, tag string) (string, error) {
-	var username string
+	var username sql.NullString
+	var userId sql.NullString
+	th := hashToken(token)
+
+	// Primary: look up by token_hash
 	err := s.db.QueryRowContext(ctx,
-		"SELECT username FROM sessions WHERE session_token = $1",
-		token,
-	).Scan(&username)
+		"SELECT username, user_id FROM sessions WHERE token_hash = $1",
+		th,
+	).Scan(&username, &userId)
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", fmt.Errorf("GetUserIDFromToken: no session found for token in %s", tag)
+			// Fallback: try plain-text column for rows not yet backfilled
+			err2 := s.db.QueryRowContext(ctx,
+				"SELECT username, user_id FROM sessions WHERE session_token = $1",
+				token,
+			).Scan(&username, &userId)
+			if err2 != nil {
+				if errors.Is(err2, sql.ErrNoRows) {
+					return "", fmt.Errorf("GetUserIDFromToken: no session found for token in %s", tag)
+				}
+				return "", fmt.Errorf("GetUserIDFromToken: error querying database in %s: %v", tag, err2)
+			}
+		} else {
+			if ctx.Err() == context.Canceled {
+				return "", fmt.Errorf("GetUserIDFromToken: context canceled in %s: %v", tag, err)
+			}
+			return "", fmt.Errorf("GetUserIDFromToken: error querying database in %s: %v", tag, err)
 		}
-		if ctx.Err() == context.Canceled {
-			return "", fmt.Errorf("GetUserIDFromToken: context canceled in %s: %v", tag, err)
-		}
-		return "", fmt.Errorf("GetUserIDFromToken: error querying database in %s: %v", tag, err)
 	}
 
-	return username, nil
+	// Prefer username (email) for backward compat; fall back to user_id for new sessions
+	if username.Valid && username.String != "" {
+		return username.String, nil
+	}
+	if userId.Valid && userId.String != "" {
+		return userId.String, nil
+	}
+	return "", fmt.Errorf("GetUserIDFromToken: no identity found for token in %s", tag)
 }
 
 // ============================================================================
@@ -602,9 +646,10 @@ func (s *PostgresService) GetUserIDFromToken(ctx context.Context, token string, 
 
 // CreateUser creates a new user
 func (s *PostgresService) CreateUser(ctx context.Context, username, passwordHash string, poolId int) error {
+	uid := hashToken(username) // user_id = SHA-256(email)
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO users (username, password_hash, pool_id) VALUES ($1, $2, $3)",
-		username, passwordHash, poolId,
+		"INSERT INTO users (password_hash, pool_id, user_id) VALUES ($1, $2, $3)",
+		passwordHash, poolId, uid,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique constraint") {
@@ -618,9 +663,12 @@ func (s *PostgresService) CreateUser(ctx context.Context, username, passwordHash
 // GetUserPasswordHash retrieves the password hash for a user
 func (s *PostgresService) GetUserPasswordHash(ctx context.Context, username string) (string, error) {
 	var passwordHash string
+	uid := hashToken(username)
+	// user_id IN (hash, raw) covers both: raw email input (hash matches) and
+	// user_id input from ValidateSession (raw matches). username fallback for legacy rows.
 	err := s.db.QueryRowContext(ctx,
-		"SELECT password_hash FROM users WHERE username = $1",
-		username,
+		"SELECT password_hash FROM users WHERE user_id IN ($1, $2) OR username = $2",
+		uid, username,
 	).Scan(&passwordHash)
 
 	if err != nil {
@@ -636,9 +684,10 @@ func (s *PostgresService) GetUserPasswordHash(ctx context.Context, username stri
 // GetUserPoolID retrieves the pool ID for a user
 func (s *PostgresService) GetUserPoolID(ctx context.Context, username string) (int, error) {
 	var poolId int
+	uid := hashToken(username)
 	err := s.db.QueryRowContext(ctx,
-		"SELECT pool_id FROM users WHERE username = $1",
-		username,
+		"SELECT pool_id FROM users WHERE user_id IN ($1, $2) OR username = $2",
+		uid, username,
 	).Scan(&poolId)
 
 	if err != nil {
@@ -657,9 +706,13 @@ func (s *PostgresService) GetUserPoolID(ctx context.Context, username string) (i
 
 // CreateSession creates a new session for a user
 func (s *PostgresService) CreateSession(ctx context.Context, username, sessionToken string) error {
+	th := hashToken(sessionToken)
+	uid := hashToken(username) // user_id = SHA-256(email)
+	// New entries: store hash in both session_token (for UNIQUE constraint) and token_hash.
+	// No plain-text username or token stored for new entries.
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO sessions (username, session_token) VALUES ($1, $2)",
-		username, sessionToken,
+		"INSERT INTO sessions (session_token, token_hash, user_id) VALUES ($1, $1, $2)",
+		th, uid,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
@@ -669,16 +722,17 @@ func (s *PostgresService) CreateSession(ctx context.Context, username, sessionTo
 
 // CreateTestSession creates or replaces a test session with a fixed token
 func (s *PostgresService) CreateTestSession(ctx context.Context, username, sessionToken string) error {
+	th := hashToken(sessionToken)
 	// First, delete any existing session with this token
 	_, _ = s.db.ExecContext(ctx,
-		"DELETE FROM sessions WHERE session_token = $1",
-		sessionToken,
+		"DELETE FROM sessions WHERE token_hash = $1 OR session_token = $2",
+		th, sessionToken,
 	)
 
-	// Create the test session
+	// Test sessions keep plain-text for test tooling compatibility
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO sessions (username, session_token) VALUES ($1, $2)",
-		username, sessionToken,
+		"INSERT INTO sessions (username, session_token, token_hash) VALUES ($1, $2, $3)",
+		username, sessionToken, th,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create test session: %w", err)
@@ -686,29 +740,54 @@ func (s *PostgresService) CreateTestSession(ctx context.Context, username, sessi
 	return nil
 }
 
-// ValidateSession validates a session token and returns the username
+// ValidateSession validates a session token and returns the username or user_id
 func (s *PostgresService) ValidateSession(ctx context.Context, sessionToken string) (string, error) {
-	var username string
+	var username sql.NullString
+	var userId sql.NullString
+	th := hashToken(sessionToken)
+
+	// Primary: look up by token_hash
 	err := s.db.QueryRowContext(ctx,
-		"SELECT username FROM sessions WHERE session_token = $1 AND (expires_at IS NULL OR expires_at > NOW())",
-		sessionToken,
-	).Scan(&username)
+		"SELECT username, user_id FROM sessions WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > NOW())",
+		th,
+	).Scan(&username, &userId)
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", errors.New("invalid or expired session token")
+			// Fallback: try plain-text column for rows not yet backfilled
+			err2 := s.db.QueryRowContext(ctx,
+				"SELECT username, user_id FROM sessions WHERE session_token = $1 AND (expires_at IS NULL OR expires_at > NOW())",
+				sessionToken,
+			).Scan(&username, &userId)
+			if err2 != nil {
+				if errors.Is(err2, sql.ErrNoRows) {
+					return "", errors.New("invalid or expired session token")
+				}
+				return "", fmt.Errorf("failed to validate session: %w", err2)
+			}
+		} else {
+			return "", fmt.Errorf("failed to validate session: %w", err)
 		}
-		return "", fmt.Errorf("failed to validate session: %w", err)
 	}
 
-	return username, nil
+	// Prefer username (email) for backward compat with old sessions;
+	// fall back to user_id for new sessions that don't store plain-text username
+	if username.Valid && username.String != "" {
+		return username.String, nil
+	}
+	if userId.Valid && userId.String != "" {
+		return userId.String, nil
+	}
+	return "", errors.New("invalid session: no identity found")
 }
 
 // DeleteSession deletes a session
 func (s *PostgresService) DeleteSession(ctx context.Context, sessionToken string) error {
+	th := hashToken(sessionToken)
+	// Delete by token_hash (primary) or session_token (fallback)
 	result, err := s.db.ExecContext(ctx,
-		"DELETE FROM sessions WHERE session_token = $1",
-		sessionToken,
+		"DELETE FROM sessions WHERE token_hash = $1 OR session_token = $2",
+		th, sessionToken,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to delete session: %w", err)
@@ -749,9 +828,10 @@ func (s *PostgresService) GetUserPoolFromSession(ctx context.Context, authToken 
 
 // RecordLogin records a login attempt
 func (s *PostgresService) RecordLogin(ctx context.Context, username, status, ipAddress, userAgent string) error {
+	uid := hashToken(username)
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO logins (username, status, ip_address, user_agent) VALUES ($1, $2, $3, $4)",
-		username, status, ipAddress, userAgent,
+		"INSERT INTO logins (status, ip_address, user_agent, user_id) VALUES ($1, $2, $3, $4)",
+		status, ipAddress, userAgent, uid,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to record login: %w", err)
@@ -762,9 +842,10 @@ func (s *PostgresService) RecordLogin(ctx context.Context, username, status, ipA
 // GetRecentFailedLogins gets count of recent failed logins for rate limiting
 func (s *PostgresService) GetRecentFailedLogins(ctx context.Context, username string, since time.Time) (int, error) {
 	var count int
+	uid := hashToken(username)
 	err := s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM logins WHERE username = $1 AND status = 'failed' AND created_at > $2",
-		username, since,
+		"SELECT COUNT(*) FROM logins WHERE (user_id = $1 OR username = $2) AND status = 'failed' AND created_at > $3",
+		uid, username, since,
 	).Scan(&count)
 
 	if err != nil {
@@ -1080,14 +1161,15 @@ func (s *PostgresService) GetStorageBySessionToken(ctx context.Context, sessionT
 		return StorageUsage{}, errors.New("sessionToken cannot be empty")
 	}
 
+	th := hashToken(sessionToken)
 	query := `
 		SELECT COALESCE(SUM(size), 0) as total_size, COUNT(*) as pin_count
 		FROM pins
-		WHERE session_token = $1 AND status != 'deleted'
+		WHERE (token_hash = $1 OR session_token = $2) AND status != 'deleted'
 	`
 
 	var usage StorageUsage
-	err := s.db.QueryRowContext(ctx, query, sessionToken).Scan(&usage.TotalSize, &usage.PinCount)
+	err := s.db.QueryRowContext(ctx, query, th, sessionToken).Scan(&usage.TotalSize, &usage.PinCount)
 	if err != nil {
 		return StorageUsage{}, fmt.Errorf("failed to get storage by session token: %w", err)
 	}
@@ -1102,14 +1184,15 @@ func (s *PostgresService) GetStorageByUser(ctx context.Context, username string)
 		return StorageUsage{}, errors.New("username cannot be empty")
 	}
 
+	uid := hashToken(username)
 	query := `
 		SELECT COALESCE(SUM(size), 0) as total_size, COUNT(*) as pin_count
 		FROM pins
-		WHERE username = $1 AND status != 'deleted'
+		WHERE (user_id = $1 OR username = $2) AND status != 'deleted'
 	`
 
 	var usage StorageUsage
-	err := s.db.QueryRowContext(ctx, query, username).Scan(&usage.TotalSize, &usage.PinCount)
+	err := s.db.QueryRowContext(ctx, query, uid, username).Scan(&usage.TotalSize, &usage.PinCount)
 	if err != nil {
 		return StorageUsage{}, fmt.Errorf("failed to get storage by user: %w", err)
 	}
@@ -1124,15 +1207,16 @@ func (s *PostgresService) GetStorageByUserSessions(ctx context.Context, username
 		return nil, errors.New("username cannot be empty")
 	}
 
+	uid := hashToken(username)
 	query := `
-		SELECT session_token, COALESCE(SUM(size), 0) as total_size, COUNT(*) as pin_count
+		SELECT COALESCE(token_hash, session_token), COALESCE(SUM(size), 0) as total_size, COUNT(*) as pin_count
 		FROM pins
-		WHERE username = $1 AND status != 'deleted' AND session_token != ''
-		GROUP BY session_token
+		WHERE (user_id = $1 OR username = $2) AND status != 'deleted' AND session_token != ''
+		GROUP BY COALESCE(token_hash, session_token)
 		ORDER BY total_size DESC
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, username)
+	rows, err := s.db.QueryContext(ctx, query, uid, username)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get storage by user sessions: %w", err)
 	}
@@ -1242,11 +1326,12 @@ func (s *PostgresService) GetCreditStatus(ctx context.Context, username string) 
 	var isSuspended int
 	freeTierBytes := DefaultFreeTierBytes
 
+	uid := hashToken(username)
 	err = s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(balance_fula, 0), COALESCE(is_suspended, 0)
 		FROM user_credits
-		WHERE user_email = $1
-	`, username).Scan(&balanceFula, &isSuspended)
+		WHERE user_id = $1 OR user_email = $2
+	`, uid, username).Scan(&balanceFula, &isSuspended)
 
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return CreditStatus{
@@ -1303,12 +1388,13 @@ func (s *PostgresService) GetUserCredits(ctx context.Context, username string) (
 	var isSuspended int
 	var lastDeductionAt, suspendedAt, createdAt, updatedAt sql.NullTime
 
+	uid2 := hashToken(username)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT balance_fula, total_deposited_fula, total_deducted_fula,
 		       is_suspended, last_deduction_at, suspended_at, created_at, updated_at
 		FROM user_credits
-		WHERE user_email = $1
-	`, username).Scan(&balanceFula, &totalDeposited, &totalDeducted,
+		WHERE user_id = $1 OR user_email = $2
+	`, uid2, username).Scan(&balanceFula, &totalDeposited, &totalDeducted,
 		&isSuspended, &lastDeductionAt, &suspendedAt, &createdAt, &updatedAt)
 
 	if err != nil {

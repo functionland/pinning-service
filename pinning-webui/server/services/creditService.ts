@@ -169,17 +169,17 @@ export async function creditUser(
     } else {
       newBalance = amount;
       await client.query(
-        `INSERT INTO user_credits (user_id, user_email, balance_fula, total_deposited_fula)
-         VALUES ($1, $2, $3, $4)`,
-        [userId, userId, amount, txType === 'deposit' ? amount : 0]
+        `INSERT INTO user_credits (user_id, balance_fula, total_deposited_fula)
+         VALUES ($1, $2, $3)`,
+        [userId, amount, txType === 'deposit' ? amount : 0]
       );
     }
 
-    // Log in credit history
+    // Log in credit history — no plain-text email
     await client.query(
-      `INSERT INTO credit_history (user_id, user_email, tx_type, amount_fula, balance_after, reference_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [userId, userId, txType, amount, newBalance, referenceId]
+      `INSERT INTO credit_history (user_id, tx_type, amount_fula, balance_after, reference_id)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [userId, txType, amount, newBalance, referenceId]
     );
 
     await client.query('COMMIT');
@@ -248,11 +248,11 @@ export async function linkWallet(
 ): Promise<void> {
   const addressHash = hashWalletAddress(walletAddress);
   await query(
-    `INSERT INTO user_wallets (user_id, user_email, wallet_address, wallet_address_hash, encrypted_wallet_address, chain_id, is_verified, connected_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+    `INSERT INTO user_wallets (user_id, wallet_address, wallet_address_hash, encrypted_wallet_address, chain_id, is_verified, connected_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
      ON CONFLICT (user_id, wallet_address_hash, chain_id) DO UPDATE
-     SET is_verified = $7, connected_at = NOW(), encrypted_wallet_address = COALESCE($5, user_wallets.encrypted_wallet_address)`,
-    [userId, userId, walletAddress.toLowerCase(), addressHash, encryptedAddress || null, chainId, isVerified ? 1 : 0]
+     SET is_verified = $6, connected_at = NOW(), encrypted_wallet_address = COALESCE($4, user_wallets.encrypted_wallet_address)`,
+    [userId, walletAddress.toLowerCase(), addressHash, encryptedAddress || null, chainId, isVerified ? 1 : 0]
   );
 }
 

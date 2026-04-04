@@ -6,6 +6,7 @@
  */
 
 const pg = require('pg');
+const crypto = require('crypto');
 const { Pool } = pg;
 
 // Pool instance
@@ -69,9 +70,16 @@ function isPostgresConfigured() {
   return !!process.env.POSTGRES_HOST;
 }
 
-// Session validation (read-only)
+// Session validation (read-only) — look up by token_hash, fall back to legacy session_token
 async function validateSession(sessionToken) {
-  const result = await query(
+  const tokenHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
+  let result = await query(
+    'SELECT username FROM sessions WHERE token_hash = $1',
+    [tokenHash]
+  );
+  if (result.rows[0]) return result.rows[0];
+  // Fallback for old entries that only have plain-text session_token
+  result = await query(
     'SELECT username FROM sessions WHERE session_token = $1',
     [sessionToken]
   );

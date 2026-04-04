@@ -240,6 +240,7 @@ export interface Translations {
     creating?: string;
     save?: string;
     saving?: string;
+    clear?: string;
   };
   referrals?: {
     title: string;
@@ -292,6 +293,9 @@ export interface Translations {
     labelHint?: string;
     editingCode?: string;
     inheritedFrom?: string;
+    userId?: string;
+    searchPlaceholder?: string;
+    search?: string;
   };
   admin?: {
     title: string;

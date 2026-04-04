@@ -9,6 +9,11 @@ import pg, { QueryResultRow } from 'pg';
 import crypto from 'crypto';
 const { Pool } = pg;
 
+/** SHA-256 hex digest of a session/API-key token for storage without plain text. */
+function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 // Pool instance
 let pool: pg.Pool | null = null;
 
@@ -172,36 +177,39 @@ export async function getOrCreateWebuiUser(
     }
   }
 
-  // Insert new user with company pre-filled from referral link name
+  // Insert new user — no plain-text email; store encrypted_email for OAuth recovery
+  const encryptedEmail = encryptApiKey(email); // reuses AES-256-GCM encryption
   await query(
-    'INSERT INTO webui_users (user_id, email, name, picture, last_login_at, company) VALUES ($1, $2, $3, $4, NOW(), $5)',
-    [userId, email, name, picture, inheritedName]
+    'INSERT INTO webui_users (user_id, encrypted_email, name, picture, last_login_at, company) VALUES ($1, $2, $3, $4, NOW(), $5)',
+    [userId, encryptedEmail, name, picture, inheritedName]
   );
 
-  // Create first API key automatically
+  // Create first API key automatically — no plain-text email in user_email
   const keyId = generateJwtApiKey(userId, jwtSecret);
   const encryptedKey = encryptApiKey(keyId);
   await query(
-    'INSERT INTO api_keys (key_id, user_id, user_email, encrypted_key) VALUES ($1, $2, $3, $4)',
-    [keyId, userId, email, encryptedKey]
+    'INSERT INTO api_keys (key_id, user_id, encrypted_key) VALUES ($1, $2, $3)',
+    [keyId, userId, encryptedKey]
   );
 
   // Also create entry in main users/sessions tables for pinning service compatibility
-  const existingMainUser = await query('SELECT * FROM users WHERE username = $1', [email]);
+  const existingMainUser = await query('SELECT * FROM users WHERE user_id = $1', [userId]);
   if (!existingMainUser.rows[0]) {
     const { v4: uuidv4 } = await import('uuid');
     await query(
-      'INSERT INTO users (username, password_hash, pool_id) VALUES ($1, $2, 1)',
-      [email, 'google-oauth-user-' + uuidv4()]
+      'INSERT INTO users (user_id, password_hash, pool_id) VALUES ($1, $2, 1)',
+      [userId, 'google-oauth-user-' + uuidv4()]
     );
   }
 
-  // Create session token that matches the API key
+  // Create session: store hash in both session_token (for UNIQUE constraint) and token_hash.
+  // No plain-text token or username stored for new entries.
+  const tokenHash = hashToken(keyId);
   await query(
-    `INSERT INTO sessions (session_token, user_id, username, created_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (session_token) DO UPDATE SET user_id = $2, username = $3, created_at = NOW()`,
-    [keyId, userId, email]
+    `INSERT INTO sessions (session_token, token_hash, user_id, created_at)
+     VALUES ($1, $1, $2, NOW())
+     ON CONFLICT (session_token) DO UPDATE SET token_hash = $1, user_id = $2, created_at = NOW()`,
+    [tokenHash, userId]
   );
 
   // Generate referral code for this new user
@@ -221,23 +229,23 @@ export async function getOrCreateWebuiUser(
     codeExists = await query('SELECT 1 FROM referral_codes WHERE code = $1', [newReferralCode]);
   }
 
-  // Insert with is_default and inherited_name
+  // Insert with is_default and inherited_name (write userId to user_email — no plain-text email)
   await query(
     'INSERT INTO referral_codes (user_id, user_email, code, is_default, inherited_name) VALUES ($1, $2, $3, TRUE, $4)',
-    [userId, email, newReferralCode, inheritedName]
+    [userId, userId, newReferralCode, inheritedName]
   );
 
   // If referred by someone, create referral record
   if (referralCode) {
-    const referrer = await query<{ user_email: string }>(
-      'SELECT user_email FROM referral_codes WHERE code = $1',
+    const referrer = await query<{ user_id: string }>(
+      'SELECT user_id FROM referral_codes WHERE code = $1',
       [referralCode]
     );
     // Prevent self-referral and only link if referrer exists
-    if (referrer.rows[0] && referrer.rows[0].user_email !== email) {
+    if (referrer.rows[0] && referrer.rows[0].user_id !== userId) {
       await query(
-        'INSERT INTO referrals (referrer_email, referred_email, referral_code) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [referrer.rows[0].user_email, email, referralCode]
+        'INSERT INTO referrals (referrer_email, referred_email, referrer_id, referred_id, referral_code) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING',
+        [referrer.rows[0].user_id, userId, referrer.rows[0].user_id, userId, referralCode]
       );
     }
   }
@@ -289,12 +297,13 @@ export async function createApiKey(
     [keyId, userId, userId, encryptedKey]
   );
 
-  // Also create corresponding session for pinning service
+  // Also create corresponding session for pinning service (hash only, no plain-text token)
+  const apiTokenHash = hashToken(keyId);
   await query(
-    `INSERT INTO sessions (session_token, user_id, username, created_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (session_token) DO UPDATE SET user_id = $2, username = $3, created_at = NOW()`,
-    [keyId, userId, userId]
+    `INSERT INTO sessions (session_token, token_hash, user_id, username, created_at)
+     VALUES ($1, $1, $2, $3, NOW())
+     ON CONFLICT (session_token) DO UPDATE SET token_hash = $1, user_id = $2, username = $3, created_at = NOW()`,
+    [apiTokenHash, userId, userId]
   );
 
   return keyId;
@@ -307,8 +316,9 @@ export async function deleteApiKey(userId: string, keyId: string): Promise<boole
     [userId, keyId]
   );
 
-  // Remove from sessions table
-  await query('DELETE FROM sessions WHERE session_token = $1 AND user_id = $2', [keyId, userId]);
+  // Remove from sessions table (match by token_hash or legacy session_token)
+  const delHash = hashToken(keyId);
+  await query('DELETE FROM sessions WHERE (token_hash = $1 OR session_token = $2) AND user_id = $3', [delHash, keyId, userId]);
 
   return (result.rowCount || 0) > 0;
 }

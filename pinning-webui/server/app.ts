@@ -2074,21 +2074,21 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         });
       }
 
-      // Insert or update transaction
+      // Insert or update transaction — no plain-text email
       if (existing) {
         // Transaction exists but unclaimed - claim it
         await query(
           `UPDATE token_transactions
-           SET user_email = $1, user_id = $2, claimed_at = NOW(), ingestion_source = 'manual'
-           WHERE tx_hash = $3 AND chain_id = $4`,
-          [userEmail, userId, txHash.toLowerCase(), chainId]
+           SET user_id = $1, claimed_at = NOW(), ingestion_source = 'manual'
+           WHERE tx_hash = $2 AND chain_id = $3`,
+          [userId, txHash.toLowerCase(), chainId]
         );
       } else {
         // Insert new transaction
         await query(
           `INSERT INTO token_transactions
-             (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_email, user_id, claimed_at, ingestion_source)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), 'manual')`,
+             (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, user_id, claimed_at, ingestion_source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), 'manual')`,
           [
             txHash.toLowerCase(),
             chainId,
@@ -2098,7 +2098,6 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
             amountFula,
             parseInt(receipt.blockNumber, 16),
             Math.floor(Date.now() / 1000),
-            userEmail,
             userId
           ]
         );
@@ -2253,7 +2252,6 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.get('/api/referral', requireAuth, async (req: Request, res: Response) => {
     try {
       const userId = req.session.user!.userId;
-      const email = req.session.user!.email;
 
       // Get all referral codes for user
       let codes = await getUserReferralCodes(userId);
@@ -2272,7 +2270,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         }
         await query(
           'INSERT INTO referral_codes (user_email, user_id, code, is_default) VALUES ($1, $2, $3, TRUE)',
-          [email, userId, code]
+          [userId, userId, code]
         );
         codes = [{
           code,
@@ -2420,14 +2418,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const offset = (page - 1) * limit;
 
       const referredResult = await query<{
-        referred_email: string;
+        referred_id: string;
         joined_at: string;
         total_credits_purchased: number;
         app_downloaded: number;
         app_downloaded_at: string | null;
       }>(`
         SELECT
-          r.referred_email,
+          r.referred_id,
           wu.created_at as joined_at,
           COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased,
           COALESCE(wu.app_downloaded, 0) as app_downloaded,
@@ -2446,7 +2444,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       res.json({
         items: referred.map(r => ({
-          email: maskEmail(r.referred_email),
+          userId: r.referred_id,
           joinedAt: r.joined_at,
           totalCreditsPurchased: r.total_credits_purchased,
           appDownloaded: r.app_downloaded === 1,
@@ -2484,11 +2482,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
   // Get referrals for a specific user (for multi-level lazy loading)
   // User can only view their own referral chain
+  // :email param accepts either an email (hashed to userId) or a userId hash directly
   app.get('/api/referral/chain/:email', requireAuth, async (req: Request, res: Response) => {
     try {
       const currentUserId = req.session.user!.userId;
-      const targetEmail = decodeURIComponent(req.params.email);
-      const targetUserId = emailToUserId(targetEmail);
+      const param = decodeURIComponent(req.params.email);
+      // If param looks like a 64-char hex hash, use directly; otherwise hash it
+      const targetUserId = /^[a-f0-9]{64}$/.test(param) ? param : emailToUserId(param);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
@@ -2514,7 +2514,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
 
       const referredResult = await query<{
-        referred_email: string;
+        referred_id: string;
         joined_at: string;
         total_credits_purchased: number;
         app_downloaded: number;
@@ -2522,7 +2522,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         referral_count: string;
       }>(`
         SELECT
-          r.referred_email,
+          r.referred_id,
           wu.created_at as joined_at,
           COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased,
           COALESCE(wu.app_downloaded, 0) as app_downloaded,
@@ -2542,8 +2542,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       res.json({
         items: referred.map(r => ({
-          email: maskEmail(r.referred_email),
-          rawEmail: r.referred_email, // Needed for further chain lookups
+          userId: r.referred_id,
           joinedAt: r.joined_at,
           totalCreditsPurchased: r.total_credits_purchased,
           appDownloaded: r.app_downloaded === 1,
@@ -2596,14 +2595,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     next();
   }
 
-  // Admin audit logging helper
+  // Admin audit logging helper — no plain-text email stored
   async function logAdminAction(actor: string, action: string, targetEmail?: string, details?: Record<string, unknown>) {
     try {
       const actorId = actor.includes('@') ? emailToUserId(actor) : actor;
       const targetId = targetEmail ? (targetEmail.includes('@') ? emailToUserId(targetEmail) : targetEmail) : null;
       await query(
-        `INSERT INTO admin_audit_log (actor, action, target_email, details, actor_id, target_id) VALUES ($1, $2, $3, $4, $5, $6)`,
-        [actor, action, targetEmail || null, details ? JSON.stringify(details) : null, actorId, targetId]
+        `INSERT INTO admin_audit_log (action, details, actor_id, target_id) VALUES ($1, $2, $3, $4)`,
+        [action, details ? JSON.stringify(details) : null, actorId, targetId]
       );
     } catch (err) {
       console.error('[audit] Failed to log admin action:', err);
@@ -2630,15 +2629,16 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Email is required' });
       }
 
-      const success = await unsuspendUser(email);
+      const targetUserId = emailToUserId(email);
+      const success = await unsuspendUser(targetUserId);
 
       if (!success) {
         return res.status(404).json({ error: 'User not found or not suspended' });
       }
 
-      const adminEmail = req.session.user!.email;
-      console.log(`[webui] Admin ${maskEmail(adminEmail)} unsuspended ${maskEmail(email)}`);
-      await logAdminAction(adminEmail, 'unsuspend', email);
+      const adminUserId = req.session.user!.userId;
+      console.log(`[webui] Admin ${adminUserId.slice(0, 8)} unsuspended ${targetUserId.slice(0, 8)}`);
+      await logAdminAction(adminUserId, 'unsuspend', email);
 
       res.json({ success: true });
     } catch (error) {
@@ -2757,23 +2757,23 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
     try {
       // 1. Check if user exists in webui_users
-      let user = await dbOps.getUserByEmail(email);
+      let user = await getWebuiUserById(userId);
 
       if (!user) {
-        // 2. Create user in webui_users (simplified version - no OAuth data)
+        // 2. Create user in webui_users — no plain-text email
         await query(
-          `INSERT INTO webui_users (email, user_id, name, picture) VALUES ($1, $2, $3, $4)`,
-          [email, userId, email.split('@')[0], null]
+          `INSERT INTO webui_users (user_id, name, picture) VALUES ($1, $2, $3)`,
+          [userId, email.split('@')[0], null]
         );
 
         // Also create in main users table for pinning service compatibility
         await query(
-          `INSERT INTO users (username, user_id, password_hash, pool_id) VALUES ($1, $2, $3, 1)
-           ON CONFLICT (username) DO NOTHING`,
-          [email, userId, 'x402-wallet-user-' + uuidv4()]
+          `INSERT INTO users (user_id, password_hash, pool_id) VALUES ($1, $2, 1)
+           ON CONFLICT (user_id) DO NOTHING`,
+          [userId, 'x402-wallet-user-' + uuidv4()]
         );
 
-        console.log(`[webui] Created x402 wallet user: ${maskEmail(email)}`);
+        console.log(`[webui] Created x402 wallet user: ${userId.slice(0, 8)}...`);
       }
 
       // 3. Check if user has an API key
@@ -2819,14 +2819,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       // Get referrers with stats
       const referrersResult = await query<{
-        email: string;
+        user_id: string;
         code: string;
         codecreatedat: string;
         totalreferred: string;
         totalcreditsfromreferrals: string;
       }>(`
         SELECT
-          rc.user_email as email,
+          rc.user_id,
           rc.code,
           rc.created_at as codeCreatedAt,
           COUNT(r.id)::text as totalReferred,
@@ -2834,13 +2834,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         FROM referral_codes rc
         LEFT JOIN referrals r ON rc.user_id = r.referrer_id
         LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
-        GROUP BY rc.user_email, rc.code, rc.created_at
+        GROUP BY rc.user_id, rc.code, rc.created_at
         ${includeZero ? '' : 'HAVING COUNT(r.id) > 0'}
         ORDER BY COUNT(r.id) DESC, rc.created_at DESC
         LIMIT $1 OFFSET $2
       `, [limit, offset]);
       const referrers = referrersResult.rows.map(r => ({
-        email: r.email,
+        userId: r.user_id,
         code: r.code,
         codeCreatedAt: r.codecreatedat,
         totalReferred: parseInt(r.totalreferred, 10),
@@ -2876,17 +2876,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   app.get('/api/admin/referrals/export/csv', requireAdmin, async (_req: Request, res: Response) => {
     try {
       const dataResult = await query<{
-        referrer_email: string;
+        referrer_id: string;
         referral_code: string;
-        referred_email: string | null;
+        referred_id: string | null;
         referred_user_joined_at: string | null;
         referred_at: string | null;
         credits_purchased: number;
       }>(`
         SELECT
-          rc.user_email as referrer_email,
+          rc.user_id as referrer_id,
           rc.code as referral_code,
-          r.referred_email,
+          r.referred_id,
           wu.created_at as referred_user_joined_at,
           r.referred_at,
           COALESCE(uc.total_deposited_fula, 0) as credits_purchased
@@ -2894,20 +2894,20 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         LEFT JOIN referrals r ON rc.user_id = r.referrer_id
         LEFT JOIN webui_users wu ON r.referred_id = wu.user_id
         LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
-        ORDER BY rc.user_email, r.referred_at
+        ORDER BY rc.user_id, r.referred_at
         LIMIT 100000
       `);
       const data = dataResult.rows;
 
       // Generate CSV
-      const headers = ['Referrer Email', 'Referral Code', 'Referred Email', 'Referred User Joined At', 'Referred At', 'Credits Purchased'];
+      const headers = ['Referrer User ID', 'Referral Code', 'Referred User ID', 'Referred User Joined At', 'Referred At', 'Credits Purchased'];
       const csvRows = [headers.join(',')];
 
       for (const row of data) {
         csvRows.push([
-          row.referrer_email,
+          row.referrer_id,
           row.referral_code,
-          row.referred_email || '',
+          row.referred_id || '',
           row.referred_user_joined_at || '',
           row.referred_at || '',
           row.credits_purchased || 0,
@@ -2925,16 +2925,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
   // Get referral chain for a specific user (admin only, for multi-level viewing)
   // MUST be before the :email route to avoid matching "chain" as an email
+  // :email param accepts either an email (hashed to userId) or a userId hash directly
   app.get('/api/admin/referrals/chain/:email', requireAdmin, async (req: Request, res: Response) => {
     try {
-      const targetEmail = decodeURIComponent(req.params.email);
-      const targetUserId = emailToUserId(targetEmail);
+      const param = decodeURIComponent(req.params.email);
+      const targetUserId = /^[a-f0-9]{64}$/.test(param) ? param : emailToUserId(param);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
 
       const referredResult = await query<{
-        referred_email: string;
+        referred_id: string;
         joined_at: string;
         referred_at: string;
         total_credits_purchased: number;
@@ -2943,7 +2944,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         referral_count: string;
       }>(`
         SELECT
-          r.referred_email,
+          r.referred_id,
           wu.created_at as joined_at,
           r.referred_at,
           COALESCE(uc.total_deposited_fula, 0) as total_credits_purchased,
@@ -2964,7 +2965,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       res.json({
         items: referred.map(r => ({
-          email: r.referred_email,
+          userId: r.referred_id,
           joinedAt: r.joined_at,
           referredAt: r.referred_at,
           totalCreditsPurchased: r.total_credits_purchased,
@@ -2984,16 +2985,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   });
 
   // Get referred users for a specific referrer (admin only, paginated)
+  // :email param accepts either an email (hashed to userId) or a userId hash directly
   app.get('/api/admin/referrals/:email', requireAdmin, async (req: Request, res: Response) => {
     try {
-      const referrerEmail = decodeURIComponent(req.params.email);
-      const referrerUserId = emailToUserId(referrerEmail);
+      const param = decodeURIComponent(req.params.email);
+      const referrerUserId = /^[a-f0-9]{64}$/.test(param) ? param : emailToUserId(param);
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
 
       const referredResult = await query<{
-        email: string;
+        referred_id: string;
         joinedat: string;
         referredat: string;
         totalcreditspurchased: number;
@@ -3001,7 +3003,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         appdownloadedat: string | null;
       }>(`
         SELECT
-          r.referred_email as email,
+          r.referred_id,
           wu.created_at as joinedAt,
           r.referred_at as referredAt,
           COALESCE(uc.total_deposited_fula, 0) as totalCreditsPurchased,
@@ -3024,10 +3026,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const referrerInfo = referrerInfoResult.rows[0];
 
       res.json({
-        referrer: referrerEmail,
+        referrerUserId,
         referrerCode: referrerInfo?.code || null,
         items: referred.map(r => ({
-          email: r.email,
+          userId: r.referred_id,
           joinedAt: r.joinedat,
           referredAt: r.referredat,
           totalCreditsPurchased: r.totalcreditspurchased,

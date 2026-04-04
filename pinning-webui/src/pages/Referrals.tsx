@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import ReferralTree from '../components/ReferralTree';
@@ -63,6 +63,27 @@ export default function Referrals() {
     return `${window.location.origin}/login?ref=${code}&redirect=/download`;
   };
 
+  // Email-to-hash search for finding referrals
+  const [searchEmail, setSearchEmail] = useState('');
+  const [highlightUserId, setHighlightUserId] = useState<string | undefined>(undefined);
+
+  const emailToHash = useCallback(async (email: string): Promise<string> => {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(email.trim().toLowerCase());
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  }, []);
+
+  const handleSearch = useCallback(async () => {
+    if (!searchEmail.trim()) {
+      setHighlightUserId(undefined);
+      return;
+    }
+    const hash = await emailToHash(searchEmail);
+    setHighlightUserId(hash);
+  }, [searchEmail, emailToHash]);
+
   const copyToClipboard = async (text: string, code: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -71,13 +92,6 @@ export default function Referrals() {
     } catch (err) {
       console.error('Failed to copy:', err);
     }
-  };
-
-  const maskEmail = (email: string): string => {
-    const [local, domain] = email.split('@');
-    if (!domain) return email;
-    const maskedLocal = local.length <= 2 ? local : local.slice(0, 2) + '****' + local.slice(-1);
-    return `${maskedLocal}@${domain}`;
   };
 
   const handleCreateCode = async () => {
@@ -335,21 +349,49 @@ export default function Referrals() {
 
       {/* Referred Users Tree */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">
-          {t.referrals?.referredUsers || 'Referred Users'}
-          <span className="text-sm font-normal text-gray-500 ml-2">
-            ({t.referrals?.expandHint || 'Click arrow to expand referral chain'})
-          </span>
-        </h2>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">
+            {t.referrals?.referredUsers || 'Referred Users'}
+            <span className="text-sm font-normal text-gray-500 ml-2">
+              ({t.referrals?.expandHint || 'Click arrow to expand referral chain'})
+            </span>
+          </h2>
 
-        {user?.email ? (
+          {/* Email search */}
+          <div className="flex items-center gap-2">
+            <input
+              type="email"
+              value={searchEmail}
+              onChange={(e) => setSearchEmail(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+              placeholder={t.referrals?.searchPlaceholder || 'Search by email...'}
+              className="input text-sm px-3 py-1.5 w-48 sm:w-56"
+            />
+            <button
+              onClick={handleSearch}
+              className="btn-secondary text-sm px-3 py-1.5"
+            >
+              {t.referrals?.search || 'Search'}
+            </button>
+            {highlightUserId && (
+              <button
+                onClick={() => { setHighlightUserId(undefined); setSearchEmail(''); }}
+                className="text-xs text-gray-500 hover:text-gray-700"
+              >
+                {t.common?.clear || 'Clear'}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {user?.userId ? (
           <div className="overflow-x-auto">
             <ReferralTree
-              email={user.email}
+              userId={user.userId}
               level={1}
               maxLevel={3}
               isAdmin={false}
-              maskEmail={maskEmail}
+              highlightUserId={highlightUserId}
             />
           </div>
         ) : (

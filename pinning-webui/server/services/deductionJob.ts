@@ -99,18 +99,18 @@ async function processUserDeduction(userId: string, storageBytes: number): Promi
         [newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend, userId]
       );
     } else {
-      // Create new record with negative balance (dual-write: user_id + user_email)
+      // Create new record with negative balance
       await client.query(
-        `INSERT INTO user_credits (user_id, user_email, balance_fula, total_deducted_fula, is_suspended, suspended_at, last_deduction_at)
-         VALUES ($1, $1, $2, $3, $4, CASE WHEN $5 THEN NOW() ELSE NULL END, NOW())`,
+        `INSERT INTO user_credits (user_id, balance_fula, total_deducted_fula, is_suspended, suspended_at, last_deduction_at)
+         VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN NOW() ELSE NULL END, NOW())`,
         [userId, newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend]
       );
     }
 
-    // Log the deduction (dual-write: user_id + user_email)
+    // Log the deduction
     await client.query(
-      `INSERT INTO credit_history (user_id, user_email, tx_type, amount_fula, balance_after, reference_id)
-       VALUES ($1, $1, 'hourly_deduction', $2, $3, $4)`,
+      `INSERT INTO credit_history (user_id, tx_type, amount_fula, balance_after, reference_id)
+       VALUES ($1, 'hourly_deduction', $2, $3, $4)`,
       [userId, -deductionAmount, newBalance, new Date().toISOString()]
     );
 

@@ -227,6 +227,7 @@ export const en: Translations = {
     creating: 'Creating...',
     save: 'Save',
     saving: 'Saving...',
+    clear: 'Clear',
   },
   referrals: {
     title: 'Referrals',
@@ -279,6 +280,9 @@ export const en: Translations = {
     labelHint: 'This label will be inherited by users who sign up with this link',
     editingCode: 'Code',
     inheritedFrom: 'Inherited label',
+    userId: 'User ID',
+    searchPlaceholder: 'Search by email...',
+    search: 'Search',
   },
   admin: {
     title: 'Admin Panel',

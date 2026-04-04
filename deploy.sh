@@ -1,17 +1,19 @@
 #!/bin/bash
 #
-# Master Deployment Script for Pinning Service (Security Audit Release)
+# Master Deployment Script for Pinning Service
 #
-# This script ensures database migrations run BEFORE any service restarts.
-# Without this order, services referencing new columns/tables will crash.
+# Handles database migrations, backup, and auxiliary service deploys (x402, AI).
+# Main services (webui, ipfs-server, Go pinning-service) are deployed manually.
 #
-# Usage: sudo VITE_GOOGLE_CLIENT_ID=xxx VITE_WALLETCONNECT_PROJECT_ID=xxx bash ./deploy.sh [OPTIONS]
+# Migrations are tracked in a state file so each migration runs exactly once.
+# All migrations are idempotent (IF NOT EXISTS / IF EXISTS) and safe to re-run
+# if the state file is lost.
+#
+# Usage: sudo bash ./deploy.sh [OPTIONS]
 #
 # Options:
 #   --skip-pull          Skip git pull (already up to date)
-#   --skip-go            Skip Go pinning-service rebuild
-#   --migrations-only    Only run database migrations, don't deploy services
-#   --services-only      Only deploy services (migrations already applied)
+#   --migrations-only    Only run database migrations, skip x402/AI deploys
 #   --dry-run            Show what would be done without doing it
 #   -h, --help           Show this help message
 #
@@ -29,12 +31,6 @@ DB_NAME="${DB_NAME:-pinning_service}"
 # PostgreSQL runs in Docker container
 PG_CONTAINER="${PG_CONTAINER:-postgres-pinning}"
 
-# Vite build-time env vars for pinning-webui frontend
-# Override these or set them in your environment before running
-VITE_GOOGLE_CLIENT_ID="${VITE_GOOGLE_CLIENT_ID:-}"
-VITE_WALLETCONNECT_PROJECT_ID="${VITE_WALLETCONNECT_PROJECT_ID:-}"
-VITE_APPLE_CLIENT_ID="${VITE_APPLE_CLIENT_ID:-land.fx.cloud}"
-
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -45,24 +41,20 @@ NC='\033[0m'
 
 # Flags
 SKIP_PULL=false
-SKIP_GO=false
 MIGRATIONS_ONLY=false
-SERVICES_ONLY=false
 DRY_RUN=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --skip-pull) SKIP_PULL=true; shift ;;
-        --skip-go) SKIP_GO=true; shift ;;
         --migrations-only) MIGRATIONS_ONLY=true; shift ;;
-        --services-only) SERVICES_ONLY=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         -h|--help)
             head -18 "$0" | tail -15
             exit 0
             ;;
-        *) shift ;;
+        *) echo -e "\033[1;33m  [WARN]\033[0m Unknown argument: $1"; shift ;;
     esac
 done
 
@@ -95,7 +87,7 @@ echo ""
 # ============================================
 # Step 1: Git Pull
 # ============================================
-if [ "$SKIP_PULL" = false ] && [ "$SERVICES_ONLY" = false ]; then
+if [ "$SKIP_PULL" = false ]; then
     log_step "Pulling latest code"
     run_cmd git pull
     log_ok "Code updated"
@@ -106,50 +98,122 @@ fi
 # ============================================
 # Step 2: Database Migrations (BEFORE service restarts)
 # ============================================
-if [ "$SERVICES_ONLY" = false ]; then
-    log_step "Running database migrations"
-    log_info "Migrations must complete before any service restart"
+log_step "Running database migrations"
+log_info "Migrations must complete before any service restart"
 
-    # Verify Docker container is running
-    if ! docker ps --format '{{.Names}}' | grep -q "^${PG_CONTAINER}$"; then
-        log_err "PostgreSQL container '$PG_CONTAINER' is not running"
-        log_err "Check: docker ps | grep postgres"
-        log_err "Override container name with: PG_CONTAINER=mycontainer bash deploy.sh"
+# Verify Docker container is running
+if ! docker ps --format '{{.Names}}' | grep -q "^${PG_CONTAINER}$"; then
+    log_err "PostgreSQL container '$PG_CONTAINER' is not running"
+    log_err "Check: docker ps | grep postgres"
+    log_err "Override container name with: PG_CONTAINER=mycontainer bash deploy.sh"
+    exit 1
+fi
+log_info "Using PostgreSQL container: $PG_CONTAINER"
+
+# Verify database is reachable
+if ! docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" &>/dev/null; then
+    log_err "Cannot connect to database '$DB_NAME' as user '$DB_USER'"
+    log_err "Check credentials and container health: docker exec $PG_CONTAINER pg_isready"
+    exit 1
+fi
+log_ok "Database connection verified"
+
+# ---- Pre-migration backup ----
+# Take a lightweight dump before touching the schema so we can revert if needed.
+BACKUP_DIR="$DEPLOY_DIR/backups"
+BACKUP_FILE="$BACKUP_DIR/pre-migration-$(date -u +%Y%m%d_%H%M%S).dump"
+
+if [ "$DRY_RUN" = false ]; then
+    mkdir -p "$BACKUP_DIR"
+    log_info "Taking pre-migration database backup..."
+    if docker exec "$PG_CONTAINER" pg_dump -U "$DB_USER" -d "$DB_NAME" -Fc -Z6 > "$BACKUP_FILE" 2>/dev/null && [ -s "$BACKUP_FILE" ]; then
+        BACKUP_SIZE=$(du -h "$BACKUP_FILE" 2>/dev/null | cut -f1)
+        log_ok "Backup saved: $BACKUP_FILE ($BACKUP_SIZE)"
+        log_info "To restore if needed:"
+        log_info "  docker exec -i $PG_CONTAINER pg_restore -U $DB_USER -d $DB_NAME --clean --if-exists < $BACKUP_FILE"
+    else
+        log_err "Pre-migration backup FAILED — aborting deployment"
+        log_err "Will not modify database without a backup."
+        rm -f "$BACKUP_FILE"
         exit 1
     fi
-    log_info "Using PostgreSQL container: $PG_CONTAINER"
 
-    MIGRATION_DIR="$SCRIPT_DIR/migrations/postgres"
-    MIGRATION_FILES=(
-        "006_encrypted_api_keys.sql"
-        "007_cleanup_retry.sql"
-        "008_admin_audit_log.sql"
-    )
+    # Keep only the 5 most recent backups to avoid filling disk
+    ls -t "$BACKUP_DIR"/pre-migration-*.dump 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null || true
+else
+    log_info "Would take pre-migration backup to $BACKUP_DIR/"
+fi
 
-    for migration in "${MIGRATION_FILES[@]}"; do
-        migration_path="$MIGRATION_DIR/$migration"
-        if [ -f "$migration_path" ]; then
-            log_info "Applying $migration..."
-            if run_cmd docker exec -i "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" < "$migration_path"; then
-                log_ok "$migration applied"
-            else
-                log_err "$migration FAILED — aborting deployment"
-                echo ""
-                log_err "Fix the migration issue before restarting services."
-                log_err "Services have NOT been restarted."
-                exit 1
-            fi
-        else
-            log_warn "$migration not found at $migration_path — skipping"
+MIGRATION_DIR="$SCRIPT_DIR/migrations/postgres"
+MIGRATION_STATE="$DEPLOY_DIR/.migration_state"
+
+# Create state file if it doesn't exist
+if [ "$DRY_RUN" = false ]; then
+    touch "$MIGRATION_STATE" 2>/dev/null || MIGRATION_STATE="/tmp/.pinning_migration_state"
+fi
+
+# All migrations in dependency order.
+# Each migration is idempotent (uses IF NOT EXISTS / IF EXISTS / DROP ... IF EXISTS)
+# and safe to re-run, but we track state to avoid unnecessary work.
+MIGRATION_FILES=(
+    "006_encrypted_api_keys.sql"
+    "007_cleanup_retry.sql"
+    "008_admin_audit_log.sql"
+    "009_hash_session_tokens.sql"
+    "010_ensure_user_id_columns.sql"
+    "011_referral_fk_to_user_id.sql"
+    "012_nullable_legacy_columns.sql"
+)
+
+migrations_applied=0
+migrations_skipped=0
+
+for migration in "${MIGRATION_FILES[@]}"; do
+    migration_path="$MIGRATION_DIR/$migration"
+
+    # Skip if already applied (tracked in state file)
+    if [ "$DRY_RUN" = false ] && grep -qF "$migration" "$MIGRATION_STATE" 2>/dev/null; then
+        log_info "$migration — already applied, skipping"
+        migrations_skipped=$((migrations_skipped + 1))
+        continue
+    fi
+
+    if [ ! -f "$migration_path" ]; then
+        log_warn "$migration not found at $migration_path — skipping"
+        continue
+    fi
+
+    log_info "Applying $migration..."
+    if run_cmd docker exec -i "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 < "$migration_path"; then
+        log_ok "$migration applied"
+        migrations_applied=$((migrations_applied + 1))
+        # Record successful migration
+        if [ "$DRY_RUN" = false ]; then
+            echo "$migration $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$MIGRATION_STATE"
         fi
-    done
+    else
+        log_err "$migration FAILED — aborting deployment"
+        echo ""
+        log_err "Fix the migration issue before restarting services."
+        log_err "Services have NOT been restarted."
+        log_err ""
+        log_err "To debug, run the migration manually:"
+        log_err "  docker exec -i $PG_CONTAINER psql -U $DB_USER -d $DB_NAME < $migration_path"
+        log_err ""
+        log_err "After fixing, re-run: bash deploy.sh --skip-pull"
+        exit 1
+    fi
+done
 
-    log_ok "All migrations applied successfully"
+if [ $migrations_applied -gt 0 ]; then
+    log_ok "$migrations_applied migration(s) applied, $migrations_skipped already up to date"
+else
+    log_ok "All migrations already up to date ($migrations_skipped skipped)"
 fi
 
 if [ "$MIGRATIONS_ONLY" = true ]; then
     echo ""
-    log_ok "Migrations complete. Run with --services-only to deploy services."
+    log_ok "Migrations complete. Deploy services manually."
     exit 0
 fi
 
@@ -176,185 +240,77 @@ else
 fi
 
 # ============================================
-# Step 5: Deploy pinning-webui
+# Post-Migration Verification
 # ============================================
-log_step "Deploying pinning-webui"
+log_step "Post-migration verification"
 
-WEBUI_SRC="$SCRIPT_DIR/pinning-webui"
-WEBUI_TARGET="$DEPLOY_DIR/pinning-webui"
-
-if [ -d "$WEBUI_SRC" ]; then
-    log_info "Installing dependencies..."
-    run_cmd bash -c "cd '$WEBUI_SRC' && npm install"
-
-    log_info "Running npm audit fix..."
-    run_cmd bash -c "cd '$WEBUI_SRC' && npm audit fix" || true
-
-    log_info "Building pinning-webui (with Vite env vars)..."
-    if [ -z "$VITE_GOOGLE_CLIENT_ID" ] || [ -z "$VITE_WALLETCONNECT_PROJECT_ID" ]; then
-        log_warn "VITE_GOOGLE_CLIENT_ID or VITE_WALLETCONNECT_PROJECT_ID not set"
-        log_warn "Set them via environment or the build will use empty values"
-    fi
-    run_cmd bash -c "cd '$WEBUI_SRC' && VITE_GOOGLE_CLIENT_ID='$VITE_GOOGLE_CLIENT_ID' VITE_WALLETCONNECT_PROJECT_ID='$VITE_WALLETCONNECT_PROJECT_ID' VITE_APPLE_CLIENT_ID='$VITE_APPLE_CLIENT_ID' npm run build"
-
-    log_info "Copying build output to $WEBUI_TARGET..."
-    run_cmd mkdir -p "$WEBUI_TARGET/dist"
-    run_cmd bash -c "cp -r '$WEBUI_SRC/dist/'* '$WEBUI_TARGET/dist/'"
-    run_cmd cp "$WEBUI_SRC/package.json" "$WEBUI_TARGET/"
-    run_cmd cp "$WEBUI_SRC/package-lock.json" "$WEBUI_TARGET/" 2>/dev/null || true
-
-    log_info "Installing production dependencies in target..."
-    run_cmd bash -c "cd '$WEBUI_TARGET' && npm install --production --ignore-scripts=false"
-
-    log_info "Running npm audit fix..."
-    run_cmd bash -c "cd '$WEBUI_TARGET' && npm audit fix" || true
-
-    log_info "Running npm rebuild..."
-    run_cmd bash -c "cd '$WEBUI_TARGET' && npm rebuild"
-
-    log_info "Restarting pinning-webui..."
-    run_cmd systemctl restart fula-pinning-webui
-
-    sleep 2
-    if [ "$DRY_RUN" = false ] && systemctl is-active --quiet fula-pinning-webui; then
-        log_ok "pinning-webui deployed and running"
-    elif [ "$DRY_RUN" = false ]; then
-        log_err "pinning-webui failed to start"
-        journalctl -u fula-pinning-webui -n 10 --no-pager
-    else
-        log_ok "pinning-webui deploy (dry run)"
-    fi
-else
-    log_warn "pinning-webui directory not found — skipping"
-fi
-
-# ============================================
-# Step 6: Deploy ipfs-server
-# ============================================
-log_step "Deploying ipfs-server"
-
-IPFS_SRC="$SCRIPT_DIR/ipfs-server"
-IPFS_TARGET="$DEPLOY_DIR/ipfs-server"
-
-if [ -d "$IPFS_SRC" ]; then
-    log_info "Installing dependencies..."
-    run_cmd bash -c "cd '$IPFS_SRC' && npm install --production=false"
-
-    log_info "Running npm audit fix..."
-    run_cmd bash -c "cd '$IPFS_SRC' && npm audit fix" || true
-
-    log_info "Building ipfs-server..."
-    run_cmd bash -c "cd '$IPFS_SRC' && npm run build"
-
-    log_info "Stopping fula-upload-server..."
-    run_cmd systemctl stop fula-upload-server || true
-
-    log_info "Copying build output to $IPFS_TARGET..."
-    run_cmd mkdir -p "$IPFS_TARGET/dist"
-    run_cmd bash -c "cp -r '$IPFS_SRC/dist/'* '$IPFS_TARGET/dist/'"
-    run_cmd cp "$IPFS_SRC/package.json" "$IPFS_TARGET/"
-    run_cmd cp "$IPFS_SRC/package-lock.json" "$IPFS_TARGET/" 2>/dev/null || true
-
-    log_info "Installing production dependencies in target..."
-    run_cmd bash -c "cd '$IPFS_TARGET' && npm install --production --ignore-scripts=false"
-
-    log_info "Starting fula-upload-server..."
-    run_cmd systemctl start fula-upload-server
-
-    sleep 2
-    if [ "$DRY_RUN" = false ] && systemctl is-active --quiet fula-upload-server; then
-        log_ok "ipfs-server deployed and running"
-    elif [ "$DRY_RUN" = false ]; then
-        log_err "ipfs-server failed to start"
-        journalctl -u fula-upload-server -n 10 --no-pager
-    else
-        log_ok "ipfs-server deploy (dry run)"
-    fi
-else
-    log_warn "ipfs-server directory not found — skipping"
-fi
-
-# ============================================
-# Step 7: Deploy Go pinning-service (optional)
-# ============================================
-if [ "$SKIP_GO" = false ]; then
-    log_step "Deploying Go pinning-service"
-
-    if command -v go &>/dev/null && [ -f "$SCRIPT_DIR/main_postgres.go" ]; then
-        log_info "Downloading Go modules..."
-        run_cmd bash -c "cd '$SCRIPT_DIR' && go mod download"
-
-        log_info "Building Go binary..."
-        run_cmd bash -c "cd '$SCRIPT_DIR' && go build -o '$DEPLOY_DIR/ipfs-pinning' main_postgres.go"
-
-        log_info "Stopping pinning-service..."
-        run_cmd systemctl stop fula-pinning-service || true
-
-        log_info "Starting pinning-service..."
-        run_cmd systemctl start fula-pinning-service
-
-        sleep 2
-        if [ "$DRY_RUN" = false ] && systemctl is-active --quiet fula-pinning-service; then
-            log_ok "Go pinning-service deployed and running"
-        elif [ "$DRY_RUN" = false ]; then
-            log_err "Go pinning-service failed to start"
-            journalctl -u fula-pinning-service -n 10 --no-pager
-        else
-            log_ok "Go pinning-service deploy (dry run)"
-        fi
-    else
-        log_warn "Go or main_postgres.go not found — skipping"
-    fi
-else
-    log_info "Skipping Go pinning-service (--skip-go)"
-fi
-
-# ============================================
-# Post-Deployment Verification
-# ============================================
-log_step "Post-deployment verification"
-
-SERVICES=("x402-gateway" "fula-pinning-webui" "fula-upload-server" "fula-ai-service" "fula-pinning-service")
 ALL_OK=true
 
-for svc in "${SERVICES[@]}"; do
-    if [ "$DRY_RUN" = true ]; then
-        log_info "Would check: $svc"
-        continue
-    fi
-    if systemctl is-active --quiet "$svc" 2>/dev/null; then
-        log_ok "$svc is running"
-    elif systemctl is-enabled --quiet "$svc" 2>/dev/null; then
-        log_err "$svc is NOT running (but is enabled)"
-        ALL_OK=false
-    else
-        log_warn "$svc is not installed/enabled — skipping"
-    fi
-done
-
-# Verify migration columns exist
+# Verify critical migration state
 if [ "$DRY_RUN" = false ]; then
-    log_info "Verifying migration columns..."
+    log_info "Verifying migration state..."
 
-    if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT column_name FROM information_schema.columns WHERE table_name='api_keys' AND column_name='encrypted_key'" 2>/dev/null | grep -q "encrypted_key"; then
-        log_ok "api_keys.encrypted_key column exists"
+    check_column() {
+        local table="$1" col="$2" migration="$3"
+        if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+            "SELECT column_name FROM information_schema.columns WHERE table_name='$table' AND column_name='$col'" 2>/dev/null | grep -q "$col"; then
+            log_ok "$table.$col exists"
+        else
+            log_err "$table.$col MISSING — $migration not applied"
+            ALL_OK=false
+        fi
+    }
+
+    check_table() {
+        local table="$1" migration="$2"
+        if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+            "SELECT tablename FROM pg_tables WHERE tablename='$table'" 2>/dev/null | grep -q "$table"; then
+            log_ok "$table table exists"
+        else
+            log_err "$table table MISSING — $migration not applied"
+            ALL_OK=false
+        fi
+    }
+
+    # Migration 006
+    check_column "api_keys" "encrypted_key" "migration 006"
+    # Migration 008
+    check_table "admin_audit_log" "migration 008"
+    # Migration 009
+    check_column "sessions" "token_hash" "migration 009"
+    # Migration 010
+    check_column "webui_users" "user_id" "migration 010"
+    check_column "webui_users" "encrypted_email" "migration 010"
+    # Migration 011 — check that user_id FK target index exists
+    if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+        "SELECT indexname FROM pg_indexes WHERE tablename='webui_users' AND indexname='idx_webui_users_user_id_unique'" 2>/dev/null | grep -q "idx_webui_users_user_id_unique"; then
+        log_ok "webui_users user_id unique index exists"
     else
-        log_err "api_keys.encrypted_key column MISSING — migration 006 not applied"
+        log_err "webui_users user_id unique index MISSING — migration 011 not applied"
+        ALL_OK=false
+    fi
+    # Migration 012 — verify username is nullable (NOT NULL dropped)
+    if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+        "SELECT is_nullable FROM information_schema.columns WHERE table_name='users' AND column_name='username'" 2>/dev/null | grep -q "YES"; then
+        log_ok "users.username is nullable (migration 012 applied)"
+    else
+        log_warn "users.username is still NOT NULL — migration 012 may not be applied"
         ALL_OK=false
     fi
 
-    if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT column_name FROM information_schema.columns WHERE table_name='x402_ephemeral_objects' AND column_name='delete_attempts'" 2>/dev/null | grep -q "delete_attempts"; then
-        log_ok "x402_ephemeral_objects.delete_attempts column exists"
-    else
-        log_err "x402_ephemeral_objects.delete_attempts column MISSING — migration 007 not applied"
-        ALL_OK=false
+    # Check ENCRYPTION_KEY is set (required for new user encrypted_email)
+    ENC_KEY=""
+    if [ -f "$DEPLOY_DIR/pinning-webui/.env" ]; then
+        ENC_KEY=$(grep -oP '^ENCRYPTION_KEY=\K.+' "$DEPLOY_DIR/pinning-webui/.env" 2>/dev/null || true)
     fi
-
-    if docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT tablename FROM pg_tables WHERE tablename='admin_audit_log'" 2>/dev/null | grep -q "admin_audit_log"; then
-        log_ok "admin_audit_log table exists"
+    if [ -n "$ENC_KEY" ]; then
+        log_ok "ENCRYPTION_KEY is configured: ${ENC_KEY:0:8}...${ENC_KEY: -4}"
+        echo -e "  Press Enter to continue or Ctrl+C to abort..."
+        read -r
     else
-        log_err "admin_audit_log table MISSING — migration 008 not applied"
-        ALL_OK=false
+        log_warn "ENCRYPTION_KEY not set in $DEPLOY_DIR/pinning-webui/.env"
+        log_warn "New users will NOT have encrypted_email stored. Generate with: openssl rand -hex 32"
+        # Not fatal — system works without it, just no email recovery for new users
     fi
 fi
 
@@ -364,20 +320,63 @@ fi
 echo ""
 echo -e "${BOLD}==========================================${NC}"
 if [ "$ALL_OK" = true ] || [ "$DRY_RUN" = true ]; then
-    echo -e "${BOLD}${GREEN}  Deployment Complete${NC}"
+    echo -e "${BOLD}${GREEN}  Migrations & Auxiliary Deploys Complete${NC}"
 else
-    echo -e "${BOLD}${YELLOW}  Deployment Complete (with warnings)${NC}"
+    echo -e "${BOLD}${YELLOW}  Completed (with warnings)${NC}"
 fi
 echo -e "${BOLD}==========================================${NC}"
 echo ""
 
 if [ "$ALL_OK" = false ]; then
-    echo "Check service logs for errors:"
-    echo "  journalctl -u <service-name> -n 20 --no-pager"
-    echo ""
+    if [ -n "${BACKUP_FILE:-}" ] && [ -f "${BACKUP_FILE:-}" ]; then
+        echo "To revert database changes, restore the pre-migration backup:"
+        echo "  docker exec -i $PG_CONTAINER pg_restore -U $DB_USER -d $DB_NAME --clean --if-exists < $BACKUP_FILE"
+        echo ""
+    fi
 fi
 
-echo "Optional: Set ENCRYPTION_KEY for API key encryption at rest"
-echo "  openssl rand -hex 32"
-echo "  Add ENCRYPTION_KEY=<hex> to pinning-webui's .env file"
+echo -e "${BOLD}Next: deploy services manually${NC}"
+echo ""
+echo "  ## pinning-webui (port 3000)"
+echo "  cd ~/pinning-service/pinning-webui && git pull"
+echo "  npm install"
+echo "  VITE_GOOGLE_CLIENT_ID=<id> VITE_WALLETCONNECT_PROJECT_ID=<id> VITE_APPLE_CLIENT_ID=land.fx.cloud npm run build"
+echo "  cp -r dist/* /home/root/pinning-service/pinning-webui/dist/"
+echo "  cp package.json package-lock.json /home/root/pinning-service/pinning-webui/"
+echo "  cd /home/root/pinning-service/pinning-webui"
+echo "  npm install --production --ignore-scripts=false"
+echo "  npm audit fix"
+echo "  npm rebuild"
+echo "  systemctl restart fula-pinning-webui"
+echo ""
+echo "  ## Go pinning-service (port 6000)"
+echo "  cd ~/pinning-service && git pull"
+echo "  go mod download"
+echo "  go build -o /home/root/pinning-service/ipfs-pinning.new main_postgres.go"
+echo "  systemctl stop fula-pinning-service"
+echo "  mv /home/root/pinning-service/ipfs-pinning.new /home/root/pinning-service/ipfs-pinning"
+echo "  systemctl start fula-pinning-service"
+echo ""
+echo "  ## ipfs-server (upload gateway)"
+echo "  cd ~/pinning-service/ipfs-server && git pull"
+echo "  npm install --production=false && npm audit fix && npm run build"
+echo "  systemctl stop fula-upload-server"
+echo "  cp -r dist/* /home/root/pinning-service/ipfs-server/dist/"
+echo "  cp package.json package-lock.json /home/root/pinning-service/ipfs-server/ 2>/dev/null || true"
+echo "  cd /home/root/pinning-service/ipfs-server && npm install --production --ignore-scripts=false"
+echo "  systemctl start fula-upload-server"
+echo ""
+
+# Post-deployment hints
+if [ -z "$(grep -oP '^ENCRYPTION_KEY=\K.+' "$DEPLOY_DIR/pinning-webui/.env" 2>/dev/null || true)" ]; then
+    echo -e "${YELLOW}  Set ENCRYPTION_KEY (required for encrypted email storage):${NC}"
+    echo "       openssl rand -hex 32"
+    echo "       Add ENCRYPTION_KEY=<hex> to $DEPLOY_DIR/pinning-webui/.env"
+    echo "       systemctl restart fula-pinning-webui"
+    echo ""
+fi
+echo "  Backups (one-time setup):"
+echo "    1. Generate IPNS key:  docker exec ipfs_host ipfs key gen fula-db-backup"
+echo "    2. Set BACKUP_ENCRYPTION_KEY:  openssl rand -hex 32"
+echo "    3. Add cron job:  0 3 * * * BACKUP_ENCRYPTION_KEY=<hex> $SCRIPT_DIR/scripts/backup-db.sh >> /var/log/fula-db-backup.log 2>&1"
 echo ""

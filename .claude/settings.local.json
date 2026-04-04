@@ -28,7 +28,13 @@
       "Bash(curl:*)",
       "Bash(git log:*)",
       "Bash(wait b88qomlu5:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(go vet:*)",
+      "Bash(chmod +x:*)",
+      "Bash(shellcheck /mnt/e/GitHub/pinning-service/deploy.sh)",
+      "Bash(bash -n /mnt/e/GitHub/pinning-service/deploy.sh)",
+      "Bash(sed -i 's/\\\\r$//' deploy.sh)",
+      "Bash(bash -n deploy.sh)"
     ]
   }
 }

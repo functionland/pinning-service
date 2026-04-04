@@ -42,6 +42,10 @@ if (config.nodeEnv === 'production') {
     console.error('[webui] FATAL: SESSION_SECRET must be set in production');
     process.exit(1);
   }
+  if (!process.env.ENCRYPTION_KEY) {
+    console.warn('[webui] WARNING: ENCRYPTION_KEY not set — API keys will not be encrypted at rest');
+    console.warn('[webui]   Generate one with: openssl rand -hex 32');
+  }
 }
 
 // Debug .env loading

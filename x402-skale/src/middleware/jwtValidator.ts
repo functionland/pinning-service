@@ -39,11 +39,10 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
     // Decode the JWT to extract claims
     const decoded = jose.decodeJwt(token) as JwtPayload;
 
-    // Extract user info
+    // Extract user info — use sub (userId hash), never plain-text email
     const userInfo: JwtUserInfo = {
-      email: decoded.email || decoded.sub || '',
+      userId: decoded.sub || '',
       wallet: decoded.wallet?.toLowerCase(),
-      sub: decoded.sub,
       iat: decoded.iat,
       exp: decoded.exp,
     };
@@ -56,7 +55,7 @@ export const jwtValidatorMiddleware = createMiddleware<Env>(async (c, next) => {
     // Store user info in context
     c.set('jwtUser', userInfo);
 
-    console.log(`[jwt] User authenticated: ${userInfo.email || userInfo.sub}`);
+    console.log(`[jwt] User authenticated: ${userInfo.userId.slice(0, 8)}...`);
 
   } catch (error) {
     if (error instanceof HttpError) {
@@ -99,9 +98,8 @@ export const x402OrJwtMiddleware = createMiddleware<Env>(async (c, next) => {
       const decoded = jose.decodeJwt(token) as JwtPayload;
 
       const userInfo: JwtUserInfo = {
-        email: decoded.email || decoded.sub || '',
+        userId: decoded.sub || '',
         wallet: decoded.wallet?.toLowerCase(),
-        sub: decoded.sub,
         iat: decoded.iat,
         exp: decoded.exp,
       };
@@ -115,7 +113,7 @@ export const x402OrJwtMiddleware = createMiddleware<Env>(async (c, next) => {
       c.set('jwtUser', userInfo);
       c.set('authMode', 'jwt');
 
-      console.log(`[auth] JWT mode: ${userInfo.email || userInfo.sub}`);
+      console.log(`[auth] JWT mode: ${userInfo.userId.slice(0, 8)}...`);
 
     } catch (error) {
       if (error instanceof HttpError) {
@@ -183,9 +181,8 @@ export const optionalJwtMiddleware = createMiddleware<Env>(async (c, next) => {
       const decoded = jose.decodeJwt(token) as JwtPayload;
 
       const userInfo: JwtUserInfo = {
-        email: decoded.email || decoded.sub || '',
+        userId: decoded.sub || '',
         wallet: decoded.wallet?.toLowerCase(),
-        sub: decoded.sub,
         iat: decoded.iat,
         exp: decoded.exp,
       };

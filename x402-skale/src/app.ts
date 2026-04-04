@@ -9,8 +9,6 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timing } from 'hono/timing';
-import { v4 as uuidv4 } from 'uuid';
-
 import type { Env } from './types/index.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { healthRoutes } from './routes/health.js';
@@ -43,10 +41,12 @@ app.use('*', cors({
     'X-TTL-Seconds',
     'Payment-Authorization',
     'X-Payment',
+    'X-Request-ID',
   ],
   exposeHeaders: [
     'X-Payment-Required',
     'X-PAYMENT-RESPONSE',
+    'X-Request-ID',
     'Content-Length',
     'Content-Type',
     'ETag',
@@ -72,6 +72,9 @@ app.use('*', async (c, next) => {
   const now = Date.now();
   const entry = rateLimitMap.get(ip);
   if (!entry || now > entry.resetAt) {
+    if (rateLimitMap.size > 100_000) {
+      rateLimitMap.clear();
+    }
     rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
   } else if (entry.count >= RATE_LIMIT_MAX) {
     return c.json({ error: 'Rate limit exceeded' }, 429);
@@ -83,8 +86,10 @@ app.use('*', async (c, next) => {
 
 // Request ID and timing
 app.use('*', async (c, next) => {
-  c.set('requestId', uuidv4());
+  const requestId = c.req.header('X-Request-ID') || crypto.randomUUID();
+  c.set('requestId', requestId);
   c.set('requestStartTime', Date.now());
+  c.header('X-Request-ID', requestId);
   await next();
 });
 

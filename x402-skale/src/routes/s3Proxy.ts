@@ -141,7 +141,7 @@ async function resolveReadAuth(c: Context<Env>): Promise<string> {
 
       // Signature verified — look up wallet's API key
       const walletUser = await ensureWalletUserAndGetApiKey(claimedWallet);
-      console.log(`[download] Verified wallet auth: ${walletUser.email}`);
+      console.log(`[download] Verified wallet auth: ${walletUser.userId.slice(0, 8)}...`);
       return `Bearer ${walletUser.apiKey}`;
     } catch (err) {
       console.warn('[download] Failed to verify X-PAYMENT header:', err instanceof Error ? err.message : err);
@@ -182,21 +182,21 @@ s3ProxyRoutes.put(
       throw new HttpError(500, 'Payment info not found after middleware', 'INTERNAL_ERROR');
     }
 
-    // Determine auth header and user email based on auth mode
+    // Determine auth header and userId based on auth mode
     let authHeader: string;
-    let userEmail: string;
+    let userId: string;
 
     if (authMode === 'jwt' && jwtUser) {
       // JWT mode: use original JWT for S3
       authHeader = c.req.header('Authorization')!;
-      userEmail = jwtUser.sub || jwtUser.email || '';
-      console.log(`[upload] JWT mode: user=${userEmail}, wallet=${payment.payer}`);
+      userId = jwtUser.userId;
+      console.log(`[upload] JWT mode: user=${userId.slice(0, 8)}..., wallet=${payment.payer.slice(0, 6)}...`);
     } else {
       // x402-only mode: get/create user's API key, use it for S3
       const walletUser = await ensureWalletUserAndGetApiKey(payment.payer);
       authHeader = `Bearer ${walletUser.apiKey}`;  // User's own API key!
-      userEmail = walletUser.email;
-      console.log(`[upload] x402-only mode: user=${userEmail}, wallet=${payment.payer}`);
+      userId = walletUser.userId;
+      console.log(`[upload] x402-only mode: user=${userId.slice(0, 8)}..., wallet=${payment.payer.slice(0, 6)}...`);
     }
 
     // Get request body
@@ -238,7 +238,7 @@ s3ProxyRoutes.put(
     await trackEphemeralObject({
       bucket,
       key,
-      wallet: userEmail,  // User email (from JWT or wallet-based)
+      wallet: userId,  // userId hash (from JWT or wallet-derived)
       sizeBytes: payment.sizeBytes,
       sizeMb: payment.sizeMb,
       paymentId: payment.paymentId,
@@ -248,8 +248,8 @@ s3ProxyRoutes.put(
     // Adjust pinning service credits
     const ttlHours = Math.ceil(payment.ttlSeconds / 3600);
     const creditResult = await adjustPinningCredits({
-      userEmail,              // User email for credit tracking
-      wallet: payment.payer,  // Wallet for logging
+      userId,                   // User ID hash for credit tracking
+      wallet: payment.payer,    // Wallet for logging
       amountUsdc: payment.priceUsdc,
       paymentId: payment.paymentId,
       sizeMb: payment.sizeMb,
@@ -428,19 +428,19 @@ s3ProxyRoutes.post(
       throw new HttpError(500, 'Payment info not found', 'INTERNAL_ERROR');
     }
 
-    // Determine user email
-    let userEmail: string;
+    // Determine userId
+    let userId: string;
     if (authMode === 'jwt' && jwtUser) {
-      userEmail = jwtUser.sub || jwtUser.email || '';
+      userId = jwtUser.userId;
     } else {
       const walletUser = await ensureWalletUserAndGetApiKey(payment.payer);
-      userEmail = walletUser.email;
+      userId = walletUser.userId;
     }
 
     // Add credits
     const fulaAmount = usdcToFula(payment.priceUsdc);
     const creditResult = await adjustPinningCredits({
-      userEmail,
+      userId,
       wallet: payment.payer,
       amountUsdc: payment.priceUsdc,
       paymentId: payment.paymentId,
@@ -454,7 +454,7 @@ s3ProxyRoutes.post(
       newBalance: creditResult.newBalance,
       amountPaidUsdc: payment.priceUsdc,
       tx_hash: payment.txHash,
-      userEmail,
+      userId,
     }, 200);
   }
 );

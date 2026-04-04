@@ -44,8 +44,9 @@ const FULA_DECIMALS = 18;
 function toFula(rawAmount: string): number {
   const amount = BigInt(rawAmount);
   const divisor = BigInt(10 ** FULA_DECIMALS);
-  const fula = Number(amount) / Number(divisor);
-  return fula;
+  const whole = amount / divisor;
+  const frac = amount % divisor;
+  return Number(whole) + Number(frac) / Number(divisor);
 }
 
 // Get explorer API URL for a chain (Ethereum + SKALE only; Base uses direct RPC)
@@ -236,31 +237,18 @@ async function creditUser(userId: string, amount: number, txHash: string, chainI
   try {
     await client.query('BEGIN');
 
-    // Get or create user credits record
-    const existingResult = await client.query<{ balance_fula: number }>(
-      'SELECT balance_fula FROM user_credits WHERE user_id = $1',
-      [userId]
+    // Atomic upsert — no read-then-write race condition
+    const result = await client.query<{ balance_fula: number }>(
+      `INSERT INTO user_credits (user_id, balance_fula, total_deposited_fula)
+       VALUES ($1, $2, $2)
+       ON CONFLICT (user_id) DO UPDATE
+       SET balance_fula = user_credits.balance_fula + $2,
+           total_deposited_fula = user_credits.total_deposited_fula + $2,
+           is_suspended = 0, updated_at = NOW()
+       RETURNING balance_fula`,
+      [userId, amount]
     );
-    const existing = existingResult.rows[0];
-
-    let newBalance: number;
-    if (existing) {
-      newBalance = existing.balance_fula + amount;
-      await client.query(
-        `UPDATE user_credits
-         SET balance_fula = $1, total_deposited_fula = total_deposited_fula + $2,
-             is_suspended = 0, updated_at = NOW()
-         WHERE user_id = $3`,
-        [newBalance, amount, userId]
-      );
-    } else {
-      newBalance = amount;
-      await client.query(
-        `INSERT INTO user_credits (user_id, balance_fula, total_deposited_fula)
-         VALUES ($1, $2, $3)`,
-        [userId, amount, amount]
-      );
-    }
+    const newBalance = result.rows[0].balance_fula;
 
     // Log the deposit in credit history — no plain-text email
     await client.query(
@@ -389,6 +377,7 @@ export async function runBlockScanner(): Promise<void> {
 
 // Cron runner
 let scanInterval: NodeJS.Timeout | null = null;
+let isScanning = false;
 
 export function startBlockScanner(intervalMs: number = 10 * 60 * 1000): void {
   if (scanInterval) {
@@ -397,11 +386,25 @@ export function startBlockScanner(intervalMs: number = 10 * 60 * 1000): void {
   }
 
   // Run immediately on start
-  runBlockScanner().catch(err => console.error('[blockScanner] Error:', err));
+  isScanning = true;
+  runBlockScanner()
+    .catch(err => console.error('[blockScanner] Error:', err))
+    .finally(() => { isScanning = false; });
 
   // Then run at interval
-  scanInterval = setInterval(() => {
-    runBlockScanner().catch(err => console.error('[blockScanner] Error:', err));
+  scanInterval = setInterval(async () => {
+    if (isScanning) {
+      console.log('[blockScanner] Previous scan still running, skipping');
+      return;
+    }
+    isScanning = true;
+    try {
+      await runBlockScanner();
+    } catch (err) {
+      console.error('[blockScanner] Error:', err);
+    } finally {
+      isScanning = false;
+    }
   }, intervalMs);
 
   console.log(`[blockScanner] Started with interval: ${intervalMs}ms`);

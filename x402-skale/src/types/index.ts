@@ -110,11 +110,10 @@ export interface FacilitatorSettleResponse {
 // ============================================
 
 export interface JwtUserInfo {
-  email: string;
-  wallet?: string;         // Wallet address from JWT claims
-  sub?: string;            // Subject (user ID)
-  iat?: number;            // Issued at
-  exp?: number;            // Expiration
+  userId: string;            // SHA-256 hash of email (from JWT sub claim)
+  wallet?: string;           // Wallet address from JWT claims
+  iat?: number;              // Issued at
+  exp?: number;              // Expiration
 }
 
 export interface JwtPayload {
@@ -192,7 +191,7 @@ export interface S3ProxyResponse {
 // ============================================
 
 export interface CreditAdjustmentRequest {
-  email: string;
+  userId: string;
   amount: number;
   reason: string;
 }

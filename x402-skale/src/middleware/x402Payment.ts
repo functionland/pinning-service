@@ -41,6 +41,12 @@ import {
   getPaymentLog,
 } from '../database/repositories/paymentLogs.js';
 
+// Circuit breaker for facilitator service
+let facilitatorFailures = 0;
+let circuitOpenUntil = 0;
+const CIRCUIT_THRESHOLD = 5;
+const CIRCUIT_COOLDOWN_MS = 30_000;
+
 // Constants
 const DEFAULT_TTL_SECONDS = 3600;      // 1 hour default
 const MAX_TTL_SECONDS = 30 * 24 * 3600; // 30 days max
@@ -238,6 +244,11 @@ async function verifyWithFacilitator(
 ): Promise<FacilitatorVerifyResponse> {
   const paymentRequirements = buildPaymentRequirements(expectedAmount, resource);
 
+  // Circuit breaker check
+  if (Date.now() < circuitOpenUntil) {
+    throw new HttpError(503, 'Payment service temporarily unavailable', 'FACILITATOR_CIRCUIT_OPEN');
+  }
+
   console.log(`[x402] Calling facilitator: ${config.facilitatorUrl}/verify`);
 
   // Decode payment header to extract payer info (needed when facilitator doesn't return it)
@@ -265,21 +276,38 @@ async function verifyWithFacilitator(
     };
   }
 
-  const response = await fetch(`${config.facilitatorUrl}/verify`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${config.facilitatorUrl}/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    facilitatorFailures++;
+    if (facilitatorFailures >= CIRCUIT_THRESHOLD) {
+      circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+      console.warn('[x402] Circuit breaker opened for facilitator');
+    }
+    throw err;
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
     console.error(`[x402] Facilitator error: ${response.status} ${errorText}`);
+    facilitatorFailures++;
+    if (facilitatorFailures >= CIRCUIT_THRESHOLD) {
+      circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+      console.warn('[x402] Circuit breaker opened for facilitator');
+    }
     throw new Error(`Facilitator verify failed: ${response.status} ${errorText}`);
   }
 
   const result = await response.json() as Record<string, unknown>;
+  facilitatorFailures = 0;
 
   // Extract payer from the decoded payment header (Corbits v1 doesn't return it)
   const payerFromHeader = decodedPayload?.payload?.authorization?.from as string || '';
@@ -309,6 +337,11 @@ async function settleWithFacilitator(
   expectedAmount: string,
   resource: string
 ): Promise<FacilitatorSettleResponse> {
+  // Circuit breaker check
+  if (Date.now() < circuitOpenUntil) {
+    throw new HttpError(503, 'Payment service temporarily unavailable', 'FACILITATOR_CIRCUIT_OPEN');
+  }
+
   const paymentRequirements = buildPaymentRequirements(expectedAmount, resource);
 
   let requestBody: Record<string, unknown>;
@@ -334,20 +367,37 @@ async function settleWithFacilitator(
     };
   }
 
-  const response = await fetch(`${config.facilitatorUrl}/settle`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${config.facilitatorUrl}/settle`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    facilitatorFailures++;
+    if (facilitatorFailures >= CIRCUIT_THRESHOLD) {
+      circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+      console.warn('[x402] Circuit breaker opened for facilitator');
+    }
+    throw err;
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
+    facilitatorFailures++;
+    if (facilitatorFailures >= CIRCUIT_THRESHOLD) {
+      circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+      console.warn('[x402] Circuit breaker opened for facilitator');
+    }
     throw new Error(`Facilitator settle failed: ${response.status} ${errorText}`);
   }
 
   const result = await response.json() as Record<string, unknown>;
+  facilitatorFailures = 0;
 
   // Normalize response to support both v1 (txHash) and v2 (transaction) formats
   return {

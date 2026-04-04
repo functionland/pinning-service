@@ -2,41 +2,32 @@
  * Pinning Service Credit Integration
  *
  * Adjusts credits in the pinning service after x402 payment settlement.
- * Uses the existing admin adjust endpoint.
+ * Uses the existing admin adjust endpoint. Identifies users by userId hash only.
  */
 
 import { config } from '../config/index.js';
 import { usdcToFula } from '../utils/pricing.js';
+import { walletToUserId } from './walletUser.js';
 import type { CreditAdjustmentRequest, CreditAdjustmentResponse } from '../types/index.js';
 
 /**
  * Adjust credits in the pinning service
  *
  * Converts USDC payment to FULA credits and adds to user's account.
- * Uses JWT email (real user identity) for credit assignment.
- *
- * @param userEmail - User's email from JWT sub claim (real identity)
- * @param wallet - Payer's wallet address (for logging only)
- * @param amountUsdc - Payment amount in USDC
- * @param paymentId - x402 payment ID for audit
- * @param sizeMb - Storage size in MB
- * @param ttlHours - TTL in hours
+ * Uses userId hash (from JWT sub claim) for credit assignment.
  */
 export async function adjustPinningCredits(params: {
-  userEmail: string;
+  userId: string;
   wallet: string;
   amountUsdc: number;
   paymentId: string;
   sizeMb: number;
   ttlHours: number;
 }): Promise<CreditAdjustmentResponse> {
-  const { userEmail, wallet, amountUsdc, paymentId, sizeMb, ttlHours } = params;
+  const { userId, wallet, amountUsdc, paymentId, sizeMb, ttlHours } = params;
 
   // Convert USDC to FULA credits
   const fulaAmount = usdcToFula(amountUsdc);
-
-  // Use JWT email directly (real user identity, not synthetic wallet email)
-  const email = userEmail;
 
   // Build reason string for audit
   const reason = sizeMb === 0 && ttlHours === 0
@@ -44,13 +35,13 @@ export async function adjustPinningCredits(params: {
     : `x402:${paymentId}:${sizeMb.toFixed(2)}MB×${ttlHours}h`;
 
   const request: CreditAdjustmentRequest = {
-    email,
+    userId,
     amount: fulaAmount,
     reason,
   };
 
   try {
-    console.log(`[pinning] Adjusting credits: ${email} +${fulaAmount} FULA (paid by ${wallet}) (${reason})`);
+    console.log(`[pinning] Adjusting credits: ${userId.slice(0, 8)}... +${fulaAmount} FULA (wallet ${wallet.slice(0, 6)}...) (${reason})`);
 
     const response = await fetch(`${config.pinningWebuiUrl}/api/admin/adjust`, {
       method: 'POST',
@@ -59,6 +50,7 @@ export async function adjustPinningCredits(params: {
         'X-System-Key': config.pinningSystemKey,
       },
       body: JSON.stringify(request),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {
@@ -73,7 +65,7 @@ export async function adjustPinningCredits(params: {
 
     const result = await response.json() as { newBalance: number; isSuspended?: boolean };
 
-    console.log(`[pinning] Credits adjusted: ${email} new balance ${result.newBalance} FULA`);
+    console.log(`[pinning] Credits adjusted: ${userId.slice(0, 8)}... new balance ${result.newBalance} FULA`);
 
     return {
       success: true,
@@ -99,12 +91,11 @@ export async function checkPinningCredits(wallet: string): Promise<{
   balanceFula: number;
   message: string;
 }> {
-  const email = `${wallet.toLowerCase()}@x402.gateway`;
+  const userId = walletToUserId(wallet);
 
   try {
-    // This would need an endpoint in the pinning service
     // For now, we assume x402 payments always provide sufficient credits
-    console.log(`[pinning] Credit check for ${email} (skipped - x402 handles payment)`);
+    console.log(`[pinning] Credit check for ${userId.slice(0, 8)}... (skipped - x402 handles payment)`);
 
     return {
       canUpload: true,
@@ -128,10 +119,9 @@ export async function checkPinningCredits(wallet: string): Promise<{
  * (Creates if not exists via the adjust endpoint with 0 amount)
  */
 export async function ensurePinningUser(wallet: string): Promise<boolean> {
-  const email = `${wallet.toLowerCase()}@x402.gateway`;
+  const userId = walletToUserId(wallet);
 
   try {
-    // Try to adjust by 0 to ensure user exists
     await fetch(`${config.pinningWebuiUrl}/api/admin/adjust`, {
       method: 'POST',
       headers: {
@@ -139,10 +129,11 @@ export async function ensurePinningUser(wallet: string): Promise<boolean> {
         'X-System-Key': config.pinningSystemKey,
       },
       body: JSON.stringify({
-        email,
+        userId,
         amount: 0,
         reason: 'x402:user-init',
       }),
+      signal: AbortSignal.timeout(30_000),
     });
 
     return true;

@@ -31,6 +31,7 @@ import {
   closePool,
   getOrCreateWebuiUser,
   getWebuiUserByEmail,
+  getWebuiUserById,
   getApiKeys,
   createApiKey,
   deleteApiKey,
@@ -105,6 +106,14 @@ export interface DbOps {
   addPin(userId: string, cid: string, name?: string): Promise<string>;
 }
 
+// Safe migration handler — only ignores expected PostgreSQL errors
+// 42701 = duplicate column, 42P07 = duplicate table, 42P01 = undefined table (for ALTER on missing table)
+function ignoreMigrationError(err: any): void {
+  const code = err?.code;
+  if (code === '42701' || code === '42P07' || code === '42P01') return;
+  console.error('[migration] Unexpected error:', err);
+}
+
 // Initialize PostgreSQL database connection pool
 // Schema is managed via migrations (migrations/postgres/*.sql)
 export async function initializeDatabase(): Promise<void> {
@@ -138,11 +147,11 @@ export async function initializeDatabase(): Promise<void> {
     // Migration: drop secret_key column if it exists (no longer stored server-side for security)
     await query(`
       ALTER TABLE share_manifests DROP COLUMN IF EXISTS secret_key
-    `).catch(() => { /* column may not exist on fresh installs */ });
+    `).catch(ignoreMigrationError);
     // Migration: add encrypted_manifest column for privacy
     await query(`
       ALTER TABLE share_manifests ADD COLUMN IF NOT EXISTS encrypted_manifest TEXT
-    `).catch(() => { /* column may already exist */ });
+    `).catch(ignoreMigrationError);
     console.log('[webui] share_manifests table ready');
   } catch (error) {
     console.error('[webui] Failed to create share_manifests table:', error);
@@ -161,13 +170,13 @@ export async function initializeDatabase(): Promise<void> {
     // Migration: add encrypted_manifest column and make manifest_data nullable
     await query(`
       ALTER TABLE collab_manifests ADD COLUMN IF NOT EXISTS encrypted_manifest TEXT
-    `).catch(() => { /* column may already exist */ });
+    `).catch(ignoreMigrationError);
     await query(`
       ALTER TABLE collab_manifests ALTER COLUMN manifest_data DROP NOT NULL
-    `).catch(() => { /* already nullable */ });
+    `).catch(ignoreMigrationError);
     await query(`
       ALTER TABLE collab_manifests ADD COLUMN IF NOT EXISTS creator_id VARCHAR(64)
-    `).catch(() => { /* column may already exist */ });
+    `).catch(ignoreMigrationError);
     console.log('[webui] collab_manifests table ready');
   } catch (error) {
     console.error('[webui] Failed to create collab_manifests table:', error);
@@ -195,7 +204,7 @@ export async function initializeDatabase(): Promise<void> {
       `ALTER TABLE admin_audit_log ADD COLUMN IF NOT EXISTS target_id VARCHAR(64)`,
     ];
     for (const sql of zkMigrations) {
-      await query(sql).catch(() => { /* column may already exist or table may not exist */ });
+      await query(sql).catch(ignoreMigrationError);
     }
     console.log('[webui] Zero-knowledge schema columns ready');
   } catch (error) {
@@ -300,11 +309,11 @@ export async function initializeDatabase(): Promise<void> {
       `CREATE INDEX IF NOT EXISTS idx_referrals_referred_id ON referrals(referred_id)`,
     ];
     for (const sql of indexes) {
-      await query(sql).catch(() => { /* index may already exist */ });
+      await query(sql).catch(ignoreMigrationError);
     }
 
     // Migrate UNIQUE constraint from (user_email, wallet_address, chain_id) to (user_id, wallet_address_hash, chain_id)
-    await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_wallets_uid_hash_chain ON user_wallets(user_id, wallet_address_hash, chain_id)`).catch(() => {});
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_wallets_uid_hash_chain ON user_wallets(user_id, wallet_address_hash, chain_id)`).catch(ignoreMigrationError);
   } catch (error) {
     console.error('[webui] Index creation error:', error);
   }
@@ -548,6 +557,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         objectSrc: ["'self'", "blob:"],
         mediaSrc: ["'self'", "blob:"],
         frameAncestors: ["'self'"],
+        baseUri: ["'self'"],
+        upgradeInsecureRequests: [],
       },
     },
     crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
@@ -557,6 +568,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     origin: config.nodeEnv === 'production' ? false : ['http://localhost:5173', 'http://localhost:3001'],
     credentials: true,
   }));
+
+  // Request ID propagation
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const requestId = req.headers['x-request-id'] as string || crypto.randomUUID();
+    req.headers['x-request-id'] = requestId;
+    res.setHeader('X-Request-ID', requestId);
+    next();
+  });
 
   app.use(express.json());
   app.use(cookieParser());
@@ -576,7 +595,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       standardHeaders: true,
       legacyHeaders: false,
       // Bypass rate limit for server-to-server calls using system key
-      skip: (req) => !!req.headers['x-system-key'],
+      skip: (req) => {
+        const key = req.headers['x-system-key'] as string;
+        if (!key || !config.systemKey) return false;
+        try {
+          return key.length === config.systemKey.length &&
+            crypto.timingSafeEqual(Buffer.from(key), Buffer.from(config.systemKey));
+        } catch { return false; }
+      },
     });
     app.use('/api/', limiter);
 
@@ -2648,12 +2674,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   });
 
   // Manual credit adjustment (admin or system key for x402 gateway)
+  // Accepts { userId, amount, reason } or { email, amount, reason } (backward compat)
   app.post('/api/admin/adjust', requireAdminOrSystemKey, async (req: Request, res: Response) => {
     try {
-      const { email, amount, reason } = req.body;
+      const { userId: directUserId, email, amount, reason } = req.body;
 
-      if (!email || amount === undefined || !reason) {
-        return res.status(400).json({ error: 'email, amount, and reason are required' });
+      const targetUserId = directUserId || (email ? emailToUserId(email) : null);
+      if (!targetUserId || amount === undefined || !reason) {
+        return res.status(400).json({ error: 'userId (or email), amount, and reason are required' });
       }
 
       const numAmount = parseFloat(amount);
@@ -2663,13 +2691,12 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       // Determine caller for audit log
       const isSystemCall = (req as any).isSystemCall;
-      const caller = isSystemCall ? 'system:x402' : `admin:${req.session.user!.email}`;
-      const targetUserId = emailToUserId(email);
+      const caller = isSystemCall ? 'system:x402' : `admin:${req.session.user!.userId}`;
 
       await creditUser(targetUserId, numAmount, `${caller}:${reason}`, 'adjustment');
 
-      console.log(`[webui] ${caller} adjusted ${maskEmail(email)} by ${numAmount} FULA: ${reason}`);
-      await logAdminAction(caller, 'adjust', email, { amount: numAmount, reason });
+      console.log(`[webui] ${caller} adjusted ${targetUserId.slice(0, 8)}... by ${numAmount} FULA: ${reason}`);
+      await logAdminAction(caller, 'adjust', targetUserId, { amount: numAmount, reason });
 
       const newStatus = await getUserCreditStatus(targetUserId);
 
@@ -2746,14 +2773,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Ensure user exists and get/create API key (for x402 gateway wallet users)
   // Creates user if doesn't exist, creates API key if user has none
   // Returns the API key for use in x402 requests
+  // Accepts { userId } or { email } (backward compat — email is hashed to userId)
   app.post('/api/admin/ensure-user-key', requireAdminOrSystemKey, async (req: Request, res: Response) => {
-    const { email } = req.body;
+    const { userId: directUserId, email } = req.body;
 
-    if (!email || typeof email !== 'string') {
-      return res.status(400).json({ error: 'Email required' });
+    const userId = directUserId || (email ? emailToUserId(email) : null);
+    if (!userId || typeof userId !== 'string') {
+      return res.status(400).json({ error: 'userId or email required' });
     }
-
-    const userId = emailToUserId(email);
 
     try {
       // 1. Check if user exists in webui_users
@@ -2761,9 +2788,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       if (!user) {
         // 2. Create user in webui_users — no plain-text email
+        const displayName = email ? email.split('@')[0] : `wallet-${userId.slice(0, 8)}`;
         await query(
           `INSERT INTO webui_users (user_id, name, picture) VALUES ($1, $2, $3)`,
-          [userId, email.split('@')[0], null]
+          [userId, displayName, null]
         );
 
         // Also create in main users table for pinning service compatibility
@@ -2786,13 +2814,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       } else {
         // Create new API key
         apiKey = await dbOps.createApiKey(userId);
-        console.log(`[webui] Created API key for x402 user: ${maskEmail(email)}`);
+        console.log(`[webui] Created API key for x402 user: ${userId.slice(0, 8)}...`);
       }
 
-      const caller = (req as any).isSystemCall ? 'system:x402' : `admin:${req.session.user?.email || 'unknown'}`;
-      await logAdminAction(caller, 'ensure-user-key', email);
+      const caller = (req as any).isSystemCall ? 'system:x402' : `admin:${req.session.user?.userId || 'unknown'}`;
+      await logAdminAction(caller, 'ensure-user-key', userId);
 
-      res.json({ success: true, email, apiKey });
+      res.json({ success: true, userId, apiKey });
 
     } catch (error) {
       console.error('[webui] ensure-user-key error:', error);

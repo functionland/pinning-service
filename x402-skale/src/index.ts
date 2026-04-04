@@ -76,6 +76,9 @@ async function main() {
       console.log('[shutdown] HTTP server closed');
     });
 
+    // Force exit after 10s if connections don't close
+    setTimeout(() => process.exit(1), 10000);
+
     // Close database (async)
     await closeDatabase();
 

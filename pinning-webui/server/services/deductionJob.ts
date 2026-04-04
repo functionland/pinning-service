@@ -66,37 +66,35 @@ async function processUserDeduction(userId: string, storageBytes: number): Promi
   try {
     await client.query('BEGIN');
 
-    // Get or create user credits
+    // Row lock prevents concurrent deduction races
     const creditsResult = await client.query<{ balance_fula: number; is_suspended: number }>(
-      'SELECT balance_fula, is_suspended FROM user_credits WHERE user_id = $1',
+      'SELECT balance_fula, is_suspended FROM user_credits WHERE user_id = $1 FOR UPDATE',
       [userId]
     );
     const credits = creditsResult.rows[0];
 
-    let currentBalance = credits?.balance_fula || 0;
-    let isSuspended = credits?.is_suspended === 1;
-
     // Skip if already suspended (they'll be unsuspended when they add credits)
-    if (isSuspended) {
+    if (credits?.is_suspended === 1) {
       await client.query('COMMIT');
       return { deducted: false, amount: 0, suspended: true };
     }
 
+    const currentBalance = credits?.balance_fula || 0;
     const newBalance = currentBalance - deductionAmount;
     const shouldSuspend = newBalance < 0;
 
     if (credits) {
-      // Update existing record
+      // Atomic deduction on existing record
       await client.query(
         `UPDATE user_credits
-         SET balance_fula = $1,
-             total_deducted_fula = total_deducted_fula + $2,
+         SET balance_fula = balance_fula - $1,
+             total_deducted_fula = total_deducted_fula + $1,
              last_deduction_at = NOW(),
-             is_suspended = $3,
-             suspended_at = CASE WHEN $4 THEN NOW() ELSE suspended_at END,
+             is_suspended = $2,
+             suspended_at = CASE WHEN $3 THEN NOW() ELSE suspended_at END,
              updated_at = NOW()
-         WHERE user_id = $5`,
-        [newBalance, deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend, userId]
+         WHERE user_id = $4`,
+        [deductionAmount, shouldSuspend ? 1 : 0, shouldSuspend, userId]
       );
     } else {
       // Create new record with negative balance
@@ -222,6 +220,7 @@ export async function runDeductionJob(): Promise<void> {
 
 // Start the cron job
 let deductionInterval: NodeJS.Timeout | null = null;
+let isProcessing = false;
 
 export function startDeductionJob(intervalMs: number = 60 * 60 * 1000): void {
   if (deductionInterval) {
@@ -234,8 +233,19 @@ export function startDeductionJob(intervalMs: number = 60 * 60 * 1000): void {
   // Don't run immediately on start - wait for first interval
   // This prevents double-deduction if server restarts
 
-  deductionInterval = setInterval(() => {
-    runDeductionJob().catch(err => console.error('[deductionJob] Error:', err));
+  deductionInterval = setInterval(async () => {
+    if (isProcessing) {
+      console.log('[deductionJob] Previous job still running, skipping');
+      return;
+    }
+    isProcessing = true;
+    try {
+      await runDeductionJob();
+    } catch (err) {
+      console.error('[deductionJob] Error:', err);
+    } finally {
+      isProcessing = false;
+    }
   }, intervalMs);
 }
 

@@ -104,8 +104,15 @@ func (w *responseCaptureWriter) Write(b []byte) (int, error) {
 }
 
 func logResponse(r *http.Request, w *responseCaptureWriter) {
-	// Log the response details
-	log.Printf("Response: %d %s %s", w.status, r.RequestURI, w.body.String())
+	if w.status >= 400 {
+		body := w.body.String()
+		if len(body) > 500 {
+			body = body[:500] + "..."
+		}
+		log.Printf("Response: %d %s %s", w.status, r.RequestURI, body)
+	} else {
+		log.Printf("Response: %d %s", w.status, r.RequestURI)
+	}
 }
 
 func createErrorResponse(statusCode int, reason, details string) ImplResponse {

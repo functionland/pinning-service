@@ -2,10 +2,11 @@
  * Wallet User Service
  *
  * Manages auto-creation of users for x402 wallet payments.
- * Users are created in pinning-webui with email: {wallet}@walletpayment.fx.land
+ * Users are identified by userId (SHA-256 hash of synthetic wallet email).
  * API keys are auto-generated for each user.
  */
 
+import { createHash } from 'crypto';
 import { config } from '../config/index.js';
 import { normalizeAddress } from '../utils/address.js';
 
@@ -14,22 +15,30 @@ const apiKeyCache = new Map<string, { apiKey: string; createdAt: number }>();
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 // In-flight request deduplication to prevent race conditions
-const inFlight = new Map<string, Promise<{ email: string; apiKey: string }>>();
+const inFlight = new Map<string, Promise<{ userId: string; apiKey: string }>>();
 
 /**
- * Generate email for a wallet address
+ * Generate synthetic email for a wallet address (used only for userId derivation)
  */
-export function walletToEmail(wallet: string): string {
+function walletToEmail(wallet: string): string {
   return `${normalizeAddress(wallet)}@walletpayment.fx.land`;
+}
+
+/**
+ * Derive userId hash from wallet address (same as emailToUserId in webui)
+ */
+export function walletToUserId(wallet: string): string {
+  const email = walletToEmail(wallet);
+  return createHash('sha256').update(email.toLowerCase()).digest('hex');
 }
 
 /**
  * Internal: actually call pinning-webui to ensure user + get API key
  */
-async function doEnsureWalletUser(normalizedWallet: string): Promise<{ email: string; apiKey: string }> {
-  const email = walletToEmail(normalizedWallet);
+async function doEnsureWalletUser(normalizedWallet: string): Promise<{ userId: string; apiKey: string }> {
+  const userId = walletToUserId(normalizedWallet);
 
-  console.log(`[wallet-user] Ensuring user + API key: ${email}`);
+  console.log(`[wallet-user] Ensuring user + API key: ${userId.slice(0, 8)}...`);
 
   const response = await fetch(`${config.pinningWebuiUrl}/api/admin/ensure-user-key`, {
     method: 'POST',
@@ -37,7 +46,8 @@ async function doEnsureWalletUser(normalizedWallet: string): Promise<{ email: st
       'Content-Type': 'application/json',
       'X-System-Key': config.pinningSystemKey,
     },
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ userId }),
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (!response.ok) {
@@ -45,14 +55,14 @@ async function doEnsureWalletUser(normalizedWallet: string): Promise<{ email: st
     throw new Error(`Failed: ${response.status} ${errorText}`);
   }
 
-  const result = await response.json() as { success: boolean; email: string; apiKey: string };
+  const result = await response.json() as { success: boolean; userId: string; apiKey: string };
   const apiKey = result.apiKey;
 
   // Cache the result
   apiKeyCache.set(normalizedWallet, { apiKey, createdAt: Date.now() });
-  console.log(`[wallet-user] User + API key ready: ${email}`);
+  console.log(`[wallet-user] User + API key ready: ${userId.slice(0, 8)}...`);
 
-  return { email, apiKey };
+  return { userId, apiKey };
 }
 
 /**
@@ -62,21 +72,21 @@ async function doEnsureWalletUser(normalizedWallet: string): Promise<{ email: st
  *
  * Deduplicates concurrent requests for the same wallet.
  */
-export async function ensureWalletUserAndGetApiKey(wallet: string): Promise<{ email: string; apiKey: string }> {
+export async function ensureWalletUserAndGetApiKey(wallet: string): Promise<{ userId: string; apiKey: string }> {
   const normalizedWallet = normalizeAddress(wallet);
-  const email = walletToEmail(normalizedWallet);
+  const userId = walletToUserId(normalizedWallet);
 
   // Check cache first
   const cached = apiKeyCache.get(normalizedWallet);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) {
-    console.log(`[wallet-user] Cache hit for ${email}`);
-    return { email, apiKey: cached.apiKey };
+    console.log(`[wallet-user] Cache hit for ${userId.slice(0, 8)}...`);
+    return { userId, apiKey: cached.apiKey };
   }
 
   // Deduplicate in-flight requests for the same wallet
   const existing = inFlight.get(normalizedWallet);
   if (existing) {
-    console.log(`[wallet-user] Deduplicating in-flight request for ${email}`);
+    console.log(`[wallet-user] Deduplicating in-flight request for ${userId.slice(0, 8)}...`);
     return existing;
   }
 

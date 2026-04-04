@@ -167,9 +167,12 @@ if (!fs.existsSync(config.uploadDir)) {
     try {
       // Check file type against blocklist
       const headerBuf = Buffer.alloc(4100);
-      const fd = fs.openSync(filePath, 'r');
-      fs.readSync(fd, headerBuf, 0, 4100, 0);
-      fs.closeSync(fd);
+      const fileHandle = await fs.promises.open(filePath, 'r');
+      try {
+        await fileHandle.read(headerBuf, 0, 4100, 0);
+      } finally {
+        await fileHandle.close();
+      }
       const detectedType = await fileTypeFromBuffer(headerBuf);
       if (detectedType && BLOCKED_MIMES.has(detectedType.mime)) {
         fs.unlinkSync(filePath);
@@ -185,6 +188,7 @@ if (!fs.existsSync(config.uploadDir)) {
         pin: false, // Don't pin - pinning service handles this
         wrapWithDirectory: false,
         chunker: 'size-262144',
+        timeout: 1800000, // 30 minutes for multi-GB uploads
       });
 
       // Clean up temporary file
@@ -235,7 +239,7 @@ if (!fs.existsSync(config.uploadDir)) {
     try {
       if (isRawRequest) {
         // Handle raw block request
-        const block = await ipfs.block.get(cid);
+        const block = await ipfs.block.get(cid, { timeout: 600000 });
         res.removeHeader('X-Frame-Options');
         res.setHeader('Content-Type', 'application/vnd.ipld.raw');
         res.setHeader('Content-Length', block.length);
@@ -246,7 +250,7 @@ if (!fs.existsSync(config.uploadDir)) {
         let totalSize = 0;
         const maxSize = 100 * 1024 * 1024; // 100MB limit for gateway
 
-        for await (const chunk of ipfs.cat(cid)) {
+        for await (const chunk of ipfs.cat(cid, { timeout: 600000 })) {
           totalSize += chunk.length;
           if (totalSize > maxSize) {
             return res.status(413).json({ error: 'Content too large for gateway' });
@@ -359,26 +363,28 @@ if (!fs.existsSync(config.uploadDir)) {
     res.status(500).json({ error: 'Internal server error' });
   });
 
-  // Graceful shutdown
-  process.on('SIGTERM', async () => {
-    console.log('SIGTERM received, shutting down gracefully...');
-    await closePool();
-    process.exit(0);
-  });
-
-  process.on('SIGINT', async () => {
-    console.log('SIGINT received, shutting down gracefully...');
-    await closePool();
-    process.exit(0);
-  });
-
   // Start server
-  app.listen(config.port, () => {
+  const server = app.listen(config.port, () => {
     console.log(`IPFS Gateway Server running on port ${config.port}`);
     console.log(`  - IPFS API: ${config.ipfsApiUrl}`);
     console.log(`  - Database: PostgreSQL (${process.env.POSTGRES_HOST || 'localhost'}:${process.env.POSTGRES_PORT || '5432'})`);
     console.log(`  - Max file size: ${Math.round(config.maxFileSize / 1024 / 1024)}MB`);
   });
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    console.log('[ipfs-server] Shutting down...');
+    server.close(() => {
+      console.log('[ipfs-server] Server closed');
+      process.exit(0);
+    });
+    // Force exit after 10s if connections don't close
+    setTimeout(() => process.exit(1), 10000);
+    await closePool();
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 
 })().catch(error => {
   console.error('Failed to start server:', error);

@@ -12,7 +12,7 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 async function fetchPricing(): Promise<void> {
   try {
-    const res = await fetch(`${config.pinningWebuiUrl}/api/credits/pricing`);
+    const res = await fetch(`${config.pinningWebuiUrl}/api/credits/pricing`, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = (await res.json()) as { fulaPerGBMonth?: number };
     if (data.fulaPerGBMonth && data.fulaPerGBMonth > 0) {

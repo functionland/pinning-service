@@ -141,39 +141,19 @@ export async function creditUser(
   try {
     await client.query('BEGIN');
 
-    const existingResult = await client.query<{ balance_fula: number }>(
-      'SELECT balance_fula FROM user_credits WHERE user_id = $1',
-      [userId]
+    // Atomic upsert — no read-then-write race condition
+    const depositAdd = txType === 'deposit' ? amount : 0;
+    const result = await client.query<{ balance_fula: number }>(
+      `INSERT INTO user_credits (user_id, balance_fula, total_deposited_fula)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id) DO UPDATE
+       SET balance_fula = user_credits.balance_fula + $2,
+           total_deposited_fula = user_credits.total_deposited_fula + $3,
+           is_suspended = 0, updated_at = NOW()
+       RETURNING balance_fula`,
+      [userId, amount, depositAdd]
     );
-    const existing = existingResult.rows[0];
-
-    let newBalance: number;
-    if (existing) {
-      newBalance = existing.balance_fula + amount;
-      if (txType === 'deposit') {
-        await client.query(
-          `UPDATE user_credits
-           SET balance_fula = $1, total_deposited_fula = total_deposited_fula + $2,
-               is_suspended = 0, updated_at = NOW()
-           WHERE user_id = $3`,
-          [newBalance, amount, userId]
-        );
-      } else {
-        await client.query(
-          `UPDATE user_credits
-           SET balance_fula = $1, is_suspended = 0, updated_at = NOW()
-           WHERE user_id = $2`,
-          [newBalance, userId]
-        );
-      }
-    } else {
-      newBalance = amount;
-      await client.query(
-        `INSERT INTO user_credits (user_id, balance_fula, total_deposited_fula)
-         VALUES ($1, $2, $3)`,
-        [userId, amount, txType === 'deposit' ? amount : 0]
-      );
-    }
+    const newBalance = result.rows[0].balance_fula;
 
     // Log in credit history — no plain-text email
     await client.query(

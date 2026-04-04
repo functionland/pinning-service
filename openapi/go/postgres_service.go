@@ -622,6 +622,7 @@ func (s *PostgresService) GetUserIDFromToken(ctx context.Context, token string, 
 				}
 				return "", fmt.Errorf("GetUserIDFromToken: error querying database in %s: %v", tag, err2)
 			}
+			log.Printf("WARNING: GetUserIDFromToken used plain-text fallback in %s — backfill token_hash", tag)
 		} else {
 			if ctx.Err() == context.Canceled {
 				return "", fmt.Errorf("GetUserIDFromToken: context canceled in %s: %v", tag, err)
@@ -765,6 +766,7 @@ func (s *PostgresService) ValidateSession(ctx context.Context, sessionToken stri
 				}
 				return "", fmt.Errorf("failed to validate session: %w", err2)
 			}
+			log.Printf("WARNING: ValidateSession used plain-text fallback — backfill token_hash")
 		} else {
 			return "", fmt.Errorf("failed to validate session: %w", err)
 		}

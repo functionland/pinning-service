@@ -16,7 +16,6 @@ import { useAuth } from '../context/AuthContext';
 import { FULA_TOKEN_ADDRESSES, SWAP_URLS, FULA_DECIMALS } from '../constants/tokens';
 import { CHAIN_NAMES, DEFAULT_CHAIN_ID, SUPPORTED_CHAIN_IDS, skaleEuropa } from '../config/wagmi';
 import { deriveEncryptionKey, encrypt, decrypt } from '../services/encryptionService';
-import { hasValidKey } from '../services/secureStorage';
 
 // Gas token names per chain
 const GAS_TOKEN_NAMES: Record<number, string> = {

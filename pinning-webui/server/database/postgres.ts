@@ -219,9 +219,9 @@ export async function getOrCreateWebuiUser(
   const tokenHash = hashToken(keyId);
   await query(
     `INSERT INTO sessions (session_token, token_hash, user_id, created_at)
-     VALUES ($1, $1, $2, NOW())
-     ON CONFLICT (session_token) DO UPDATE SET token_hash = $1, user_id = $2, created_at = NOW()`,
-    [tokenHash, userId]
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (session_token) DO UPDATE SET token_hash = $2, user_id = $3, created_at = NOW()`,
+    [tokenHash, tokenHash, userId]
   );
 
   // Generate referral code for this new user
@@ -314,9 +314,9 @@ export async function createApiKey(
   const apiTokenHash = hashToken(keyId);
   await query(
     `INSERT INTO sessions (session_token, token_hash, user_id, username, created_at)
-     VALUES ($1, $1, $2, $3, NOW())
-     ON CONFLICT (session_token) DO UPDATE SET token_hash = $1, user_id = $2, username = $3, created_at = NOW()`,
-    [apiTokenHash, userId, userId]
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (session_token) DO UPDATE SET token_hash = $2, user_id = $3, username = $4, created_at = NOW()`,
+    [apiTokenHash, apiTokenHash, userId, userId]
   );
 
   return keyId;

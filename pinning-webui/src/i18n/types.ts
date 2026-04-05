@@ -107,6 +107,12 @@ export interface Translations {
     noResults: string;
     actions: string;
     refresh: string;
+    viewNodes: string;
+    clusterNodes: string;
+    noNodes: string;
+    noPinnedNodes: string;
+    lastUpdated: string;
+    error: string;
     selected: string;
     unpin: string;
     unpinConfirm: string;
@@ -167,6 +173,8 @@ export interface Translations {
     preview: string;
     download: string;
     apiKeyRequired: string;
+    file: string;
+    files: string;
   };
   view: {
     loading: string;
@@ -180,8 +188,10 @@ export interface Translations {
     enterPassword: string;
     decrypting: string;
     unlock: string;
+    expiresOn: string;
     download: string;
     documentPreview: string;
+    pdfNotSupported: string;
   };
   profile: {
     title: string;
@@ -342,6 +352,7 @@ export interface Translations {
     title: string;
     subtitle: string;
     getItOn: string;
+    downloadOn: string;
     comingSoon: string;
     featureSecure: string;
     featureDecentralized: string;

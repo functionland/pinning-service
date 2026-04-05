@@ -154,6 +154,9 @@ export const en: Translations = {
     preview: 'Preview',
     download: 'Download',
     apiKeyRequired: 'Please create an API key in the API Keys page first.',
+    file: 'file',
+    files: 'files',
+    noPinnedNodes: 'No nodes are currently storing this content.',
   },
   view: {
     loading: 'Loading shared content...',
@@ -167,8 +170,10 @@ export const en: Translations = {
     enterPassword: 'Enter password',
     decrypting: 'Decrypting...',
     unlock: 'Unlock Content',
+    expiresOn: 'Expires',
     download: 'Download',
     documentPreview: 'This document type cannot be previewed in the browser. Download to view.',
+    pdfNotSupported: 'PDF preview is not supported on this device. Please download the file to view it.',
   },
   profile: {
     title: 'Profile',
@@ -329,6 +334,7 @@ export const en: Translations = {
     title: 'Get FxFiles',
     subtitle: 'Secure, decentralized file storage powered by FULA network. Your files, your control.',
     getItOn: 'GET IT ON',
+    downloadOn: 'DOWNLOAD ON THE',
     comingSoon: 'COMING SOON',
     featureSecure: 'Secure',
     featureDecentralized: 'Decentralized',

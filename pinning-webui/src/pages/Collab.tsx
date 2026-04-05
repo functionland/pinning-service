@@ -52,7 +52,7 @@ interface CollabState {
 }
 
 export default function Collab() {
-  const { groupId } = useParams<{ groupId: string }>();
+  const { groupId: _groupId } = useParams<{ groupId: string }>();
   const { user } = useAuth();
   const isSignedIn = !!user;
 

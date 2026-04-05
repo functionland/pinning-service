@@ -28,7 +28,6 @@ import {
 import {
   createPostgresPool,
   query,
-  closePool,
   getOrCreateWebuiUser,
   getWebuiUserByEmail,
   getWebuiUserById,
@@ -1643,7 +1642,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
             'Content-Type': 'application/octet-stream',
             'Content-Length': body.length.toString(),
           },
-          body: body,
+          body: body as unknown as BodyInit,
         });
 
         if (!s3Response.ok) {
@@ -1794,7 +1793,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
             'Content-Type': 'application/json',
             'Content-Length': body.length.toString(),
           },
-          body: body,
+          body: body as unknown as BodyInit,
         });
 
         if (!s3Response.ok) {
@@ -2188,7 +2187,6 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       // Verify the signature using viem
       try {
-        const { verifyMessage } = await import('viem');
         const { recoverMessageAddress } = await import('viem');
 
         const recoveredAddress = await recoverMessageAddress({

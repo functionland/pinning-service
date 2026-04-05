@@ -16,8 +16,6 @@ import init, {
   listBuckets,
   listDecrypted,
   listDirectory,
-  exportSecretKey,
-  getPublicKey,
   deriveKey,
   type EncryptedClient,
   type AcceptedShare,

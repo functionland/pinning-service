@@ -57,7 +57,7 @@ export async function deriveEncryptionKey(
   // Import as AES-GCM key
   const derivedKey = await crypto.subtle.importKey(
     'raw',
-    keyBytes,
+    new Uint8Array(keyBytes),
     { name: 'AES-GCM', length: KEY_LENGTH_BITS },
     true, // extractable - needed for storage
     ['encrypt', 'decrypt']
@@ -99,7 +99,7 @@ export async function exportKey(key: CryptoKey): Promise<Uint8Array> {
 export async function importKey(keyBytes: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'raw',
-    keyBytes,
+    new Uint8Array(keyBytes),
     { name: 'AES-GCM', length: KEY_LENGTH_BITS },
     true,
     ['encrypt', 'decrypt']
@@ -155,7 +155,7 @@ export async function deriveWrapKey(sharedSecret: Uint8Array): Promise<Uint8Arra
   // Import the shared secret as HKDF key material
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
-    sharedSecret,
+    new Uint8Array(sharedSecret),
     'HKDF',
     false,
     ['deriveBits']
@@ -277,12 +277,9 @@ function gf(init?: number[]): GF {
   return r;
 }
 
-const _0 = new Uint8Array(16);
 const _9 = new Uint8Array(32);
 _9[0] = 9;
 
-const gf0 = gf();
-const gf1 = gf([1]);
 const _121665 = gf([0xdb41, 1]);
 
 function A(o: GF, a: GF, b: GF): void {
@@ -626,7 +623,7 @@ export async function encrypt(
       tagLength: TAG_LENGTH * 8,
     },
     key,
-    data
+    new Uint8Array(data)
   );
   
   const encryptedArray = new Uint8Array(encrypted);
@@ -844,7 +841,7 @@ async function decryptEnvelopeV1(envelope: any, keyBytes: Uint8Array): Promise<U
   // Import key for AES-GCM
   const key = await crypto.subtle.importKey(
     'raw',
-    keyBytes,
+    new Uint8Array(keyBytes),
     { name: 'AES-GCM', length: 256 },
     false,
     ['decrypt']
@@ -857,9 +854,9 @@ async function decryptEnvelopeV1(envelope: any, keyBytes: Uint8Array): Promise<U
 
   // Decrypt
   const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: nonce, tagLength: 128 },
+    { name: 'AES-GCM', iv: new Uint8Array(nonce), tagLength: 128 },
     key,
-    ciphertextWithTag
+    new Uint8Array(ciphertextWithTag)
   );
 
   return new Uint8Array(decrypted);
@@ -882,7 +879,7 @@ export async function decryptChunkedEnvelopeV2(
   // Import key for AES-GCM
   const key = await crypto.subtle.importKey(
     'raw',
-    keyBytes,
+    new Uint8Array(keyBytes),
     { name: 'AES-GCM', length: 256 },
     false,
     ['decrypt']
@@ -911,9 +908,9 @@ export async function decryptChunkedEnvelopeV2(
 
     // Decrypt chunk
     const decrypted = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv, tagLength: 128 },
+      { name: 'AES-GCM', iv: new Uint8Array(iv), tagLength: 128 },
       key,
-      ciphertextWithTag
+      new Uint8Array(ciphertextWithTag)
     );
 
     decryptedChunks.push(new Uint8Array(decrypted));
@@ -975,7 +972,7 @@ export function isJsonEnvelope(data: Uint8Array): boolean {
  * Trigger a file download in the browser
  */
 export function downloadBlob(data: Uint8Array, filename: string, mimeType: string): void {
-  const blob = new Blob([data], { type: mimeType });
+  const blob = new Blob([new Uint8Array(data)], { type: mimeType });
   const url = URL.createObjectURL(blob);
   
   const a = document.createElement('a');

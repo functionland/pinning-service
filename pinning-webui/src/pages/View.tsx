@@ -126,7 +126,7 @@ export default function View() {
                   ...s,
                   loading: false,
                   error: 'This share link has expired.',
-                  expiresAt: new Date(shareDataV2.expiresAt * 1000).toISOString(),
+                  expiresAt: new Date(shareDataV2.expiresAt! * 1000).toISOString(),
                 }));
                 return;
               }
@@ -238,7 +238,7 @@ export default function View() {
               shareDataV2.files = decrypted.files.map(f => ({
                 name: f.n, cid: f.c, size: f.s, tokenJson: f.t || undefined,
               }));
-              console.log('[View] Loaded encrypted folder manifest:', shareDataV2.files.length, 'files');
+              console.log('[View] Loaded encrypted folder manifest:', shareDataV2.files!.length, 'files');
             }
           } else if (data.files && Array.isArray(data.files)) {
             // Legacy plaintext manifest
@@ -246,7 +246,7 @@ export default function View() {
               if ('name' in f) return f;
               return { name: f.n, cid: f.c, size: f.s, tokenJson: f.t || undefined };
             });
-            console.log('[View] Loaded plaintext folder manifest:', shareDataV2.files.length, 'files');
+            console.log('[View] Loaded plaintext folder manifest:', shareDataV2.files!.length, 'files');
           }
         } else {
           console.log('[View] Manifest fetch returned', resp.status, '- using URL fragment fallback');
@@ -338,7 +338,7 @@ export default function View() {
               loading: false,
               needsPassword: false,
               error: 'This share link has expired.',
-              expiresAt: new Date(shareDataV2.expiresAt * 1000).toISOString(),
+              expiresAt: new Date(shareDataV2.expiresAt! * 1000).toISOString(),
             }));
             setDecrypting(false);
             return;

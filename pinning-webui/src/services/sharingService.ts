@@ -10,7 +10,7 @@
  */
 
 import { decrypt, importKey, getExtensionFromMimeType, deriveSharedSecret, deriveWrapKey } from './encryptionService';
-import { createShareClient, decryptWithShareToken, acceptShareToken, decryptWithAcceptedShare } from './fulaClientService';
+import { createShareClient, acceptShareToken, decryptWithAcceptedShare } from './fulaClientService';
 
 // Constants
 const PBKDF2_ITERATIONS = 100000;
@@ -274,7 +274,7 @@ export async function deriveKeyFromPassword(
   return crypto.subtle.deriveKey(
     {
       name: 'PBKDF2',
-      salt: salt,
+      salt: new Uint8Array(salt),
       iterations: PBKDF2_ITERATIONS,
       hash: 'SHA-256',
     },
@@ -400,7 +400,7 @@ export async function processSharePayloadV2(
   }
 
   // Determine filename
-  const name = payload.f || payload.l || extractFilename(payload.k) || 'shared_file';
+  const name = payload.f || payload.l || extractFilename(payload.k || '') || 'shared_file';
 
   // Original path for fula_client scope validation (must match token.path_scope)
   const originalPath = payload.k || token.path_scope;
@@ -592,7 +592,7 @@ export async function processSharePayload(
     cid,
     bucket: payload.b || '',
     path: payload.k || '',
-    name: tokenData.fileName || payload.l || extractFilename(payload.k) || 'shared_file',
+    name: tokenData.fileName || payload.l || extractFilename(payload.k || '') || 'shared_file',
     dek,
     expiresAt: tokenData.expiresAt,
     contentType: tokenData.contentType,
@@ -954,7 +954,7 @@ export function getViewerType(mimeType: string): ViewerType {
  * Create object URL for blob viewing
  */
 export function createBlobUrl(data: Uint8Array, mimeType: string): string {
-  const blob = new Blob([data], { type: mimeType });
+  const blob = new Blob([new Uint8Array(data)], { type: mimeType });
   return URL.createObjectURL(blob);
 }
 
@@ -1064,7 +1064,7 @@ export interface CollaborationManifest {
 /**
  * Check if a decoded payload is a collaboration payload
  */
-export function isCollabPayload(payload: Record<string, unknown>): payload is CollaborationPayload {
+export function isCollabPayload(payload: Record<string, unknown>): payload is Record<string, unknown> & CollaborationPayload {
   return payload.type === 'collab' && typeof payload.g === 'string';
 }
 
@@ -1106,7 +1106,7 @@ export async function deriveCollabFileKey(
 ): Promise<CryptoKey> {
   const baseKey = await crypto.subtle.importKey(
     'raw',
-    linkSecret,
+    new Uint8Array(linkSecret),
     'HKDF',
     false,
     ['deriveKey']
@@ -1160,9 +1160,9 @@ export async function decryptCollabFile(
   const nonce = encrypted.slice(0, 12);
   const ciphertext = encrypted.slice(12);
   return crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: nonce },
+    { name: 'AES-GCM', iv: new Uint8Array(nonce) },
     key,
-    ciphertext
+    new Uint8Array(ciphertext)
   );
 }
 
@@ -1170,7 +1170,7 @@ export async function decryptCollabFile(
  * Derive AES-256-GCM key for manifest encryption (domain-separated from file keys)
  */
 export async function deriveManifestKey(linkSecret: Uint8Array, scopeId: string): Promise<CryptoKey> {
-  const baseKey = await crypto.subtle.importKey('raw', linkSecret, 'HKDF', false, ['deriveKey']);
+  const baseKey = await crypto.subtle.importKey('raw', new Uint8Array(linkSecret), 'HKDF', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
     {
       name: 'HKDF',
@@ -1239,7 +1239,7 @@ export async function uploadCollabFile(
       'Content-Type': 'application/octet-stream',
       'x-collab-file-id': fileId,
     },
-    body: encryptedData,
+    body: new Uint8Array(encryptedData) as unknown as BodyInit,
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({ error: 'Upload failed' }));
@@ -1271,7 +1271,7 @@ export async function updateCollabManifest(
     headers: {
       'Content-Type': 'application/octet-stream',
     },
-    body: bodyBytes,
+    body: new Uint8Array(bodyBytes) as unknown as BodyInit,
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({ error: 'Manifest update failed' }));

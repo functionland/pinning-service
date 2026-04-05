@@ -1,11 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
-import { S3Client, ListObjectsCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, ListObjectsCommand } from '@aws-sdk/client-s3';
 import {
   deriveEncryptionKey,
   deriveEncryptionKeyBytes,
-  derivePlaylistEncryptionKey,
   exportKey,
   importKey,
   encrypt,
@@ -20,7 +19,7 @@ import {
   isChunkedEnvelopeV2,
   decryptChunkedEnvelopeV2,
 } from '../services/encryptionService';
-import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles, listFulaDirectory } from '../services/fulaClientService';
+import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
 import {
   storeEncryptionKey,
   retrieveEncryptionKey,
@@ -48,33 +47,6 @@ function createS3Client(jwtToken: string): S3Client {
     },
     forcePathStyle: true,
   });
-}
-
-// Helper to convert S3 body stream to Uint8Array
-async function streamToUint8Array(stream: ReadableStream<Uint8Array> | Blob | null): Promise<Uint8Array> {
-  if (!stream) throw new Error('Empty response body');
-
-  if (stream instanceof Blob) {
-    return new Uint8Array(await stream.arrayBuffer());
-  }
-
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-
-  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return result;
 }
 
 interface Pin {
@@ -1049,7 +1021,7 @@ export default function Pins() {
       }
 
       // Create blob URL for preview
-      const blob = new Blob([decryptedData], { type: mimeType });
+      const blob = new Blob([new Uint8Array(decryptedData)], { type: mimeType });
       const blobUrl = URL.createObjectURL(blob);
       setFxPreviewData({ file, blobUrl, mimeType });
     } catch (err) {
@@ -1252,7 +1224,7 @@ export default function Pins() {
   };
 
   // Tab definitions
-  const tabs: { id: TabType; label: string; icon: JSX.Element }[] = [
+  const tabs: { id: TabType; label: string; icon: React.JSX.Element }[] = [
     {
       id: 'fxFiles',
       label: t.pins.tabFxFiles || 'FxFiles',

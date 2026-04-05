@@ -203,7 +203,7 @@ export default function Dashboard() {
               <div className="text-3xl group-hover:scale-110 transition-transform">🎁</div>
               <div>
                 <h3 className="font-semibold text-gray-900">{t.nav.referrals || 'Referrals'}</h3>
-                <p className="text-sm text-gray-500">{t.referrals.subtitle || 'Share & earn rewards'}</p>
+                <p className="text-sm text-gray-500">{t.referrals?.subtitle || 'Share & earn rewards'}</p>
               </div>
             </div>
           </Link>

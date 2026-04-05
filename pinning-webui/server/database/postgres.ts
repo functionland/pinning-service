@@ -170,6 +170,25 @@ export async function getOrCreateWebuiUser(
       'UPDATE webui_users SET last_login_at = NOW(), name = $1, picture = $2 WHERE user_id = $3',
       [encryptedName, encryptedPicture, userId]
     );
+
+    // Link referral for existing users who don't have one yet
+    // (handles: user created before getting referral link, or prior registration error)
+    if (referralCode) {
+      const existingReferral = await query('SELECT 1 FROM referrals WHERE referred_id = $1', [userId]);
+      if (!existingReferral.rows[0]) {
+        const referrer = await query<{ user_id: string }>(
+          'SELECT user_id FROM referral_codes WHERE code = $1',
+          [referralCode]
+        );
+        if (referrer.rows[0] && referrer.rows[0].user_id !== userId) {
+          await query(
+            'INSERT INTO referrals (referrer_id, referred_id, referral_code) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+            [referrer.rows[0].user_id, userId, referralCode]
+          );
+        }
+      }
+    }
+
     return { ...row, name: decName, picture: decPicture, isNew: false };
   }
 
@@ -256,8 +275,8 @@ export async function getOrCreateWebuiUser(
     // Prevent self-referral and only link if referrer exists
     if (referrer.rows[0] && referrer.rows[0].user_id !== userId) {
       await query(
-        'INSERT INTO referrals (referrer_email, referred_email, referrer_id, referred_id, referral_code) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING',
-        [referrer.rows[0].user_id, userId, referrer.rows[0].user_id, userId, referralCode]
+        'INSERT INTO referrals (referrer_id, referred_id, referral_code) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [referrer.rows[0].user_id, userId, referralCode]
       );
     }
   }

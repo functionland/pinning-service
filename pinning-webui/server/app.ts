@@ -305,7 +305,7 @@ export async function initializeDatabase(): Promise<void> {
       `CREATE INDEX IF NOT EXISTS idx_user_wallets_hash ON user_wallets(wallet_address_hash)`,
       `CREATE INDEX IF NOT EXISTS idx_referral_codes_user_id ON referral_codes(user_id)`,
       `CREATE INDEX IF NOT EXISTS idx_referrals_referrer_id ON referrals(referrer_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_referrals_referred_id ON referrals(referred_id)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_referrals_referred_id ON referrals(referred_id)`,
     ];
     for (const sql of indexes) {
       await query(sql).catch(ignoreMigrationError);

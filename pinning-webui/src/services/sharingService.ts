@@ -1057,6 +1057,7 @@ export interface CollaborationManifest {
   expiresAt?: string;
   isRevoked: boolean;
   files: CollaborationFile[];
+  removedFileIds?: string[];
   version: number;
   updatedAt: string;
 }

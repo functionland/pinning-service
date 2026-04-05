@@ -251,10 +251,14 @@ export default function Collab() {
   const { folders, filesAtPath } = useMemo(() => {
     if (!manifest) return { folders: [] as string[], filesAtPath: [] as CollaborationFile[] };
 
+    // Filter out tombstoned (removed) files
+    const removedSet = new Set(manifest.removedFileIds ?? []);
+    const activeFiles = manifest.files.filter(f => !removedSet.has(f.id));
+
     const folderSet = new Set<string>();
     const files: CollaborationFile[] = [];
 
-    for (const file of manifest.files) {
+    for (const file of activeFiles) {
       // Only collab-uploaded files use pathScope as folder path.
       // Fula files have pathScope as storage key (e.g. "images/bafyabc") — show at root.
       const filePath = (file.encType === 'collab' ? file.pathScope : '') || '';
@@ -285,7 +289,7 @@ export default function Collab() {
     }
 
     // Also add explicit folder markers
-    for (const file of manifest.files) {
+    for (const file of activeFiles) {
       if (file.contentType === 'application/x-directory' && file.pathScope) {
         const parentPath = file.pathScope.lastIndexOf('/') >= 0
           ? file.pathScope.slice(0, file.pathScope.lastIndexOf('/'))
@@ -308,7 +312,9 @@ export default function Collab() {
   // Count items inside a folder (files + subfolders, recursive)
   const countFolderItems = useCallback((folderPath: string): number => {
     if (!manifest) return 0;
+    const removedSet = new Set(manifest.removedFileIds ?? []);
     return manifest.files.filter(f => {
+      if (removedSet.has(f.id)) return false;
       const p = (f.encType === 'collab' ? f.pathScope : '') || '';
       return p === folderPath || p.startsWith(folderPath + '/');
     }).filter(f => f.contentType !== 'application/x-directory').length;
@@ -364,7 +370,7 @@ export default function Collab() {
           <h1 style={{ margin: 0, fontSize: '24px' }}>{manifest.name}</h1>
         </div>
         <p style={{ margin: 0, opacity: 0.9, fontSize: '14px' }}>
-          {manifest.files.length} file{manifest.files.length === 1 ? '' : 's'}
+          {(() => { const n = manifest.files.filter(f => !(manifest.removedFileIds ?? []).includes(f.id)).length; return `${n} file${n === 1 ? '' : 's'}`; })()}
           {' \u00B7 '}Shared collaboration space
           {manifest.isRevoked && (
             <span style={{

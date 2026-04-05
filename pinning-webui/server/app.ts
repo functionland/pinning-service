@@ -1701,6 +1701,48 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
+  // Delete encrypted collab file from S3 (cleanup after manifest removal)
+  app.delete('/api/collab/:groupId/file/:fileId',
+    requireSessionOrBearer,
+    collabManifestLimiter,
+    async (req: Request, res: Response) => {
+      try {
+        const { groupId, fileId } = req.params;
+
+        const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidPattern.test(groupId) || !uuidPattern.test(fileId)) {
+          return res.status(400).json({ error: 'Invalid ID format' });
+        }
+
+        const s3Jwt = await getCollabS3Jwt(groupId, req);
+        if (!s3Jwt) {
+          return res.status(500).json({ error: 'Delete not configured' });
+        }
+
+        const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
+        const storageKey = `.fula/collab/${groupId}/files/${fileId}`;
+        const deleteUrl = `${s3BaseUrl}/fula-metadata/${storageKey}`;
+
+        console.log('[webui] Collab file delete:', { groupId, fileId });
+
+        const s3Response = await fetch(deleteUrl, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${s3Jwt}` },
+        });
+
+        if (!s3Response.ok && s3Response.status !== 404) {
+          console.error('[webui] S3 delete failed:', s3Response.status);
+          return res.status(s3Response.status).json({ error: 'Failed to delete file' });
+        }
+
+        return res.json({ ok: true, fileId });
+      } catch (error) {
+        console.error('[webui] Error deleting collab file:', error);
+        res.status(500).json({ error: 'Failed to delete file' });
+      }
+    }
+  );
+
   // Proxy fetch for fula files in a collab group using creator's JWT (public - link-authorized)
   app.get('/api/collab/:groupId/fula-fetch', collabManifestLimiter, async (req: Request, res: Response) => {
     try {

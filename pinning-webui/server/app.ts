@@ -1460,7 +1460,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   });
 
   // Upsert share manifest (called by Flutter at share creation and on temporal updates)
-  app.put('/api/share/v2/manifest/:shareId', requireSessionOrBearer, manifestLimiter, async (req: Request, res: Response) => {
+  app.put('/api/share/v2/manifest/:shareId', manifestLimiter, async (req: Request, res: Response) => {
     try {
       const { shareId } = req.params;
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

@@ -115,9 +115,25 @@ if [[ "$MODE" == "confirm" ]]; then
 fi
 
 # ---- Session tokens ----
+# session_token has a UNIQUE constraint, so can't set all to 'REDACTED'.
+# Instead, overwrite plain-text token with its hash (already unique).
 echo "=== Session Tokens ==="
-redact_column "sessions" "session_token" "token_hash"
-redact_column "pins"     "session_token" "token_hash"
+if [[ -n "$TABLE_FILTER" && "$TABLE_FILTER" != "sessions" ]]; then :
+elif [[ "$MODE" == "dry-run" ]]; then
+  count=$(run_sql "SELECT COUNT(*) FROM sessions WHERE token_hash IS NOT NULL AND session_token IS NOT NULL AND session_token != token_hash")
+  echo "[dry-run] sessions.session_token: $count rows would be overwritten with token_hash"
+else
+  run_sql "UPDATE sessions SET session_token = token_hash WHERE token_hash IS NOT NULL AND session_token IS NOT NULL AND session_token != token_hash" >/dev/null
+  echo "[wiped]   sessions.session_token: done (set to token_hash)"
+fi
+if [[ -n "$TABLE_FILTER" && "$TABLE_FILTER" != "pins" ]]; then :
+elif [[ "$MODE" == "dry-run" ]]; then
+  count=$(run_sql "SELECT COUNT(*) FROM pins WHERE token_hash IS NOT NULL AND session_token IS NOT NULL AND session_token != token_hash")
+  echo "[dry-run] pins.session_token: $count rows would be overwritten with token_hash"
+else
+  run_sql "UPDATE pins SET session_token = token_hash WHERE token_hash IS NOT NULL AND session_token IS NOT NULL AND session_token != token_hash" >/dev/null
+  echo "[wiped]   pins.session_token: done (set to token_hash)"
+fi
 
 # ---- Email addresses ----
 echo ""

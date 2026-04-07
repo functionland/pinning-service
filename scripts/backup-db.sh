@@ -1,7 +1,7 @@
 #!/bin/bash
 # backup-db.sh — Encrypted PostgreSQL backup to IPFS with IPNS publishing.
 #
-# Flow: pg_dump -> encrypt (AES-256-GCM) -> IPFS add -> IPNS publish
+# Flow: pg_dump -> encrypt (AES-256-CBC + PBKDF2) -> IPFS add -> IPNS publish
 # Mirrors the existing publish-registry-ipns.sh pattern for the registry CID.
 #
 # One-time setup:
@@ -87,7 +87,7 @@ echo "$(date -Iseconds) Dump complete: ${DUMP_SIZE} bytes"
 # Step 2: Encrypt with AES-256-GCM
 # ============================================
 echo "$(date -Iseconds) Encrypting dump..."
-openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
+openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
   -pass "env:BACKUP_ENCRYPTION_KEY" \
   -in "$DUMP_FILE" -out "$ENC_FILE"
 
@@ -113,24 +113,60 @@ fi
 SCHEMA_VERSION=$(ls /opt/pinning-service/migrations/postgres/*.sql 2>/dev/null | wc -l || echo "unknown")
 
 # ============================================
+# Step 4b: Export IPNS key (encrypted) for disaster recovery
+# ============================================
+IPNS_KEY_FILE="$TMPDIR/ipns-key.key"
+IPNS_KEY_ENC="$TMPDIR/ipns-key.key.enc"
+IPNS_KEY_CID=""
+if docker exec "$IPFS_CONTAINER" ipfs key export "$IPNS_KEY" > "$IPNS_KEY_FILE" 2>/dev/null && [[ -s "$IPNS_KEY_FILE" ]]; then
+  openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
+    -pass "env:BACKUP_ENCRYPTION_KEY" \
+    -in "$IPNS_KEY_FILE" -out "$IPNS_KEY_ENC"
+  IPNS_KEY_CID=$(docker exec -i "$IPFS_CONTAINER" ipfs add --pin=true --quieter < "$IPNS_KEY_ENC")
+  echo "$(date -Iseconds) IPNS key backed up: $IPNS_KEY_CID"
+else
+  echo "$(date -Iseconds) WARNING: Could not export IPNS key"
+fi
+
+# ============================================
+# Step 4c: Export secrets manifest (encrypted)
+# ============================================
+SECRETS_CID=""
+if [[ -x "/opt/pinning-service/scripts/export-secrets-manifest.sh" ]]; then
+  SECRETS_FILE="$TMPDIR/secrets-manifest.json"
+  /opt/pinning-service/scripts/export-secrets-manifest.sh > "$SECRETS_FILE" 2>/dev/null || true
+  if [[ -s "$SECRETS_FILE" ]]; then
+    ENC_SECRETS="$TMPDIR/secrets-manifest.json.enc"
+    openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
+      -pass "env:BACKUP_ENCRYPTION_KEY" \
+      -in "$SECRETS_FILE" -out "$ENC_SECRETS"
+    SECRETS_CID=$(docker exec -i "$IPFS_CONTAINER" ipfs add --pin=true --quieter < "$ENC_SECRETS")
+    echo "$(date -Iseconds) Secrets manifest: $SECRETS_CID"
+  fi
+fi
+
+# ============================================
 # Step 5: Build and encrypt manifest
 # ============================================
 cat > "$MANIFEST_FILE" <<MANIFEST_EOF
 {
-  "version": 1,
+  "version": 2,
   "timestamp": "${TIMESTAMP}",
   "dump_cid": "${DUMP_CID}",
   "dump_size_bytes": ${DUMP_SIZE},
   "encrypted_size_bytes": ${ENC_SIZE},
   "schema_version": "${SCHEMA_VERSION}",
   "encryption": "aes-256-cbc-pbkdf2",
+  "pbkdf2_iterations": 600000,
   "pii_status": "remediated",
   "excluded_tables": ["logins"],
-  "prev_backup_cid": "${PREV_CID:-null}"
+  "prev_backup_cid": "${PREV_CID:-null}",
+  "ipns_key_cid": "${IPNS_KEY_CID:-null}",
+  "secrets_manifest_cid": "${SECRETS_CID:-null}"
 }
 MANIFEST_EOF
 
-openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
+openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
   -pass "env:BACKUP_ENCRYPTION_KEY" \
   -in "$MANIFEST_FILE" -out "$ENC_MANIFEST"
 
@@ -169,7 +205,8 @@ if command -v jq &>/dev/null; then
      --arg mc "$MANIFEST_CID" \
      --arg dc "$DUMP_CID" \
      --argjson ds "$DUMP_SIZE" \
-     '. += [{"timestamp": $ts, "manifest_cid": $mc, "dump_cid": $dc, "dump_size": $ds}]' \
+     --arg ik "${IPNS_KEY_CID:-}" \
+     '. += [{"timestamp": $ts, "manifest_cid": $mc, "dump_cid": $dc, "dump_size": $ds, "ipns_key_cid": $ik}]' \
      "$HISTORY_FILE" > "$HISTORY_FILE.tmp" && mv "$HISTORY_FILE.tmp" "$HISTORY_FILE"
 else
   # Fallback: append as text
@@ -182,7 +219,7 @@ fi
 echo "$(date -Iseconds) Verifying backup..."
 VERIFY_FILE="$TMPDIR/verify.dump"
 docker exec "$IPFS_CONTAINER" ipfs cat "$DUMP_CID" | \
-  openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 \
+  openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 \
     -pass "env:BACKUP_ENCRYPTION_KEY" > "$VERIFY_FILE" 2>/dev/null
 
 if pg_restore --list "$VERIFY_FILE" >/dev/null 2>&1; then

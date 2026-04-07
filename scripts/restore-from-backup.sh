@@ -56,7 +56,7 @@ ipfs_cat_decrypt() {
   local cid="$1"
   local outfile="$2"
   docker exec "$IPFS_CONTAINER" ipfs cat "$cid" | \
-    openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 \
+    openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 \
       -pass "env:BACKUP_ENCRYPTION_KEY" > "$outfile"
 }
 
@@ -171,6 +171,14 @@ else
 fi
 
 # ============================================
+# Stop services before restore
+# ============================================
+echo "Stopping services before restore..."
+for svc in fula-pinning-webui fula-upload-server fula-pinning-service fula-ai-service x402-gateway; do
+  systemctl stop "$svc" 2>/dev/null && echo "  Stopped $svc" || true
+done
+
+# ============================================
 # Restore database
 # ============================================
 echo "Dropping and recreating database..."
@@ -210,6 +218,23 @@ if [[ -d "$MIGRATIONS_DIR" ]]; then
   fi
 else
   echo "Migrations directory not found at $MIGRATIONS_DIR — skipping"
+fi
+
+# ============================================
+# Import IPNS key if present in manifest
+# ============================================
+IPNS_KEY_CID=$(jq -r '.ipns_key_cid // empty' "$MANIFEST_FILE" 2>/dev/null || true)
+if [[ -n "$IPNS_KEY_CID" && "$IPNS_KEY_CID" != "null" ]]; then
+  EXISTING_KEY=$(docker exec "$IPFS_CONTAINER" ipfs key list | grep -w "$IPNS_KEY" || true)
+  if [[ -z "$EXISTING_KEY" ]]; then
+    echo "Importing IPNS key from backup..."
+    IPNS_KEY_FILE="$TMPDIR/ipns-key.key"
+    ipfs_cat_decrypt "$IPNS_KEY_CID" "$IPNS_KEY_FILE"
+    docker exec -i "$IPFS_CONTAINER" ipfs key import "$IPNS_KEY" < "$IPNS_KEY_FILE"
+    echo "IPNS key imported successfully"
+  else
+    echo "IPNS key '$IPNS_KEY' already exists — skipping import"
+  fi
 fi
 
 # ============================================

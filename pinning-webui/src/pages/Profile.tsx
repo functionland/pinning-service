@@ -179,7 +179,7 @@ export default function Profile() {
           </div>
           <div className="flex justify-between py-3 border-b border-gray-100">
             <span className="text-gray-600">{t.profile.userId}</span>
-            <span className="font-mono text-sm text-gray-700">{user?.email}</span>
+            <span className="font-mono text-xs text-gray-700 break-all max-w-[280px] text-right">{user?.userId}</span>
           </div>
           <div className="flex justify-between py-3">
             <span className="text-gray-600">{t.profile.auth}</span>

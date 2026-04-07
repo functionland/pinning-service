@@ -44,9 +44,9 @@ if [[ -z "${BACKUP_ENCRYPTION_KEY:-}" ]]; then
   exit 1
 fi
 
-# Temp files (cleaned up on exit)
+# Temp files (cleaned up on exit — including any key file left inside IPFS container)
 TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR"; docker exec "$IPFS_CONTAINER" rm -f "/tmp/${IPNS_KEY}.key" 2>/dev/null || true' EXIT
 
 DUMP_FILE="$TMPDIR/backup-${DATE_TAG}.dump"
 ENC_FILE="$TMPDIR/backup-${DATE_TAG}.dump.enc"
@@ -84,7 +84,7 @@ DUMP_SIZE=$(stat -c%s "$DUMP_FILE" 2>/dev/null || stat -f%z "$DUMP_FILE")
 echo "$(date -Iseconds) Dump complete: ${DUMP_SIZE} bytes"
 
 # ============================================
-# Step 2: Encrypt with AES-256-GCM
+# Step 2: Encrypt with AES-256-CBC + PBKDF2
 # ============================================
 echo "$(date -Iseconds) Encrypting dump..."
 openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
@@ -92,13 +92,24 @@ openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
   -in "$DUMP_FILE" -out "$ENC_FILE"
 
 ENC_SIZE=$(stat -c%s "$ENC_FILE" 2>/dev/null || stat -f%z "$ENC_FILE")
+if [[ "$ENC_SIZE" -lt 16 ]]; then
+  echo "$(date -Iseconds) FATAL: Encryption produced empty/invalid output"
+  exit 1
+fi
 echo "$(date -Iseconds) Encrypted: ${ENC_SIZE} bytes"
+
+# Delete raw dump immediately — only encrypted version should exist from here
+rm -f "$DUMP_FILE"
 
 # ============================================
 # Step 3: Upload encrypted dump to IPFS
 # ============================================
 echo "$(date -Iseconds) Adding encrypted dump to IPFS..."
 DUMP_CID=$(docker exec -i "$IPFS_CONTAINER" ipfs add --pin=true --quieter < "$ENC_FILE")
+if [[ -z "$DUMP_CID" ]]; then
+  echo "$(date -Iseconds) FATAL: IPFS add failed — no CID returned"
+  exit 1
+fi
 echo "$(date -Iseconds) Dump CID: $DUMP_CID"
 
 # ============================================
@@ -122,11 +133,21 @@ IPNS_KEY_CID=""
 if docker exec "$IPFS_CONTAINER" sh -c "cd /tmp && ipfs key export '$IPNS_KEY'" >/dev/null 2>&1; then
   docker cp "$IPFS_CONTAINER:/tmp/${IPNS_KEY}.key" "$IPNS_KEY_FILE"
   docker exec "$IPFS_CONTAINER" rm -f "/tmp/${IPNS_KEY}.key"
-  openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
-    -pass "env:BACKUP_ENCRYPTION_KEY" \
-    -in "$IPNS_KEY_FILE" -out "$IPNS_KEY_ENC"
-  IPNS_KEY_CID=$(docker exec -i "$IPFS_CONTAINER" ipfs add --pin=true --quieter < "$IPNS_KEY_ENC")
-  echo "$(date -Iseconds) IPNS key backed up: $IPNS_KEY_CID"
+  if [[ ! -s "$IPNS_KEY_FILE" ]]; then
+    echo "$(date -Iseconds) WARNING: IPNS key export was empty — skipping"
+  else
+    openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
+      -pass "env:BACKUP_ENCRYPTION_KEY" \
+      -in "$IPNS_KEY_FILE" -out "$IPNS_KEY_ENC"
+    if [[ ! -s "$IPNS_KEY_ENC" ]]; then
+      echo "$(date -Iseconds) WARNING: IPNS key encryption failed — skipping"
+    else
+      IPNS_KEY_CID=$(docker exec -i "$IPFS_CONTAINER" ipfs add --pin=true --quieter < "$IPNS_KEY_ENC")
+      echo "$(date -Iseconds) IPNS key backed up: $IPNS_KEY_CID"
+    fi
+    # Shred plaintext key from host
+    rm -f "$IPNS_KEY_FILE"
+  fi
 else
   echo "$(date -Iseconds) WARNING: Could not export IPNS key"
 fi
@@ -143,8 +164,12 @@ if [[ -x "/opt/pinning-service/scripts/export-secrets-manifest.sh" ]]; then
     openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
       -pass "env:BACKUP_ENCRYPTION_KEY" \
       -in "$SECRETS_FILE" -out "$ENC_SECRETS"
-    SECRETS_CID=$(docker exec -i "$IPFS_CONTAINER" ipfs add --pin=true --quieter < "$ENC_SECRETS")
-    echo "$(date -Iseconds) Secrets manifest: $SECRETS_CID"
+    if [[ -s "$ENC_SECRETS" ]]; then
+      SECRETS_CID=$(docker exec -i "$IPFS_CONTAINER" ipfs add --pin=true --quieter < "$ENC_SECRETS")
+      echo "$(date -Iseconds) Secrets manifest: $SECRETS_CID"
+    else
+      echo "$(date -Iseconds) WARNING: Secrets manifest encryption failed — skipping"
+    fi
   fi
 fi
 
@@ -173,7 +198,16 @@ openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
   -pass "env:BACKUP_ENCRYPTION_KEY" \
   -in "$MANIFEST_FILE" -out "$ENC_MANIFEST"
 
+if [[ ! -s "$ENC_MANIFEST" ]]; then
+  echo "$(date -Iseconds) FATAL: Manifest encryption failed"
+  exit 1
+fi
+
 MANIFEST_CID=$(docker exec -i "$IPFS_CONTAINER" ipfs add --pin=true --quieter < "$ENC_MANIFEST")
+if [[ -z "$MANIFEST_CID" ]]; then
+  echo "$(date -Iseconds) FATAL: IPFS add for manifest failed — no CID returned"
+  exit 1
+fi
 echo "$(date -Iseconds) Manifest CID: $MANIFEST_CID"
 
 # ============================================

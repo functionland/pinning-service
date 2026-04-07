@@ -299,20 +299,23 @@ export async function getApiKeys(userId: string): Promise<any[]> {
     'SELECT key_id, encrypted_key, created_at, last_used_at FROM api_keys WHERE user_id = $1 AND is_deleted = 0 ORDER BY created_at DESC',
     [userId]
   );
-  return result.rows.map((row: any) => {
-    let displayKey = row.key_id;
-    if (row.encrypted_key) {
-      try {
-        const decrypted = decryptApiKey(row.encrypted_key);
-        if (decrypted) displayKey = decrypted;
-      } catch { /* fallback to key_id */ }
-    }
-    return {
-      key_id: displayKey || '(key not displayable)',
-      created_at: row.created_at,
-      last_used_at: row.last_used_at,
-    };
-  });
+  return result.rows
+    .map((row: any) => {
+      let displayKey = row.key_id;
+      if (row.encrypted_key) {
+        try {
+          const decrypted = decryptApiKey(row.encrypted_key);
+          if (decrypted) displayKey = decrypted;
+        } catch { /* fallback to key_id */ }
+      }
+      if (!displayKey) return null; // key_id wiped and no encrypted_key — not displayable
+      return {
+        key_id: displayKey,
+        created_at: row.created_at,
+        last_used_at: row.last_used_at,
+      };
+    })
+    .filter(Boolean);
 }
 
 // Create API key (no plain-text key_id for new records)

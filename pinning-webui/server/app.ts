@@ -304,6 +304,25 @@ export async function initializeDatabase(): Promise<void> {
     if (unencryptedKeys.rows.length > 0) {
       console.log(`[webui] Backfilled encrypted_key for ${unencryptedKeys.rows.length} API keys`);
     }
+
+    // Backfill encrypted_wallet_address for wallets that have plain-text wallet_address
+    const unencryptedWallets = await query<{ user_id: string; wallet_address_hash: string; wallet_address: string }>(
+      "SELECT user_id, wallet_address_hash, wallet_address FROM user_wallets WHERE wallet_address IS NOT NULL AND wallet_address != ''"
+    );
+    let walletBackfillCount = 0;
+    for (const row of unencryptedWallets.rows) {
+      const encrypted = encryptApiKey(row.wallet_address.toLowerCase());
+      if (encrypted) {
+        await query(
+          'UPDATE user_wallets SET encrypted_wallet_address = $1 WHERE user_id = $2 AND wallet_address_hash = $3',
+          [encrypted, row.user_id, row.wallet_address_hash]
+        );
+        walletBackfillCount++;
+      }
+    }
+    if (walletBackfillCount > 0) {
+      console.log(`[webui] Backfilled encrypted_wallet_address for ${walletBackfillCount} wallets`);
+    }
   } catch (error) {
     console.error('[webui] user_id backfill error:', error);
   }
@@ -2280,8 +2299,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Unsupported or disabled chain' });
       }
 
-      // Link the wallet (verified), pass client-encrypted address blob
-      await linkWallet(userId, normalizedAddress, chainId, true, encryptedAddress);
+      // Link the wallet (verified) — server encrypts address for storage
+      await linkWallet(userId, normalizedAddress, chainId, true);
 
       console.log(`[webui] Wallet linked to user ${userId.slice(0, 8)}... on chain ${chainId} (signature verified)`);
 
@@ -3267,8 +3286,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Unsupported or disabled chain' });
       }
 
-      // Link the wallet (verified), pass client-encrypted address blob
-      await linkWallet(userId, normalizedAddress, chainId, true, encryptedAddress);
+      // Link the wallet (verified) — server encrypts address for storage
+      await linkWallet(userId, normalizedAddress, chainId, true);
 
       console.log(`[api/v1] Wallet linked to user ${userId.slice(0, 8)}... on chain ${chainId}`);
 

@@ -3,7 +3,7 @@
  * Uses PostgreSQL for database operations
  */
 
-import { query, getClient, decryptApiKey } from '../database/postgres.js';
+import { query, getClient, decryptApiKey, encryptApiKey } from '../database/postgres.js';
 import { emailToUserId, hashWalletAddress } from '../utils/hash.js';
 
 // Configuration
@@ -233,15 +233,15 @@ export async function linkWallet(
   walletAddress: string,
   chainId: number,
   isVerified: boolean = false,
-  encryptedAddress?: string
 ): Promise<void> {
   const addressHash = hashWalletAddress(walletAddress);
+  const serverEncrypted = encryptApiKey(walletAddress.toLowerCase());
   await query(
     `INSERT INTO user_wallets (user_id, wallet_address, wallet_address_hash, encrypted_wallet_address, chain_id, is_verified, connected_at)
-     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     VALUES ($1, NULL, $2, $3, $4, $5, NOW())
      ON CONFLICT (user_id, wallet_address_hash, chain_id) DO UPDATE
-     SET is_verified = $6, connected_at = NOW(), encrypted_wallet_address = COALESCE($4, user_wallets.encrypted_wallet_address)`,
-    [userId, null, addressHash, encryptedAddress || null, chainId, isVerified ? 1 : 0]
+     SET is_verified = $5, connected_at = NOW(), encrypted_wallet_address = COALESCE($3, user_wallets.encrypted_wallet_address)`,
+    [userId, addressHash, serverEncrypted, chainId, isVerified ? 1 : 0]
   );
 }
 

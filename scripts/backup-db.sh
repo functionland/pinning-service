@@ -118,7 +118,10 @@ SCHEMA_VERSION=$(ls /opt/pinning-service/migrations/postgres/*.sql 2>/dev/null |
 IPNS_KEY_FILE="$TMPDIR/ipns-key.key"
 IPNS_KEY_ENC="$TMPDIR/ipns-key.key.enc"
 IPNS_KEY_CID=""
-if docker exec "$IPFS_CONTAINER" ipfs key export "$IPNS_KEY" > "$IPNS_KEY_FILE" 2>/dev/null && [[ -s "$IPNS_KEY_FILE" ]]; then
+# ipfs key export writes to <name>.key in CWD — export inside /tmp then copy out
+if docker exec "$IPFS_CONTAINER" sh -c "cd /tmp && ipfs key export '$IPNS_KEY'" >/dev/null 2>&1; then
+  docker cp "$IPFS_CONTAINER:/tmp/${IPNS_KEY}.key" "$IPNS_KEY_FILE"
+  docker exec "$IPFS_CONTAINER" rm -f "/tmp/${IPNS_KEY}.key"
   openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 \
     -pass "env:BACKUP_ENCRYPTION_KEY" \
     -in "$IPNS_KEY_FILE" -out "$IPNS_KEY_ENC"

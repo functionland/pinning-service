@@ -230,7 +230,9 @@ if [[ -n "$IPNS_KEY_CID" && "$IPNS_KEY_CID" != "null" ]]; then
     echo "Importing IPNS key from backup..."
     IPNS_KEY_FILE="$TMPDIR/ipns-key.key"
     ipfs_cat_decrypt "$IPNS_KEY_CID" "$IPNS_KEY_FILE"
-    docker exec -i "$IPFS_CONTAINER" ipfs key import "$IPNS_KEY" < "$IPNS_KEY_FILE"
+    # ipfs key import reads from a file, not stdin — copy into container
+    docker cp "$IPNS_KEY_FILE" "$IPFS_CONTAINER:/tmp/ipns-key-import.key"
+    docker exec "$IPFS_CONTAINER" sh -c "cd /tmp && ipfs key import '$IPNS_KEY' ipns-key-import.key && rm -f ipns-key-import.key"
     echo "IPNS key imported successfully"
   else
     echo "IPNS key '$IPNS_KEY' already exists — skipping import"

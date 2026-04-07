@@ -631,12 +631,12 @@ func (s *PostgresService) GetUserIDFromToken(ctx context.Context, token string, 
 		}
 	}
 
-	// Prefer username (email) for backward compat; fall back to user_id for new sessions
-	if username.Valid && username.String != "" {
-		return username.String, nil
-	}
+	// Prefer user_id (hash-based, survives PII wipe); fall back to username for legacy
 	if userId.Valid && userId.String != "" {
 		return userId.String, nil
+	}
+	if username.Valid && username.String != "" {
+		return username.String, nil
 	}
 	return "", fmt.Errorf("GetUserIDFromToken: no identity found for token in %s", tag)
 }

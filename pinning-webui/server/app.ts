@@ -1951,7 +1951,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         SELECT
           COUNT(*) as total_pins,
           COALESCE(SUM(size), 0) as total_size,
-          COUNT(DISTINCT username) as total_users
+          COUNT(DISTINCT user_id) as total_users
         FROM pins
         WHERE status != 'deleted'
       `);

@@ -3,7 +3,7 @@
  * Uses PostgreSQL for database operations
  */
 
-import { query, getClient } from '../database/postgres.js';
+import { query, getClient, decryptApiKey } from '../database/postgres.js';
 import { emailToUserId, hashWalletAddress } from '../utils/hash.js';
 
 // Configuration
@@ -208,14 +208,23 @@ export async function getUserWallets(userId: string): Promise<Array<{
     [userId]
   );
 
-  return result.rows.map(row => ({
-    address: row.address,
-    chainId: row.chainid,
-    isVerified: row.isverified === 1,
-    connectedAt: row.connectedat,
-    walletAddressHash: row.walletaddresshash || undefined,
-    encryptedWalletAddress: row.encryptedwalletaddress || undefined,
-  }));
+  return result.rows.map(row => {
+    let displayAddress = row.address;
+    if (!displayAddress && row.encryptedwalletaddress) {
+      try {
+        const decrypted = decryptApiKey(row.encryptedwalletaddress);
+        if (decrypted) displayAddress = decrypted;
+      } catch { /* legacy */ }
+    }
+    return {
+      address: displayAddress || '(address hidden)',
+      chainId: row.chainid,
+      isVerified: row.isverified === 1,
+      connectedAt: row.connectedat,
+      walletAddressHash: row.walletaddresshash || undefined,
+      encryptedWalletAddress: row.encryptedwalletaddress || undefined,
+    };
+  });
 }
 
 // Link a wallet to a user

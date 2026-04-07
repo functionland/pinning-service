@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useLanguage } from '../context/LanguageContext';
 
 interface SuspendedUser {
+  userId: string;
   email: string;
   balanceFula: number;
   suspendedAt: string;
@@ -58,14 +59,14 @@ export default function AdminUsers() {
     }
   };
 
-  const handleUnsuspend = async (email: string) => {
+  const handleUnsuspend = async (userId: string) => {
     try {
-      setUnsuspending(email);
+      setUnsuspending(userId);
       const res = await fetch('/api/admin/unsuspend', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ userId }),
       });
 
       if (!res.ok) throw new Error('Failed to unsuspend user');
@@ -199,7 +200,7 @@ export default function AdminUsers() {
               <thead className="bg-gray-50 border-b border-gray-100">
                 <tr>
                   <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
-                    {t.admin?.email || 'Email'}
+                    {t.admin?.email || 'User'}
                   </th>
                   <th className="text-right text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
                     {t.admin?.balance || 'Balance'}
@@ -217,8 +218,8 @@ export default function AdminUsers() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {suspendedUsers.map((user) => (
-                  <tr key={user.email} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 text-sm text-gray-900">{user.email}</td>
+                  <tr key={user.userId} className="hover:bg-gray-50">
+                    <td className="px-4 py-3 text-sm text-gray-900 font-mono">{user.email || user.userId.slice(0, 16) + '...'}</td>
                     <td className="px-4 py-3 text-sm text-right text-red-600 font-medium">
                       {user.balanceFula.toFixed(2)} FULA
                     </td>
@@ -230,11 +231,11 @@ export default function AdminUsers() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <button
-                        onClick={() => handleUnsuspend(user.email)}
-                        disabled={unsuspending === user.email}
+                        onClick={() => handleUnsuspend(user.userId)}
+                        disabled={unsuspending === user.userId}
                         className="btn-secondary text-sm disabled:opacity-50"
                       >
-                        {unsuspending === user.email
+                        {unsuspending === user.userId
                           ? (t.common?.loading || 'Loading...')
                           : (t.admin?.unsuspend || 'Unsuspend')}
                       </button>

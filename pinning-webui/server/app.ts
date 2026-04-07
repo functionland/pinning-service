@@ -2704,13 +2704,12 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Unsuspend a user (admin only)
   app.post('/api/admin/unsuspend', requireAdmin, async (req: Request, res: Response) => {
     try {
-      const { email } = req.body;
+      const { userId: directUserId, email } = req.body;
 
-      if (!email) {
-        return res.status(400).json({ error: 'Email is required' });
+      const targetUserId = directUserId || (email ? emailToUserId(email) : null);
+      if (!targetUserId) {
+        return res.status(400).json({ error: 'userId or email is required' });
       }
-
-      const targetUserId = emailToUserId(email);
       const success = await unsuspendUser(targetUserId);
 
       if (!success) {

@@ -308,7 +308,7 @@ export async function getApiKeys(userId: string): Promise<any[]> {
       } catch { /* fallback to key_id */ }
     }
     return {
-      key_id: displayKey,
+      key_id: displayKey || '(key not displayable)',
       created_at: row.created_at,
       last_used_at: row.last_used_at,
     };

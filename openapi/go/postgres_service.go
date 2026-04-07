@@ -772,13 +772,12 @@ func (s *PostgresService) ValidateSession(ctx context.Context, sessionToken stri
 		}
 	}
 
-	// Prefer username (email) for backward compat with old sessions;
-	// fall back to user_id for new sessions that don't store plain-text username
-	if username.Valid && username.String != "" {
-		return username.String, nil
-	}
+	// Prefer user_id (hash-based, survives PII wipe); fall back to username for legacy
 	if userId.Valid && userId.String != "" {
 		return userId.String, nil
+	}
+	if username.Valid && username.String != "" {
+		return username.String, nil
 	}
 	return "", errors.New("invalid session: no identity found")
 }

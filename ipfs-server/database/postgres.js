@@ -74,13 +74,13 @@ function isPostgresConfigured() {
 async function validateSession(sessionToken) {
   const tokenHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
   let result = await query(
-    'SELECT username FROM sessions WHERE token_hash = $1',
+    'SELECT username, user_id FROM sessions WHERE token_hash = $1',
     [tokenHash]
   );
   if (result.rows[0]) return result.rows[0];
   // Fallback for old entries that only have plain-text session_token
   result = await query(
-    'SELECT username FROM sessions WHERE session_token = $1',
+    'SELECT username, user_id FROM sessions WHERE session_token = $1',
     [sessionToken]
   );
   return result.rows[0];
@@ -89,7 +89,7 @@ async function validateSession(sessionToken) {
 // Get user pool ID (read-only)
 async function getUserPoolId(username) {
   const result = await query(
-    'SELECT pool_id FROM users WHERE username = $1',
+    'SELECT pool_id FROM users WHERE user_id = $1 OR username = $1',
     [username]
   );
   return result.rows[0];

@@ -45,6 +45,7 @@ import {
   deleteUserReferralCode,
   getUserCompany,
   updateUserCompany,
+  encryptApiKey,
 } from './database/postgres.js';
 import { getEnabledChains, processTransfer } from './services/blockScanner.js';
 
@@ -288,6 +289,20 @@ export async function initializeDatabase(): Promise<void> {
       }
 
       console.log('[webui] user_id backfill complete');
+    }
+
+    // Backfill encrypted_key for api_keys that have key_id but no encrypted_key
+    const unencryptedKeys = await query<{ key_hash: string; key_id: string }>(
+      "SELECT key_hash, key_id FROM api_keys WHERE key_id IS NOT NULL AND key_id != '' AND encrypted_key IS NULL"
+    );
+    for (const row of unencryptedKeys.rows) {
+      const encrypted = encryptApiKey(row.key_id);
+      if (encrypted) {
+        await query('UPDATE api_keys SET encrypted_key = $1 WHERE key_hash = $2', [encrypted, row.key_hash]);
+      }
+    }
+    if (unencryptedKeys.rows.length > 0) {
+      console.log(`[webui] Backfilled encrypted_key for ${unencryptedKeys.rows.length} API keys`);
     }
   } catch (error) {
     console.error('[webui] user_id backfill error:', error);

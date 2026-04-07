@@ -101,7 +101,8 @@ if (!fs.existsSync(config.uploadDir)) {
     if (!row) {
       return null;
     }
-    return row.username;
+    // Prefer user_id (survives PII wipe); fall back to username for legacy
+    return (row.user_id && row.user_id !== '') ? row.user_id : row.username;
   }
 
   // Get user's pool ID from PostgreSQL

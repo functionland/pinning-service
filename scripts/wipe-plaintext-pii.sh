@@ -162,12 +162,12 @@ wipe_column "users"    "username" "user_id"
 # ---- Wallet addresses ----
 echo ""
 echo "=== Wallet Addresses ==="
-wipe_column "user_wallets" "wallet_address" "wallet_address_hash"
+wipe_column "user_wallets" "wallet_address" "encrypted_wallet_address"
 
 # ---- API key plain-text ----
 echo ""
 echo "=== API Keys ==="
-wipe_column "api_keys" "key_id" "key_hash"
+wipe_column "api_keys" "key_id" "encrypted_key"
 
 # ---- IP addresses & user agents (logins) ----
 echo ""

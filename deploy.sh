@@ -164,6 +164,7 @@ MIGRATION_FILES=(
     "011_referral_fk_to_user_id.sql"
     "012_nullable_legacy_columns.sql"
     "013_api_key_hash.sql"
+    "014_user_credits_unique_user_id.sql"
 )
 
 migrations_applied=0

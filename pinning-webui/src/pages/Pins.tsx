@@ -783,6 +783,15 @@ export default function Pins() {
           continue;
         }
 
+        // Skip fula-client infrastructure objects surfaced by S3 LIST but not
+        // owned by the user: v7 HAMT node blobs (`__fula_private_v7/<hash>`) and
+        // v1 forest backups left behind by auto-migration (`__fula_forest_v1_backup/<ts>`).
+        const rawKey = file.storageKey || file.key || file.Key || file.originalKey || '';
+        if (rawKey.startsWith('__fula_') || key.startsWith('__fula_')) {
+          console.log('[FxFiles] Skipping fula internal key:', rawKey || key);
+          continue;
+        }
+
         // Skip internal files (forest index, failed decryptions)
         // Internal files have originalKey === storageKey and start with 'Qm'
         // These are either:

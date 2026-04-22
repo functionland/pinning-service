@@ -3,7 +3,14 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const heicConvert = require('heic-convert');
-const { createPostgresPool, validateSession: pgValidateSession, getUserPoolId: pgGetUserPoolId, closePool } = require('./database/postgres.js');
+const {
+  createPostgresPool,
+  validateSession: pgValidateSession,
+  getUserPoolId: pgGetUserPoolId,
+  closePool,
+  normalizeCid,
+  isBlockedCid,
+} = require('./database/postgres.js');
 
 let create, fileTypeFromBuffer;
 
@@ -224,17 +231,65 @@ if (!fs.existsSync(config.uploadDir)) {
     res.sendStatus(204);
   });
 
+  // Return a 451 blocked response. Content-negotiation: HTML for browsers, JSON for API callers.
+  // Sets no-store so neither browsers nor upstream caches retain the block (or a cached copy).
+  function sendBlocked(req, res, cid) {
+    res.setHeader('Cache-Control', 'no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.removeHeader('X-Frame-Options');
+
+    const accept = String(req.headers['accept'] || '');
+    if (accept.includes('text/html')) {
+      res.status(451).setHeader('Content-Type', 'text/html; charset=utf-8');
+      const safeCid = String(cid).replace(/[<>&"']/g, c =>
+        ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[c]));
+      return res.send(
+        `<!DOCTYPE html><html><head><meta charset="utf-8">` +
+        `<title>Blocked</title>` +
+        `<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:80px auto;padding:24px;color:#111}` +
+        `h1{margin:0 0 12px;font-size:24px}code{background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:13px;word-break:break-all}` +
+        `p{color:#4b5563;line-height:1.5}</style></head><body>` +
+        `<h1>Blocked due to security policy</h1>` +
+        `<p>This content has been blocked by the site administrator and cannot be served.</p>` +
+        `<p>CID: <code>${safeCid}</code></p>` +
+        `</body></html>`
+      );
+    }
+    return res.status(451).json({ error: 'Content blocked due to security policy', cid });
+  }
+
   // IPFS Gateway endpoint (public, no authentication required)
   app.get('/gateway/:ipfs_cid', async (req, res) => {
-    const cid = req.params.ipfs_cid;
-    const isRawRequest = 'raw' in req.query;
-    
-    // Set CORS headers
+    const rawCid = req.params.ipfs_cid;
+
+    // CORS headers apply to every response path (success, 400, 451)
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
-    
-    // Cache headers for gateway responses
+
+    // 1. Normalize — reject un-parseable CIDs
+    let cid;
+    try {
+      cid = await normalizeCid(rawCid);
+    } catch (_err) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(400).json({ error: 'Invalid CID' });
+    }
+
+    // 2. Blocklist check — cached in memory (60s TTL). Fails open on DB errors
+    // so a Postgres blip does not take down the public gateway.
+    try {
+      if (await isBlockedCid(cid)) {
+        return sendBlocked(req, res, rawCid);
+      }
+    } catch (err) {
+      console.error('blocklist check failed, serving anyway:', err.message);
+    }
+
+    const isRawRequest = 'raw' in req.query;
+
+    // Cache headers for gateway responses (only on the success path)
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 
     try {

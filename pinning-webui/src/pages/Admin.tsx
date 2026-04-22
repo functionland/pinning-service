@@ -7,6 +7,7 @@ export default function Admin() {
   const adminNavigation = [
     { name: t.admin?.users || 'Users', href: '/admin/users' },
     { name: t.admin?.referrals || 'Referrals', href: '/admin/referrals' },
+    { name: 'Blocked CIDs', href: '/admin/blocked-cids' },
   ];
 
   return (

@@ -3148,6 +3148,123 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
+  // ============ Blocked CIDs (Admin) ============
+  // Gateway (ipfs-server) reads blocked_cids to refuse serving listed content.
+
+  // Lazy CID loader — multiformats is ESM-only; its typings aren't reachable
+  // through package `exports`, so the dynamic import is typed as any.
+  let _BlockedCidsCIDCtor: any = null;
+  async function normalizeCidOrThrow(input: string): Promise<string> {
+    if (!_BlockedCidsCIDCtor) {
+      // @ts-ignore — multiformats ships types at /types/src but not via `exports`
+      const mod: any = await import('multiformats/cid');
+      _BlockedCidsCIDCtor = mod.CID;
+    }
+    return _BlockedCidsCIDCtor.parse(String(input).trim()).toV1().toString();
+  }
+
+  // List blocked CIDs (admin only, paginated)
+  app.get('/api/admin/blocked-cids', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(200, Math.max(1, parseInt(req.query.limit as string) || 50));
+      const offset = (page - 1) * limit;
+
+      const rowsResult = await query<{
+        id: number;
+        cid: string;
+        reason: string | null;
+        blocked_by: string | null;
+        created_at: string;
+      }>(
+        `SELECT id, cid, reason, blocked_by, created_at
+           FROM blocked_cids
+           ORDER BY created_at DESC
+           LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      );
+      const countResult = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM blocked_cids`
+      );
+
+      res.json({
+        items: rowsResult.rows,
+        page,
+        limit,
+        total: parseInt(countResult.rows[0].count, 10),
+      });
+    } catch (error) {
+      console.error('[webui] Error listing blocked CIDs:', error);
+      res.status(500).json({ error: 'Failed to list blocked CIDs' });
+    }
+  });
+
+  // Add a CID to the blocklist (admin only)
+  app.post('/api/admin/blocked-cids', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { cid, reason } = req.body as { cid?: string; reason?: string };
+      if (!cid || typeof cid !== 'string') {
+        return res.status(400).json({ error: 'cid is required' });
+      }
+
+      let normalized: string;
+      try {
+        normalized = await normalizeCidOrThrow(cid);
+      } catch {
+        return res.status(400).json({ error: 'Invalid CID' });
+      }
+
+      const adminUserId = req.session.user!.userId;
+      const result = await query<{ id: number; cid: string; created_at: string }>(
+        `INSERT INTO blocked_cids (cid, reason, blocked_by)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (cid) DO UPDATE SET reason = EXCLUDED.reason
+           RETURNING id, cid, created_at`,
+        [normalized, reason ?? null, adminUserId]
+      );
+
+      await logAdminAction(adminUserId, 'block-cid', undefined, {
+        cid: normalized,
+        reason: reason ?? null,
+      });
+
+      res.json({ success: true, entry: result.rows[0] });
+    } catch (error) {
+      console.error('[webui] Error adding blocked CID:', error);
+      res.status(500).json({ error: 'Failed to add blocked CID' });
+    }
+  });
+
+  // Remove a CID from the blocklist (admin only)
+  app.delete('/api/admin/blocked-cids/:cid', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const rawCid = req.params.cid;
+      let normalized: string;
+      try {
+        normalized = await normalizeCidOrThrow(rawCid);
+      } catch {
+        return res.status(400).json({ error: 'Invalid CID' });
+      }
+
+      const result = await query(
+        `DELETE FROM blocked_cids WHERE cid = $1`,
+        [normalized]
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({ error: 'CID not in blocklist' });
+      }
+
+      const adminUserId = req.session.user!.userId;
+      await logAdminAction(adminUserId, 'unblock-cid', undefined, { cid: normalized });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[webui] Error removing blocked CID:', error);
+      res.status(500).json({ error: 'Failed to remove blocked CID' });
+    }
+  });
+
   // ============ API v1 Endpoints (Bearer Token Auth for External Apps) ============
   // These endpoints use API key (JWT) authentication instead of browser sessions
   // Existing /api/* endpoints remain unchanged for web UI compatibility

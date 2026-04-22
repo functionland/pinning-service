@@ -95,6 +95,31 @@ async function getUserPoolId(username) {
   return result.rows[0];
 }
 
+// ---- blocked_cids ----
+// normalizeCid is re-exported from ./cid.js so tests can use it without pulling
+// in the `pg` module transitively.
+const { normalizeCid } = require('./cid.js');
+
+// In-memory blocklist cache — single SELECT per TTL, per process.
+const _blockedCache = { set: new Set(), loadedAt: 0, ttlMs: 60000 };
+
+async function loadBlockedCids(force = false) {
+  const now = Date.now();
+  if (!force && now - _blockedCache.loadedAt < _blockedCache.ttlMs) {
+    return _blockedCache.set;
+  }
+  const result = await query('SELECT cid FROM blocked_cids', []);
+  _blockedCache.set = new Set(result.rows.map(r => r.cid));
+  _blockedCache.loadedAt = now;
+  return _blockedCache.set;
+}
+
+// Returns true if the (caller-normalized) CID is blocked.
+async function isBlockedCid(normalizedCid) {
+  const set = await loadBlockedCids(false);
+  return set.has(normalizedCid);
+}
+
 module.exports = {
   createPostgresPool,
   getPool,
@@ -103,4 +128,7 @@ module.exports = {
   isPostgresConfigured,
   validateSession,
   getUserPoolId,
+  normalizeCid,
+  isBlockedCid,
+  loadBlockedCids,
 };

@@ -16,7 +16,8 @@
     "assets": [
       "node_modules/kubo-rpc-client/**/*",
       "node_modules/file-type/**/*",
-      "node_modules/heic-convert/**/*"
+      "node_modules/heic-convert/**/*",
+      "node_modules/multiformats/**/*"
     ],
     "targets": [
       "node20-linux-x64"

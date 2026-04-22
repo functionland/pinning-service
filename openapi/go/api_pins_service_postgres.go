@@ -89,6 +89,7 @@ func (s *PinsAPIServicePostgres) AddPin(ctx context.Context, pin Pin) (ImplRespo
 
 	requestId, err := s.db.AddPin(ctx, userID, pin, uploadStatus)
 	if err != nil {
+		log.Printf("AddPin DB error for user %s cid %s: %v", userID, pin.Cid, err)
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to add pin"), err
 	}
 

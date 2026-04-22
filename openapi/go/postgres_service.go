@@ -191,9 +191,14 @@ func (s *PostgresService) AddPinWithSize(ctx context.Context, username string, p
 
 	// New entries: no plain-text username or session_token stored.
 	// Old entries retain their plain-text values for fallback during migration.
+	// $9 and $10 are both bound to `th` (dual-write of session_token and
+	// token_hash). They must be *separate* placeholders because the two
+	// columns have different Postgres types (session_token TEXT vs
+	// token_hash VARCHAR(64)); reusing $9 for both causes
+	// "inconsistent types deduced for parameter $9" at prepare time.
 	query := `
 		INSERT INTO pins (requestid, cid, name, name_lowercase, origins, meta, status, upload_status, size, session_token, token_hash, user_id, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $9, $10, $11)
+		VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10, $11, $12)
 	`
 
 	_, err = s.db.ExecContext(ctx, query,
@@ -205,6 +210,7 @@ func (s *PostgresService) AddPinWithSize(ctx context.Context, username string, p
 		string(metaJSON),
 		uploadStatus,
 		size,
+		th,
 		th,
 		uid,
 		createdAt,

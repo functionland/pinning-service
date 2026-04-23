@@ -11,6 +11,7 @@ const {
   normalizeCid,
   isBlockedCid,
 } = require('./database/postgres.js');
+const { renderWrapper } = require('./viewWrapper.js');
 
 let create, fileTypeFromBuffer;
 
@@ -259,6 +260,51 @@ if (!fs.existsSync(config.uploadDir)) {
     return res.status(451).json({ error: 'Content blocked due to security policy', cid });
   }
 
+  // --- Disclaimer-wrapper helpers ------------------------------------------
+  // Inline-viewable MIMEs trigger the disclaimer on top-level browser nav.
+  // Everything else (octet-stream, archives, executables) serves through as
+  // a regular download with no wrapper.
+  const INLINE_VIEWABLE_MIMES = new Set([
+    'text/html',
+    'application/pdf',
+    'image/svg+xml',
+  ]);
+
+  function isInlineViewable(mime) {
+    if (!mime) return false;
+    const base = String(mime).split(';')[0].trim().toLowerCase();
+    if (INLINE_VIEWABLE_MIMES.has(base)) return true;
+    return base.startsWith('image/') || base.startsWith('video/') || base.startsWith('audio/');
+  }
+
+  function isBrowserNav(req) {
+    // Top-level navigation sends 'Accept: text/html,...'. Embedded resources
+    // (<img>, <video>, <audio>, fetch()) don't include text/html.
+    return String(req.headers['accept'] || '').includes('text/html');
+  }
+
+  // CID → MIME cache. CIDs are content-addressed so MIME is stable; no TTL.
+  // Size-capped: drop oldest entry on overflow (Map preserves insertion order).
+  const cidMimeCache = new Map();
+  const CID_MIME_CACHE_MAX = 10000;
+  function rememberMime(cid, mime) {
+    if (!mime) return;
+    if (cidMimeCache.size >= CID_MIME_CACHE_MAX) {
+      const oldest = cidMimeCache.keys().next().value;
+      cidMimeCache.delete(oldest);
+    }
+    cidMimeCache.set(cid, mime);
+  }
+
+  function sendWrapper(req, res, cidDisplay) {
+    res.setHeader('Cache-Control', 'no-store, must-revalidate');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Vary', 'Accept');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.removeHeader('X-Frame-Options'); // wrapper uses its own CSP
+    return res.status(200).send(renderWrapper(cidDisplay, req.query));
+  }
+
   // IPFS Gateway endpoint (public, no authentication required)
   app.get('/gateway/:ipfs_cid', async (req, res) => {
     const rawCid = req.params.ipfs_cid;
@@ -287,7 +333,32 @@ if (!fs.existsSync(config.uploadDir)) {
       console.error('blocklist check failed, serving anyway:', err.message);
     }
 
-    const isRawRequest = 'raw' in req.query;
+    // --- Disclaimer wrapper dispatch ---------------------------------------
+    const isRawRequest = 'raw'      in req.query;
+    const isAgreed     = 'agreed'   in req.query;
+    const isView       = 'view'     in req.query;
+    const isDownload   = 'download' in req.query;
+    const browserNav   = !isRawRequest && !isAgreed && !isView && !isDownload
+                          && isBrowserNav(req);
+
+    // Explicit ?view=1 → wrapper regardless of MIME (admin/test bypass)
+    if (isView) {
+      return sendWrapper(req, res, rawCid);
+    }
+
+    // Browser nav + MIME already known to be inline → serve wrapper without
+    // re-fetching content. First-time visitors fall through to the sniff
+    // below, then get redirected to the wrapper after MIME is known.
+    if (browserNav) {
+      const cachedMime = cidMimeCache.get(cid);
+      if (cachedMime && isInlineViewable(cachedMime)) {
+        return sendWrapper(req, res, rawCid);
+      }
+    }
+
+    // Vary on Accept so browser cache keys distinguish wrapper vs. content
+    // for the same URL.
+    res.setHeader('Vary', 'Accept');
 
     // Cache headers for gateway responses (only on the success path)
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
@@ -309,6 +380,9 @@ if (!fs.existsSync(config.uploadDir)) {
         for await (const chunk of ipfs.cat(cid, { timeout: 600000 })) {
           totalSize += chunk.length;
           if (totalSize > maxSize) {
+            // Override the immutable cache header set above — a 413 should not
+            // be cached for a year.
+            res.setHeader('Cache-Control', 'no-store');
             return res.status(413).json({ error: 'Content too large for gateway' });
           }
           chunks.push(chunk);
@@ -343,6 +417,17 @@ if (!fs.existsSync(config.uploadDir)) {
           }
         } catch (typeError) {
           // Ignore type detection errors, use default
+        }
+
+        // Cache the sniffed MIME so future browser-nav hits for this CID
+        // short-circuit to the wrapper without fetching content again.
+        rememberMime(cid, contentType);
+
+        // Top-level browser nav + inline-viewable MIME → serve wrapper
+        // instead of the content. The wrapper's iframe re-requests with
+        // ?agreed=1 to fetch the real content.
+        if (browserNav && isInlineViewable(contentType)) {
+          return sendWrapper(req, res, rawCid);
         }
 
         // Convert HEIC/HEIF to JPEG for browser compatibility

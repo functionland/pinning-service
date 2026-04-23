@@ -119,3 +119,75 @@ describe('blocked_cids: CID normalization', () => {
     await assert.rejects(() => normalizeCid(''));
   });
 });
+
+describe('gateway disclaimer wrapper', () => {
+  const { renderWrapper, buildIframeQuery } = require('../viewWrapper.js');
+
+  // Mirrors the helper in server.js. Kept here so tests exercise the contract
+  // without having to import server.js (which requires pg).
+  const INLINE = new Set(['text/html', 'application/pdf', 'image/svg+xml']);
+  function isInlineViewable(mime) {
+    if (!mime) return false;
+    const base = String(mime).split(';')[0].trim().toLowerCase();
+    if (INLINE.has(base)) return true;
+    return base.startsWith('image/') || base.startsWith('video/') || base.startsWith('audio/');
+  }
+
+  it('isInlineViewable: inline types trigger the wrapper', () => {
+    assert.ok(isInlineViewable('text/html'));
+    assert.ok(isInlineViewable('text/html; charset=utf-8'));
+    assert.ok(isInlineViewable('image/png'));
+    assert.ok(isInlineViewable('image/svg+xml'));
+    assert.ok(isInlineViewable('video/mp4'));
+    assert.ok(isInlineViewable('audio/mpeg'));
+    assert.ok(isInlineViewable('application/pdf'));
+  });
+
+  it('isInlineViewable: download types skip the wrapper', () => {
+    assert.ok(!isInlineViewable('application/octet-stream'));
+    assert.ok(!isInlineViewable('application/zip'));
+    assert.ok(!isInlineViewable('application/x-msdownload'));
+    assert.ok(!isInlineViewable('application/x-sh'));
+    assert.ok(!isInlineViewable(''));
+    assert.ok(!isInlineViewable(undefined));
+  });
+
+  it('buildIframeQuery: drops wrapper-control params, keeps others, appends agreed=1', () => {
+    const out = buildIframeQuery({
+      eta: 'someone@example.com',
+      view: '1', agreed: '1', raw: '1', download: '1',
+      utm: 'x',
+    });
+    assert.ok(out.includes('agreed=1'), 'must add agreed=1');
+    assert.ok(out.includes('eta=someone%40example.com'), 'must preserve eta and URL-encode');
+    assert.ok(out.includes('utm=x'), 'must preserve unrelated params');
+    assert.ok(!out.includes('view='), 'must drop view');
+    assert.ok(!out.includes('raw='), 'must drop raw');
+    assert.ok(!out.includes('download='), 'must drop download');
+    assert.strictEqual((out.match(/agreed=/g) || []).length, 1,
+      'agreed=1 must appear exactly once (original dropped, re-added)');
+  });
+
+  it('renderWrapper: includes CID in both the display and the iframe src', () => {
+    const cid = 'bafkr4ibuqwenfb5vuifxjxdazrnukqf45pbblix22d7dpkkxeyvubunqx4';
+    const html = renderWrapper(cid, {});
+    assert.ok(html.includes('<code>' + cid + '</code>'), 'display CID in <code>');
+    assert.ok(html.includes('src="/gateway/' + cid + '?agreed=1"'),
+      'iframe src with agreed=1');
+    assert.ok(html.includes('fula_gateway_agreed_cids_v2'),
+      'uses the versioned localStorage key');
+  });
+
+  it('renderWrapper: escapes HTML-dangerous characters in the displayed CID', () => {
+    const evil = 'bafy"><script>alert(1)</script>';
+    const html = renderWrapper(evil, {});
+    assert.ok(!html.includes('<script>alert(1)'), 'must not contain unescaped script');
+    assert.ok(html.includes('&lt;script&gt;'), 'must HTML-escape the displayed CID');
+  });
+
+  it('renderWrapper: preserves extra query params on iframe src', () => {
+    const html = renderWrapper('bafkreiexample', { eta: 'a@b.com' });
+    assert.ok(html.includes('eta=a%40b.com'));
+    assert.ok(html.includes('agreed=1'));
+  });
+});

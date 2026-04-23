@@ -630,7 +630,9 @@ function FolderView({ shareData, expiresAt }: { shareData: ProcessedShareDataV2;
       // Use per-file token if available, fallback to main token
       const tokenJson = file.tokenJson || shareData.tokenJson;
       const acceptedShare = await acceptShareToken(client, tokenJson);
-      const decryptedData = await decryptWithAcceptedShare(client, shareData.bucket, file.cid, acceptedShare);
+      // originalPath must match the token's path_scope — FxFiles sets that to storage_key
+      // (the CID) at fula-flutter/src/api/sharing.rs, so file.cid is the correct value here.
+      const decryptedData = await decryptWithAcceptedShare(client, shareData.bucket, file.cid, file.cid, acceptedShare);
 
       downloadBlob(new Uint8Array(decryptedData), file.name, '');
     } catch (err) {

@@ -111,7 +111,8 @@ export default function Collab() {
         const tokenData = JSON.parse(parsed.payload.t);
         const manifestCid = tokenData.path_scope;
 
-        const decryptedBytes = await decryptWithAcceptedShare(client, parsed.payload.b, manifestCid, accepted);
+        // originalPath must equal the token's path_scope — which is manifestCid here.
+        const decryptedBytes = await decryptWithAcceptedShare(client, parsed.payload.b, manifestCid, manifestCid, accepted);
         manifest = JSON.parse(new TextDecoder().decode(new Uint8Array(decryptedBytes))) as CollaborationManifest;
         console.log('[Collab] Loaded manifest from fula (fallback)');
       }
@@ -169,7 +170,8 @@ export default function Collab() {
           const proxyEndpoint = `${window.location.origin}/api/share/v2/fetch`;
           const client = await createShareClient(linkSecret, proxyEndpoint);
           const accepted = await acceptShareToken(client, file.shareTokenJson);
-          const decrypted = await decryptWithAcceptedShare(client, file.bucket, file.storageKey, accepted);
+          // Per-file FxFiles tokens set path_scope to the storage_key (CID), so pass it as originalPath.
+          const decrypted = await decryptWithAcceptedShare(client, file.bucket, file.storageKey, file.storageKey, accepted);
           downloadBlob(
             new Uint8Array(decrypted),
             file.fileName,

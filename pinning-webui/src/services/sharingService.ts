@@ -448,7 +448,7 @@ export async function processSharePayloadV2(
  *
  * Two-step approach (as FxFiles does):
  * 1. acceptShare(client, tokenJson) → AcceptedShare handle
- * 2. getWithShare(client, bucket, storageKey, share) → decrypted data
+ * 2. getWithShare(client, bucket, storageKey, originalPath, share) → decrypted data
  *
  * URL structure for proxy:
  * - Endpoint: /api/share/v2/fetch
@@ -488,6 +488,7 @@ export async function fetchSharedContentV2(
     client,
     shareData.bucket,
     shareData.storageKey,  // Use CID - must match token.path_scope
+    shareData.originalPath,
     acceptedShare
   );
 

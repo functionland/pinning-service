@@ -261,6 +261,7 @@ export async function createShareClient(
  * @param client - Fula encrypted client (created with link's private key)
  * @param bucket - Bucket name
  * @param storageKey - Storage key (CID) of the encrypted file
+ * @param originalPath - Original (unobfuscated) file path; must match the token's path_scope
  * @param tokenJson - ShareToken JSON string from fula_client
  * @returns Decrypted data as Uint8Array
  */
@@ -268,9 +269,10 @@ export async function decryptWithShareToken(
   client: EncryptedClient,
   bucket: string,
   storageKey: string,
+  originalPath: string,
   tokenJson: string
 ): Promise<Uint8Array> {
-  const decrypted = await getWithToken(client, bucket, storageKey, tokenJson);
+  const decrypted = await getWithToken(client, bucket, storageKey, originalPath, tokenJson);
   return new Uint8Array(decrypted);
 }
 
@@ -304,6 +306,7 @@ export function isShareTokenValid(share: AcceptedShare): boolean {
  * @param client - Fula encrypted client
  * @param bucket - Bucket name
  * @param storageKey - Storage key (CID) of the encrypted file
+ * @param originalPath - Original (unobfuscated) file path; must match the share's path_scope
  * @param share - AcceptedShare handle from acceptShareToken
  * @returns Decrypted data as Uint8Array
  */
@@ -311,9 +314,10 @@ export async function decryptWithAcceptedShare(
   client: EncryptedClient,
   bucket: string,
   storageKey: string,
+  originalPath: string,
   share: AcceptedShare
 ): Promise<Uint8Array> {
-  const decrypted = await getWithShare(client, bucket, storageKey, share);
+  const decrypted = await getWithShare(client, bucket, storageKey, originalPath, share);
   return new Uint8Array(decrypted);
 }
 

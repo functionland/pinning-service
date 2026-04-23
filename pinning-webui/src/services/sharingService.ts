@@ -484,11 +484,15 @@ export async function fetchSharedContentV2(
   // The originalPath is only for display purposes
   console.log('[fetchSharedContentV2] Step 2: Fetching with accepted share...');
   console.log('[fetchSharedContentV2] Calling getWithShare with storageKey:', shareData.storageKey);
+  // FxFiles sets the token's path_scope to the storage_key (CID); see
+  // fula-flutter/src/api/sharing.rs:75 — `builder.path_scope(&storage_key)`.
+  // `get_object_with_share` does a `starts_with` prefix check against path_scope,
+  // so the original_key passed here must be the storageKey, not the display name.
   const decryptedData = await decryptWithAcceptedShare(
     client,
     shareData.bucket,
-    shareData.storageKey,  // Use CID - must match token.path_scope
-    shareData.originalPath,
+    shareData.storageKey,
+    shareData.storageKey,
     acceptedShare
   );
 

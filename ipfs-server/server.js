@@ -514,9 +514,12 @@ if (!fs.existsSync(config.uploadDir)) {
     res.status(500).json({ error: 'Internal server error' });
   });
 
-  // Start server
-  const server = app.listen(config.port, () => {
-    console.log(`IPFS Gateway Server running on port ${config.port}`);
+  // Start server. Bind to 127.0.0.1 by default — nginx (ipfs.cloud.fx.land) is
+  // the only intended ingress; raw direct access bypasses TLS and rate limits.
+  // Set BIND_HOST=0.0.0.0 only for local/dev when there is no fronting proxy.
+  const bindHost = process.env.BIND_HOST || '127.0.0.1';
+  const server = app.listen(config.port, bindHost, () => {
+    console.log(`IPFS Gateway Server running on ${bindHost}:${config.port}`);
     console.log(`  - IPFS API: ${config.ipfsApiUrl}`);
     console.log(`  - Database: PostgreSQL (${process.env.POSTGRES_HOST || 'localhost'}:${process.env.POSTGRES_PORT || '5432'})`);
     console.log(`  - Max file size: ${Math.round(config.maxFileSize / 1024 / 1024)}MB`);

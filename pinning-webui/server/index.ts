@@ -82,9 +82,13 @@ async function main() {
       });
     }
 
-    // Start server
-    app.listen(config.port, () => {
-      console.log(`[webui] FULA Pinning WebUI running on port ${config.port}`);
+    // Start server. Bind to 127.0.0.1 by default so nginx is the only thing
+    // that can reach this port — never expose the raw HTTP server (without TLS,
+    // without rate limiting, without HSTS) directly to the public internet.
+    // Set BIND_HOST=0.0.0.0 only for local/dev when there is no fronting proxy.
+    const bindHost = process.env.BIND_HOST || '127.0.0.1';
+    app.listen(config.port, bindHost, () => {
+      console.log(`[webui] FULA Pinning WebUI running on ${bindHost}:${config.port}`);
       console.log(`[webui] Environment: ${config.nodeEnv}`);
       if (!config.googleClientId) {
         console.warn('[webui] WARNING: GOOGLE_CLIENT_ID not set - authentication will not work');

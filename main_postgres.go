@@ -158,9 +158,17 @@ func main() {
 		port = "6000"
 	}
 
+	// Bind host. Default 127.0.0.1 — nginx (api.cloud.fx.land) is the only
+	// intended ingress; raw direct access on the published port bypasses TLS
+	// and rate limits. Set BIND_HOST=0.0.0.0 for local/dev without a proxy.
+	bindHost := os.Getenv("BIND_HOST")
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
+
 	// Create server
 	server := &http.Server{
-		Addr:         ":" + port,
+		Addr:         bindHost + ":" + port,
 		Handler:      openapi.InjectRequestIntoContext(loggingRouter),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 90 * time.Second,

@@ -308,6 +308,57 @@ if [ "$DRY_RUN" = false ]; then
     # Migration 016
     check_column "blocked_cids" "mode" "migration 016"
 
+    # ----------------------------------------------------------------------
+    # Infrastructure binding audit
+    # Postgres or IPFS bound to 0.0.0.0 lets the public internet hit them
+    # directly — bypassing nginx and (for Docker) UFW. Past incidents:
+    # postgres brute-force attempts against role names from public scanners.
+    # We only WARN here; install.sh has the interactive rebind helper.
+    # ----------------------------------------------------------------------
+    log_info "Auditing infrastructure container bindings..."
+
+    PG_BIND=$(docker inspect "$PG_CONTAINER" --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostIp}}{{end}}{{end}}' 2>/dev/null || echo "")
+    case "$PG_BIND" in
+        0.0.0.0)
+            log_err "$PG_CONTAINER bound to 0.0.0.0:5432 — PUBLIC EXPOSURE"
+            log_err "  Fix: re-run install.sh (interactive rebind), or rebind manually:"
+            log_err "    docker stop $PG_CONTAINER && docker rm $PG_CONTAINER"
+            log_err "    # then docker run with -p 127.0.0.1:5432:5432"
+            ALL_OK=false
+            ;;
+        127.0.0.1|::1)
+            log_ok "$PG_CONTAINER bound to localhost ($PG_BIND:5432)"
+            ;;
+        "")
+            log_ok "$PG_CONTAINER has no published port (safe)"
+            ;;
+        *)
+            log_warn "$PG_CONTAINER bound to $PG_BIND — verify intentional"
+            ;;
+    esac
+
+    IPFS_CONTAINER_NAME="${IPFS_CONTAINER:-ipfs_host}"
+    if docker inspect "$IPFS_CONTAINER_NAME" >/dev/null 2>&1; then
+        IPFS_API=$(docker exec "$IPFS_CONTAINER_NAME" ipfs config Addresses.API 2>/dev/null || echo "")
+        case "$IPFS_API" in
+            */ip4/0.0.0.0/*)
+                log_err "$IPFS_CONTAINER_NAME API bound to 0.0.0.0:5001 — PUBLIC EXPOSURE"
+                log_err "  Fix: docker exec $IPFS_CONTAINER_NAME ipfs config Addresses.API /ip4/127.0.0.1/tcp/5001"
+                log_err "       docker restart $IPFS_CONTAINER_NAME"
+                ALL_OK=false
+                ;;
+            */ip4/127.0.0.1/*|*/ip6/::1/*)
+                log_ok "$IPFS_CONTAINER_NAME API bound to localhost"
+                ;;
+            "")
+                log_warn "$IPFS_CONTAINER_NAME exists but Addresses.API could not be read"
+                ;;
+            *)
+                log_warn "$IPFS_CONTAINER_NAME API binding: $IPFS_API"
+                ;;
+        esac
+    fi
+
     # Check ENCRYPTION_KEY is set (required for new user encrypted_email)
     ENC_KEY=""
     if [ -f "$DEPLOY_DIR/pinning-webui/.env" ]; then

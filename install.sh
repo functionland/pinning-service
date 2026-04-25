@@ -62,7 +62,7 @@ check_root() {
 verify_step() {
     local step_name=$1
     local check_cmd=$2
-    
+
     if eval "$check_cmd"; then
         print_success "$step_name completed successfully"
         return 0
@@ -70,6 +70,178 @@ verify_step() {
         print_error "$step_name failed"
         return 1
     fi
+}
+
+# ============================================================================
+# Infrastructure container hardening
+# ----------------------------------------------------------------------------
+# This script does not create the postgres-pinning or ipfs_host containers
+# (they are bootstrapped manually before first install). However it DOES audit
+# their network exposure on every run and offers to fix unsafe public bindings,
+# because exposing PostgreSQL or the IPFS HTTP API to the public internet has
+# been the source of brute-force credential attacks and unauthorized pin/unpin
+# requests in production.
+#
+# Idempotent: safe to call on every install/upgrade.
+# ============================================================================
+
+# Rebind a running PostgreSQL container from 0.0.0.0:5432 to 127.0.0.1:5432.
+# Backs up the database first, captures all current container settings via
+# docker inspect, then stop+rename+recreate with the safer port binding.
+rebind_postgres_to_localhost() {
+    local container="$1"
+
+    print_info "Backing up $container before rebind..."
+    local backup_dir="${TARGET_DIR:-/home/root/pinning-service}/backups"
+    mkdir -p "$backup_dir"
+    local backup_file="$backup_dir/pre-rebind-$(date -u +%Y%m%d_%H%M%S).dump"
+    if ! docker exec "$container" pg_dump -U pinning_user -d pinning_service -Fc -Z6 > "$backup_file" 2>/dev/null \
+       || [ ! -s "$backup_file" ]; then
+        rm -f "$backup_file"
+        print_error "Backup failed — aborting rebind to avoid data loss risk"
+        return 1
+    fi
+    print_success "Backup saved: $backup_file"
+
+    local image volume restart network
+    image=$(docker inspect "$container" --format '{{.Config.Image}}')
+    volume=$(docker inspect "$container" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}')
+    restart=$(docker inspect "$container" --format '{{.HostConfig.RestartPolicy.Name}}')
+    network=$(docker inspect "$container" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
+
+    local env_args=()
+    while IFS= read -r e; do
+        [ -n "$e" ] && env_args+=("-e" "$e")
+    done < <(docker inspect "$container" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(POSTGRES_|PG)' || true)
+
+    local old_name="${container}-old-$(date -u +%Y%m%d%H%M%S)"
+    print_info "Stopping $container and renaming to $old_name (kept for rollback)..."
+    docker stop "$container" >/dev/null
+    docker rename "$container" "$old_name" >/dev/null
+
+    local netarg=()
+    [ -n "$network" ] && [ "$network" != "bridge" ] && netarg=(--network "$network")
+
+    print_info "Recreating $container bound to 127.0.0.1:5432..."
+    if ! docker run -d \
+        --name "$container" \
+        --restart "${restart:-unless-stopped}" \
+        -p 127.0.0.1:5432:5432 \
+        -v "$volume":/var/lib/postgresql/data \
+        "${netarg[@]}" \
+        "${env_args[@]}" \
+        "$image" >/dev/null; then
+        print_error "Recreate failed — old container preserved as $old_name; restore with:"
+        print_error "  docker rename $old_name $container && docker start $container"
+        return 1
+    fi
+
+    local i
+    for i in {1..30}; do
+        docker exec "$container" pg_isready -U pinning_user -d pinning_service >/dev/null 2>&1 && break
+        sleep 1
+    done
+
+    print_success "$container now bound to 127.0.0.1:5432"
+    print_info "Old container kept as $old_name — remove after verifying webui works:"
+    print_info "  docker rm $old_name"
+}
+
+# Audit infrastructure bindings and offer to rebind if anything is publicly
+# exposed. Skips silently if a container does not exist (fresh install case).
+harden_infrastructure_bindings() {
+    echo ""
+    echo "=========================================="
+    print_info "Auditing infrastructure container bindings"
+    echo "=========================================="
+
+    local pg_container="${PG_CONTAINER:-postgres-pinning}"
+    local ipfs_container="${IPFS_CONTAINER:-ipfs_host}"
+
+    # ---- PostgreSQL ----
+    if docker inspect "$pg_container" >/dev/null 2>&1; then
+        local pg_binding
+        pg_binding=$(docker inspect "$pg_container" --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostIp}}{{end}}{{end}}' 2>/dev/null)
+        case "$pg_binding" in
+            0.0.0.0|"")
+                # Empty binding could mean no port published (safe) — disambiguate
+                local pg_published
+                pg_published=$(docker inspect "$pg_container" --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{$p}}{{end}}{{end}}' 2>/dev/null)
+                if [ -n "$pg_published" ]; then
+                    print_warning "$pg_container is bound to 0.0.0.0:5432 — REACHABLE FROM THE PUBLIC INTERNET"
+                    print_warning "  Brute-force attempts against PostgreSQL roles have been observed in this state."
+                    read -p "  Rebind to 127.0.0.1:5432 now? (Y/n): " confirm
+                    if [ "$confirm" != "n" ] && [ "$confirm" != "N" ]; then
+                        rebind_postgres_to_localhost "$pg_container" || \
+                            print_error "Rebind failed — investigate before exposing further"
+                    else
+                        print_warning "Skipped — $pg_container remains publicly exposed"
+                    fi
+                else
+                    print_success "$pg_container has no published ports (safe)"
+                fi
+                ;;
+            127.0.0.1|::1)
+                print_success "$pg_container already bound to localhost ($pg_binding:5432)"
+                ;;
+            *)
+                print_info "$pg_container bound to $pg_binding — verify this is intentional"
+                ;;
+        esac
+    else
+        print_info "$pg_container not found — skipping (set up Postgres before installing)"
+    fi
+
+    # ---- IPFS Kubo HTTP API ----
+    if docker inspect "$ipfs_container" >/dev/null 2>&1; then
+        local api_addr
+        api_addr=$(docker exec "$ipfs_container" ipfs config Addresses.API 2>/dev/null || echo "")
+        case "$api_addr" in
+            */ip4/0.0.0.0/*)
+                print_warning "$ipfs_container API is bound to 0.0.0.0:5001 — REACHABLE FROM THE PUBLIC INTERNET"
+                print_warning "  Anyone on the internet can pin/unpin/serve content via your node."
+                read -p "  Rebind to 127.0.0.1:5001 now? (Y/n): " confirm
+                if [ "$confirm" != "n" ] && [ "$confirm" != "N" ]; then
+                    if docker exec "$ipfs_container" ipfs config Addresses.API /ip4/127.0.0.1/tcp/5001 \
+                       && docker restart "$ipfs_container" >/dev/null; then
+                        print_success "$ipfs_container API rebound to 127.0.0.1:5001"
+                    else
+                        print_error "Rebind failed — investigate before exposing further"
+                    fi
+                else
+                    print_warning "Skipped — $ipfs_container API remains publicly exposed"
+                fi
+                ;;
+            */ip4/127.0.0.1/*|*/ip6/::1/*)
+                print_success "$ipfs_container API already bound to localhost"
+                ;;
+            "")
+                print_info "$ipfs_container exists but Addresses.API could not be read — skipping"
+                ;;
+            *)
+                print_info "$ipfs_container API binding: $api_addr — verify this is intentional"
+                ;;
+        esac
+    else
+        print_info "$ipfs_container not found — skipping (set up IPFS before installing)"
+    fi
+
+    # ---- UFW deny rules (defense in depth) ----
+    # NOTE: For Docker-published ports these rules are cosmetic — Docker writes
+    # its own iptables rules in the DOCKER chain that bypass UFW. The real
+    # protection is the 127.0.0.1 binding above. The deny rules still help for
+    # native processes (anything not in Docker) and as documentation of intent.
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "^Status: active"; then
+        local port
+        for port in 5432 5001 9094 9095; do
+            if ! ufw status | grep -qE "^${port}/tcp\s+DENY"; then
+                ufw deny "$port/tcp" comment "must remain bound to 127.0.0.1" >/dev/null 2>&1 || true
+            fi
+        done
+        print_success "UFW deny rules in place for 5432/5001/9094/9095 (defense in depth)"
+    fi
+
+    print_success "Infrastructure binding audit complete"
 }
 
 # Source nvm if available (for correct Node.js version)
@@ -1851,7 +2023,12 @@ main() {
     if [ "$PINNING_NGINX_CONFIGURED" = true ] || [ "$IPFS_SERVER_NGINX_CONFIGURED" = true ] || [ "$WEBUI_NGINX_CONFIGURED" = true ]; then
         NGINX_CONFIGURED=true
     fi
-    
+
+    # Audit and harden infrastructure container bindings (postgres-pinning, ipfs_host).
+    # Runs every install/upgrade so a freshly-bootstrapped node never stays publicly
+    # exposed by accident. Idempotent — safe on already-hardened servers.
+    harden_infrastructure_bindings
+
     echo ""
     echo "=========================================="
     print_success "Installation completed successfully!"

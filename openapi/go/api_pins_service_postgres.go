@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ipfs-cluster/ipfs-cluster/api"
@@ -140,9 +141,13 @@ func (s *PinsAPIServicePostgres) DeletePinByRequestId(ctx context.Context, reque
 		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "requestid is required"), errors.New("requestid is required")
 	}
 
-	pinStatus, username, err := s.db.GetPinByRequestID(ctx, requestid)
+	pinStatus, pinUserID, pinUsername, err := s.db.GetPinByRequestID(ctx, requestid)
 	if err != nil {
-		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
+		if errors.Is(err, ErrPinNotFound) {
+			return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
+		}
+		log.Printf("GetPinByRequestID DB error for %s: %v", requestid, err)
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to load pin"), err
 	}
 
 	userID, err := s.extractUserIDFromAuth(ctx)
@@ -150,7 +155,7 @@ func (s *PinsAPIServicePostgres) DeletePinByRequestId(ctx context.Context, reque
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
-	if username != userID {
+	if !pinOwnerMatches(pinUserID, pinUsername, userID) {
 		return createErrorResponse(http.StatusForbidden, "FORBIDDEN", "You don't have permission to delete this pin"), errors.New("unauthorized")
 	}
 
@@ -176,9 +181,13 @@ func (s *PinsAPIServicePostgres) GetPinByRequestId(ctx context.Context, requesti
 		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "requestid is required"), errors.New("requestid is required")
 	}
 
-	pinStatus, username, err := s.db.GetPinByRequestID(ctx, requestid)
+	pinStatus, pinUserID, pinUsername, err := s.db.GetPinByRequestID(ctx, requestid)
 	if err != nil {
-		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
+		if errors.Is(err, ErrPinNotFound) {
+			return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
+		}
+		log.Printf("GetPinByRequestID DB error for %s: %v", requestid, err)
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to load pin"), err
 	}
 
 	userID, err := s.extractUserIDFromAuth(ctx)
@@ -186,7 +195,7 @@ func (s *PinsAPIServicePostgres) GetPinByRequestId(ctx context.Context, requesti
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
-	if username != userID {
+	if !pinOwnerMatches(pinUserID, pinUsername, userID) {
 		return createErrorResponse(http.StatusForbidden, "FORBIDDEN", "You don't have permission to view this pin"), errors.New("unauthorized")
 	}
 
@@ -280,9 +289,13 @@ func (s *PinsAPIServicePostgres) ReplacePinByRequestId(ctx context.Context, requ
 		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", err.Error()), err
 	}
 
-	_, username, err := s.db.GetPinByRequestID(ctx, requestid)
+	_, pinUserID, pinUsername, err := s.db.GetPinByRequestID(ctx, requestid)
 	if err != nil {
-		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
+		if errors.Is(err, ErrPinNotFound) {
+			return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
+		}
+		log.Printf("GetPinByRequestID DB error for %s: %v", requestid, err)
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to load pin"), err
 	}
 
 	userID, err := s.extractUserIDFromAuth(ctx)
@@ -290,7 +303,7 @@ func (s *PinsAPIServicePostgres) ReplacePinByRequestId(ctx context.Context, requ
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
-	if username != userID {
+	if !pinOwnerMatches(pinUserID, pinUsername, userID) {
 		return createErrorResponse(http.StatusForbidden, "FORBIDDEN", "You don't have permission to modify this pin"), errors.New("unauthorized")
 	}
 
@@ -307,9 +320,13 @@ func (s *PinsAPIServicePostgres) GetPinNodes(ctx context.Context, requestid stri
 		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "requestid is required"), errors.New("requestid is required")
 	}
 
-	pinStatus, username, err := s.db.GetPinByRequestID(ctx, requestid)
+	pinStatus, pinUserID, pinUsername, err := s.db.GetPinByRequestID(ctx, requestid)
 	if err != nil {
-		return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
+		if errors.Is(err, ErrPinNotFound) {
+			return createErrorResponse(http.StatusNotFound, "NOT_FOUND", "Pin not found"), err
+		}
+		log.Printf("GetPinByRequestID DB error for %s: %v", requestid, err)
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to load pin"), err
 	}
 
 	userID, err := s.extractUserIDFromAuth(ctx)
@@ -317,7 +334,7 @@ func (s *PinsAPIServicePostgres) GetPinNodes(ctx context.Context, requestid stri
 		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
 	}
 
-	if username != userID {
+	if !pinOwnerMatches(pinUserID, pinUsername, userID) {
 		return createErrorResponse(http.StatusForbidden, "FORBIDDEN", "You don't have permission to view this pin"), errors.New("unauthorized")
 	}
 
@@ -342,6 +359,49 @@ func (s *PinsAPIServicePostgres) extractUserIDFromAuth(ctx context.Context) (str
 		return "", err
 	}
 	return s.db.GetUserIDFromToken(ctx, token, "extractUserIDFromAuth")
+}
+
+// pinOwnerMatches reports whether requestUserID (extracted from the bearer
+// token via GetUserIDFromToken — preferentially the SHA-256 user_id, falling
+// back to the legacy plain username) is the owner of a pin row carrying the
+// given user_id (hash) and username (legacy plain) columns.
+//
+// Three regimes coexist after the PII migration:
+//
+//   1. Post-wipe row + post-wipe session
+//      pinUserID  = sha256(lower(email)),  pinUsername = ""
+//      requestUserID = sha256(lower(email))
+//      → first branch matches.
+//
+//   2. Legacy row + legacy session
+//      pinUserID  = "",  pinUsername = "user@example.com"
+//      requestUserID = "user@example.com"  (session.user_id was NULL → fell back to username)
+//      → plain-equality branch matches.
+//
+//   3. Legacy row + post-wipe session
+//      pinUserID  = "",  pinUsername = "User@Example.com"
+//      requestUserID = sha256(lower(email))
+//      → hash-of-lowered-username branch matches. The lower() mirrors webui's
+//      emailToUserId() which lowercases before hashing (pinning-webui/server/utils/hash.ts:9).
+//
+// Any other case (including both id columns empty — should not occur given the
+// wipe script's guard) returns false, yielding a 403 from callers.
+func pinOwnerMatches(pinUserID, pinUsername, requestUserID string) bool {
+	if requestUserID == "" {
+		return false
+	}
+	if pinUserID != "" && pinUserID == requestUserID {
+		return true
+	}
+	if pinUsername != "" {
+		if pinUsername == requestUserID {
+			return true
+		}
+		if hashToken(strings.ToLower(pinUsername)) == requestUserID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *PinsAPIServicePostgres) cidExistsInIPFS(ctx context.Context, cidStr string) (bool, error) {

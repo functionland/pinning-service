@@ -24,6 +24,11 @@ func hashToken(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// ErrPinNotFound is returned by GetPinByRequestID when the row does not exist.
+// Callers should distinguish this from real DB errors so 404 vs 500 can be
+// returned correctly instead of collapsing every failure to 404.
+var ErrPinNotFound = errors.New("pin not found")
+
 // PostgresService provides database operations using PostgreSQL
 type PostgresService struct {
 	db   *sql.DB
@@ -404,34 +409,46 @@ func (s *PostgresService) GetExistingPinByCID(ctx context.Context, username, cid
 	return &pinStatus, nil
 }
 
-// GetPinByRequestID retrieves a pin by its request ID
-func (s *PostgresService) GetPinByRequestID(ctx context.Context, requestID string) (PinStatus, string, error) {
+// GetPinByRequestID retrieves a pin by its request ID. Returns the pin status
+// along with both ownership identifiers from the row: user_id (SHA-256 hash,
+// post-PII-wipe form) and username (legacy email/plain form). Either may be
+// empty depending on whether the row was backfilled and/or PII-wiped — callers
+// should use pinOwnerMatches to decide ownership rather than comparing one
+// field directly.
+//
+// Returns ErrPinNotFound when no row matches; wraps other DB errors verbatim.
+//
+// Note: origins/meta/delegates/info are still scanned as plain strings since
+// the wipe script does not touch them. If a future wipe nulls any of those
+// columns, they'll need the same sql.NullString treatment.
+func (s *PostgresService) GetPinByRequestID(ctx context.Context, requestID string) (PinStatus, string, string, error) {
 	if requestID == "" {
-		return PinStatus{}, "", errors.New("requestID cannot be empty")
+		return PinStatus{}, "", "", errors.New("requestID cannot be empty")
 	}
 
 	query := `
-		SELECT requestid, username, cid, name, origins, meta, status, delegates, info, created_at
+		SELECT requestid, user_id, username, cid, name, origins, meta, status, delegates, info, created_at
 		FROM pins
 		WHERE requestid = $1 AND status != 'deleted'
 	`
 
 	var (
-		reqID, username, cid, name, status string
-		originsJSON, metaJSON              string
-		delegatesJSON, infoJSON            string
-		createdAt                          time.Time
+		reqID, cid, name, status string
+		userID, username         sql.NullString
+		originsJSON, metaJSON    string
+		delegatesJSON, infoJSON  string
+		createdAt                time.Time
 	)
 
 	err := s.db.QueryRowContext(ctx, query, requestID).Scan(
-		&reqID, &username, &cid, &name, &originsJSON, &metaJSON,
+		&reqID, &userID, &username, &cid, &name, &originsJSON, &metaJSON,
 		&status, &delegatesJSON, &infoJSON, &createdAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return PinStatus{}, "", errors.New("pin not found")
+			return PinStatus{}, "", "", ErrPinNotFound
 		}
-		return PinStatus{}, "", fmt.Errorf("failed to query pin: %w", err)
+		return PinStatus{}, "", "", fmt.Errorf("failed to query pin: %w", err)
 	}
 
 	var origins []string
@@ -458,7 +475,7 @@ func (s *PostgresService) GetPinByRequestID(ctx context.Context, requestID strin
 		Info:      info,
 	}
 
-	return pinStatus, username, nil
+	return pinStatus, userID.String, username.String, nil
 }
 
 // GetPins retrieves pins with filtering options

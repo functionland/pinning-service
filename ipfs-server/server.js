@@ -9,7 +9,7 @@ const {
   getUserPoolId: pgGetUserPoolId,
   closePool,
   normalizeCid,
-  isBlockedCid,
+  getBlockedCidMode,
 } = require('./database/postgres.js');
 const { renderWrapper } = require('./viewWrapper.js');
 
@@ -260,6 +260,16 @@ if (!fs.existsSync(config.uploadDir)) {
     return res.status(451).json({ error: 'Content blocked due to security policy', cid });
   }
 
+  // 301 to canonical IPFS gateway. Short cache so admin policy changes propagate quickly.
+  // Query string is intentionally dropped: gateway-specific flags (?raw, ?view, ?agreed,
+  // ?download) are meaningless on ipfs.io.
+  function sendRedirect(req, res, normalizedCid) {
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.removeHeader('X-Frame-Options');
+    return res.redirect(301, `https://ipfs.io/ipfs/${normalizedCid}`);
+  }
+
   // --- Disclaimer-wrapper helpers ------------------------------------------
   // Inline-viewable MIMEs trigger the disclaimer on top-level browser nav.
   // Everything else (octet-stream, archives, executables) serves through as
@@ -323,14 +333,14 @@ if (!fs.existsSync(config.uploadDir)) {
       return res.status(400).json({ error: 'Invalid CID' });
     }
 
-    // 2. Blocklist check — cached in memory (60s TTL). Fails open on DB errors
-    // so a Postgres blip does not take down the public gateway.
+    // 2. Policy check — cached in memory (60s TTL). Fails open on DB errors so
+    // a Postgres blip does not take down the public gateway.
     try {
-      if (await isBlockedCid(cid)) {
-        return sendBlocked(req, res, rawCid);
-      }
+      const mode = await getBlockedCidMode(cid);
+      if (mode === 'block')    return sendBlocked(req, res, rawCid);
+      if (mode === 'redirect') return sendRedirect(req, res, cid);
     } catch (err) {
-      console.error('blocklist check failed, serving anyway:', err.message);
+      console.error('policy check failed, serving anyway:', err.message);
     }
 
     // --- Disclaimer wrapper dispatch ---------------------------------------

@@ -3148,23 +3148,28 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
-  // ============ Blocked CIDs (Admin) ============
-  // Gateway (ipfs-server) reads blocked_cids to refuse serving listed content.
+  // ============ CID Policies (Admin) ============
+  // Gateway (ipfs-server) reads blocked_cids to short-circuit responses:
+  //   mode='block'    → HTTP 451
+  //   mode='redirect' → HTTP 301 to https://ipfs.io/ipfs/{cid}
+  // Table name stays `blocked_cids` for backward compat; admin path is /cid-policies.
 
   // Lazy CID loader — multiformats is ESM-only; its typings aren't reachable
   // through package `exports`, so the dynamic import is typed as any.
-  let _BlockedCidsCIDCtor: any = null;
+  let _CidPoliciesCIDCtor: any = null;
   async function normalizeCidOrThrow(input: string): Promise<string> {
-    if (!_BlockedCidsCIDCtor) {
+    if (!_CidPoliciesCIDCtor) {
       // @ts-ignore — multiformats ships types at /types/src but not via `exports`
       const mod: any = await import('multiformats/cid');
-      _BlockedCidsCIDCtor = mod.CID;
+      _CidPoliciesCIDCtor = mod.CID;
     }
-    return _BlockedCidsCIDCtor.parse(String(input).trim()).toV1().toString();
+    return _CidPoliciesCIDCtor.parse(String(input).trim()).toV1().toString();
   }
 
-  // List blocked CIDs (admin only, paginated)
-  app.get('/api/admin/blocked-cids', requireAdmin, async (req: Request, res: Response) => {
+  type CidMode = 'block' | 'redirect';
+
+  // List CID policies (admin only, paginated)
+  app.get('/api/admin/cid-policies', requireAdmin, async (req: Request, res: Response) => {
     try {
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(200, Math.max(1, parseInt(req.query.limit as string) || 50));
@@ -3176,8 +3181,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         reason: string | null;
         blocked_by: string | null;
         created_at: string;
+        mode: CidMode;
       }>(
-        `SELECT id, cid, reason, blocked_by, created_at
+        `SELECT id, cid, reason, blocked_by, created_at, mode
            FROM blocked_cids
            ORDER BY created_at DESC
            LIMIT $1 OFFSET $2`,
@@ -3194,17 +3200,25 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         total: parseInt(countResult.rows[0].count, 10),
       });
     } catch (error) {
-      console.error('[webui] Error listing blocked CIDs:', error);
-      res.status(500).json({ error: 'Failed to list blocked CIDs' });
+      console.error('[webui] Error listing CID policies:', error);
+      res.status(500).json({ error: 'Failed to list CID policies' });
     }
   });
 
-  // Add a CID to the blocklist (admin only)
-  app.post('/api/admin/blocked-cids', requireAdmin, async (req: Request, res: Response) => {
+  // Add a CID policy (admin only). Strict: any duplicate returns 409.
+  app.post('/api/admin/cid-policies', requireAdmin, async (req: Request, res: Response) => {
     try {
-      const { cid, reason } = req.body as { cid?: string; reason?: string };
+      const { cid, reason, mode } = req.body as {
+        cid?: string;
+        reason?: string;
+        mode?: CidMode;
+      };
       if (!cid || typeof cid !== 'string') {
         return res.status(400).json({ error: 'cid is required' });
+      }
+      const resolvedMode: CidMode = mode ?? 'block';
+      if (resolvedMode !== 'block' && resolvedMode !== 'redirect') {
+        return res.status(400).json({ error: "mode must be 'block' or 'redirect'" });
       }
 
       let normalized: string;
@@ -3215,28 +3229,46 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
 
       const adminUserId = req.session.user!.userId;
-      const result = await query<{ id: number; cid: string; created_at: string }>(
-        `INSERT INTO blocked_cids (cid, reason, blocked_by)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (cid) DO UPDATE SET reason = EXCLUDED.reason
-           RETURNING id, cid, created_at`,
-        [normalized, reason ?? null, adminUserId]
-      );
 
-      await logAdminAction(adminUserId, 'block-cid', undefined, {
+      let result;
+      try {
+        result = await query<{ id: number; cid: string; created_at: string; mode: CidMode }>(
+          `INSERT INTO blocked_cids (cid, reason, blocked_by, mode)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, cid, created_at, mode`,
+          [normalized, reason ?? null, adminUserId, resolvedMode]
+        );
+      } catch (e: any) {
+        if (e?.code === '23505') {
+          // unique_violation on cid — fetch existing mode for a useful error message
+          const existing = await query<{ mode: CidMode }>(
+            `SELECT mode FROM blocked_cids WHERE cid = $1`,
+            [normalized]
+          );
+          const existingMode: CidMode = (existing.rows[0]?.mode as CidMode) ?? 'block';
+          return res.status(409).json({
+            error: `CID is already in the policy list (mode='${existingMode}'). Remove it first to change.`,
+            existingMode,
+          });
+        }
+        throw e;
+      }
+
+      await logAdminAction(adminUserId, 'add-cid-policy', undefined, {
         cid: normalized,
         reason: reason ?? null,
+        mode: resolvedMode,
       });
 
       res.json({ success: true, entry: result.rows[0] });
     } catch (error) {
-      console.error('[webui] Error adding blocked CID:', error);
-      res.status(500).json({ error: 'Failed to add blocked CID' });
+      console.error('[webui] Error adding CID policy:', error);
+      res.status(500).json({ error: 'Failed to add CID policy' });
     }
   });
 
-  // Remove a CID from the blocklist (admin only)
-  app.delete('/api/admin/blocked-cids/:cid', requireAdmin, async (req: Request, res: Response) => {
+  // Remove a CID policy (admin only)
+  app.delete('/api/admin/cid-policies/:cid', requireAdmin, async (req: Request, res: Response) => {
     try {
       const rawCid = req.params.cid;
       let normalized: string;
@@ -3246,22 +3278,25 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Invalid CID' });
       }
 
-      const result = await query(
-        `DELETE FROM blocked_cids WHERE cid = $1`,
+      const result = await query<{ mode: CidMode }>(
+        `DELETE FROM blocked_cids WHERE cid = $1 RETURNING mode`,
         [normalized]
       );
 
       if (result.rowCount === 0) {
-        return res.status(404).json({ error: 'CID not in blocklist' });
+        return res.status(404).json({ error: 'CID not in policy list' });
       }
 
       const adminUserId = req.session.user!.userId;
-      await logAdminAction(adminUserId, 'unblock-cid', undefined, { cid: normalized });
+      await logAdminAction(adminUserId, 'remove-cid-policy', undefined, {
+        cid: normalized,
+        mode: result.rows[0].mode,
+      });
 
       res.json({ success: true });
     } catch (error) {
-      console.error('[webui] Error removing blocked CID:', error);
-      res.status(500).json({ error: 'Failed to remove blocked CID' });
+      console.error('[webui] Error removing CID policy:', error);
+      res.status(500).json({ error: 'Failed to remove CID policy' });
     }
   });
 

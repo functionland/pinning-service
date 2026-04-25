@@ -166,6 +166,7 @@ MIGRATION_FILES=(
     "013_api_key_hash.sql"
     "014_user_credits_unique_user_id.sql"
     "015_blocked_cids.sql"
+    "016_blocked_cids_mode.sql"
 )
 
 migrations_applied=0
@@ -304,6 +305,8 @@ if [ "$DRY_RUN" = false ]; then
     check_column "api_keys" "key_hash" "migration 013"
     # Migration 015
     check_table "blocked_cids" "migration 015"
+    # Migration 016
+    check_column "blocked_cids" "mode" "migration 016"
 
     # Check ENCRYPTION_KEY is set (required for new user encrypted_email)
     ENC_KEY=""

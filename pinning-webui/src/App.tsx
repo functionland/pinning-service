@@ -12,7 +12,7 @@ import Referrals from './pages/Referrals';
 import Admin from './pages/Admin';
 import AdminUsers from './pages/AdminUsers';
 import AdminReferrals from './pages/AdminReferrals';
-import AdminBlockedCids from './pages/AdminBlockedCids';
+import AdminCidPolicies from './pages/AdminCidPolicies';
 import GetKey from './pages/GetKey';
 import View from './pages/View';
 import Collab from './pages/Collab';
@@ -94,7 +94,7 @@ function App() {
               <Route index element={<Navigate to="/admin/users" replace />} />
               <Route path="users" element={<AdminUsers />} />
               <Route path="referrals" element={<AdminReferrals />} />
-              <Route path="blocked-cids" element={<AdminBlockedCids />} />
+              <Route path="cid-policies" element={<AdminCidPolicies />} />
             </Route>
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

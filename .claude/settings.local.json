@@ -35,7 +35,8 @@
       "Bash(bash -n /mnt/e/GitHub/pinning-service/deploy.sh)",
       "Bash(sed -i 's/\\\\r$//' deploy.sh)",
       "Bash(bash -n deploy.sh)",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(echo \"EXIT:$?\")",
+      "PowerShell(Get-Item \"E:\\\\GitHub\\\\pinning-service\" -ErrorAction Stop | Select-Object FullName, @{Name='Exists';Expression={$_.Exists}})"
     ]
   }
 }

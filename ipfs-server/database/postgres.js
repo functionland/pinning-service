@@ -100,24 +100,35 @@ async function getUserPoolId(username) {
 // in the `pg` module transitively.
 const { normalizeCid } = require('./cid.js');
 
-// In-memory blocklist cache — single SELECT per TTL, per process.
-const _blockedCache = { set: new Set(), loadedAt: 0, ttlMs: 60000 };
+// In-memory policy cache — single SELECT per TTL, per process.
+// Map<normalizedCid, 'block' | 'redirect'>
+const _blockedCache = { map: new Map(), loadedAt: 0, ttlMs: 60000 };
 
 async function loadBlockedCids(force = false) {
   const now = Date.now();
   if (!force && now - _blockedCache.loadedAt < _blockedCache.ttlMs) {
-    return _blockedCache.set;
+    return _blockedCache.map;
   }
-  const result = await query('SELECT cid FROM blocked_cids', []);
-  _blockedCache.set = new Set(result.rows.map(r => r.cid));
+  const result = await query('SELECT cid, mode FROM blocked_cids', []);
+  // Coerce any unexpected stored value to 'block'. The CHECK constraint in
+  // migration 016 limits values to {'block','redirect'}, but this stays robust
+  // if a future migration widens the column without updating this code.
+  _blockedCache.map = new Map(
+    result.rows.map(r => [r.cid, r.mode === 'redirect' ? 'redirect' : 'block'])
+  );
   _blockedCache.loadedAt = now;
-  return _blockedCache.set;
+  return _blockedCache.map;
 }
 
-// Returns true if the (caller-normalized) CID is blocked.
+// Returns 'block' | 'redirect' for the (caller-normalized) CID, or null if absent.
+async function getBlockedCidMode(normalizedCid) {
+  const map = await loadBlockedCids(false);
+  return map.get(normalizedCid) ?? null;
+}
+
+// Backwards-compat: true if the CID is in the policy list under any mode.
 async function isBlockedCid(normalizedCid) {
-  const set = await loadBlockedCids(false);
-  return set.has(normalizedCid);
+  return (await getBlockedCidMode(normalizedCid)) !== null;
 }
 
 module.exports = {
@@ -130,5 +141,6 @@ module.exports = {
   getUserPoolId,
   normalizeCid,
   isBlockedCid,
+  getBlockedCidMode,
   loadBlockedCids,
 };

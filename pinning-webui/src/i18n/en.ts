@@ -202,6 +202,8 @@ export const en: Translations = {
     companyPlaceholder: 'Enter your company or organization name',
     companyHint: 'This helps identify your organization in reports',
     companySaved: 'Company saved successfully',
+    dataExportTitle: 'Export your data',
+    dataExportDesc: 'Download every encrypted file across all your buckets, decrypted, into a single ZIP archive on your computer.',
     dangerTitle: 'Danger Zone',
     dangerDesc: 'Once you delete your account, there is no going back. All your pins and data will be permanently deleted.',
     deleteAccount: 'Delete My Account',

@@ -276,6 +276,25 @@ function isFileSystemAccessSupported(): boolean {
 }
 
 /**
+ * Detect whether an error from a fula-client call indicates the WASM module
+ * has panicked. After such a panic the WASM linear memory is corrupted and
+ * subsequent calls cascade into "RefCell already borrowed" / "unreachable",
+ * so we use this to abort the bulk operation early.
+ */
+function isFatalWasmError(err: unknown): boolean {
+  if (err instanceof WebAssembly.RuntimeError) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    /unreachable/i.test(msg) ||
+    /RefCell already borrowed/i.test(msg) ||
+    /already borrowed/i.test(msg) ||
+    /panicked at/i.test(msg) ||
+    /time not implemented/i.test(msg) ||
+    /memory access out of bounds/i.test(msg)
+  );
+}
+
+/**
  * Public entry point.
  */
 export async function downloadAllFxFiles(opts: BulkDownloadOptions): Promise<void> {
@@ -347,9 +366,27 @@ export async function downloadAllFxFiles(opts: BulkDownloadOptions): Promise<voi
 
   // 2) Listing phase — one listDecryptedFiles call per bucket gives every file
   //    at every depth (FlatNamespace mode).
+  //
+  //    Important: if a listing call panics inside the fula-client WASM module
+  //    (e.g., `std::time::Instant::now()` in `migrate_v1_to_v7_internal` is
+  //    "unsupported on this platform" in browser WASM), the WASM linear memory
+  //    is corrupted and every subsequent call fails with cascading panics like
+  //    "RefCell already borrowed". There is no recovery without reloading the
+  //    page — so we abort the bulk operation as soon as we recognize a fatal
+  //    WASM state and surface a clear, actionable error.
   const planned: PlannedFile[] = [];
+  let wasmDied = false;
   for (const bucket of buckets) {
     throwIfAborted(signal);
+    if (wasmDied) {
+      progress.failures.push({
+        bucket: bucket.name,
+        key: '<list>',
+        error: 'Skipped: fula-client WASM module is in a panicked state.',
+      });
+      emit({ bucketsDone: progress.bucketsDone + 1 });
+      continue;
+    }
     try {
       const files = await listDecryptedFiles(client, bucket.name, {});
       for (const f of files || []) {
@@ -357,13 +394,25 @@ export async function downloadAllFxFiles(opts: BulkDownloadOptions): Promise<voi
         if (pf) planned.push(pf);
       }
     } catch (err) {
-      progress.failures.push({
-        bucket: bucket.name,
-        key: '<list>',
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const msg = err instanceof Error ? err.message : String(err);
+      progress.failures.push({ bucket: bucket.name, key: '<list>', error: msg });
+      if (isFatalWasmError(err)) {
+        wasmDied = true;
+      }
     }
     emit({ bucketsDone: progress.bucketsDone + 1 });
+  }
+
+  // If the WASM module died, decryption will fail too — abort cleanly with a
+  // user-facing error rather than producing a partial archive of just whatever
+  // listed before the panic.
+  if (wasmDied) {
+    emit({ phase: 'error' });
+    throw new Error(
+      'Bulk download stopped: the fula-client WASM module panicked while listing buckets. ' +
+        'This is usually a forest v1→v7 migration using an unsupported time API in browser WASM. ' +
+        'Workaround: reload the page, open each bucket once in the FxFiles tab to trigger migration, then try again.',
+    );
   }
 
   if (planned.length === 0) {

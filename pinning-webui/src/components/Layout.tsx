@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
+import { FxBulkDownloadProvider } from '../context/FxBulkDownloadContext';
+import FxBulkDownloadProgressPanel from './FxBulkDownloadProgressPanel';
 import LanguageSelector from './LanguageSelector';
 
 export default function Layout() {
@@ -37,6 +39,7 @@ export default function Layout() {
   };
 
   return (
+    <FxBulkDownloadProvider>
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
       <header className="bg-white border-b border-gray-200">
@@ -152,6 +155,11 @@ export default function Layout() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <Outlet />
       </main>
+
+      {/* Global FxFiles bulk-download progress panel — visible across pages
+          so navigating away from /pins or /profile doesn't lose the UI. */}
+      <FxBulkDownloadProgressPanel />
     </div>
+    </FxBulkDownloadProvider>
   );
 }

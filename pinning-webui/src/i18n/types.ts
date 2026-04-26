@@ -220,6 +220,8 @@ export interface Translations {
     companyPlaceholder?: string;
     companyHint?: string;
     companySaved?: string;
+    dataExportTitle?: string;
+    dataExportDesc?: string;
     dangerTitle: string;
     dangerDesc: string;
     deleteAccount: string;

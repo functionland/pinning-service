@@ -2,11 +2,13 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
+import { useFxBulkDownload } from '../context/FxBulkDownloadContext';
 
 export default function Profile() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const { t } = useLanguage();
+  const fxBulk = useFxBulkDownload();
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState('');
   const [deleting, setDeleting] = useState(false);
@@ -188,6 +190,33 @@ export default function Profile() {
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Data export — Download All FxFiles */}
+      <div className="card">
+        <h3 className="text-lg font-semibold text-gray-900 mb-2">
+          {t.profile.dataExportTitle || 'Export your data'}
+        </h3>
+        <p className="text-gray-600 text-sm mb-4">
+          {t.profile.dataExportDesc ||
+            'Download every encrypted file across all your buckets, decrypted, into a single ZIP archive on your computer.'}
+        </p>
+        <button
+          onClick={() => fxBulk.start()}
+          disabled={fxBulk.isRunning}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {fxBulk.isRunning ? (
+            <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          ) : (
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+          )}
+          <span>{t.pins.downloadAll || 'Download All'}</span>
+        </button>
       </div>
 
       {/* Danger zone */}

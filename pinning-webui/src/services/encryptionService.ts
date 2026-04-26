@@ -13,7 +13,7 @@
  * No encryption keys or passwords are ever sent to the server.
  */
 
-import { deriveKeyFromCredentials } from './fulaClientService';
+import { deriveKeyFromCredentials, fetchAndDecryptByStorageKey } from './fulaClientService';
 
 const KEY_LENGTH_BITS = 256;
 const NONCE_LENGTH = 12;
@@ -974,13 +974,50 @@ export function isJsonEnvelope(data: Uint8Array): boolean {
 export function downloadBlob(data: Uint8Array, filename: string, mimeType: string): void {
   const blob = new Blob([new Uint8Array(data)], { type: mimeType });
   const url = URL.createObjectURL(blob);
-  
+
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  
+
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Decrypt a single FxFile by storage key, transparently handling all envelope shapes.
+ *
+ * Mirrors the per-file logic that previously lived inline in Pins.tsx so the bulk
+ * "Download All" path and the per-row download share one implementation.
+ *
+ * @param client - Fula encrypted client (from getFulaClient)
+ * @param bucket - Bucket name
+ * @param storageKey - Obfuscated storage key (CID) of the encrypted blob
+ * @param keyBytes - Raw 32-byte encryption key (from deriveEncryptionKeyBytes)
+ * @returns Plaintext bytes
+ */
+export async function decryptFxFile(
+  client: any,
+  bucket: string,
+  storageKey: string,
+  keyBytes: Uint8Array,
+): Promise<Uint8Array> {
+  const rawData = await fetchAndDecryptByStorageKey(client, bucket, storageKey);
+
+  if (!isJsonEnvelope(rawData)) {
+    return rawData;
+  }
+
+  const { envelope } = parseEnvelope(rawData);
+
+  if (isChunkedEnvelopeV2(envelope)) {
+    const fetchChunk = async (chunkIndex: number): Promise<Uint8Array> => {
+      const chunkKey = `${storageKey}.chunks/${chunkIndex.toString().padStart(8, '0')}`;
+      return fetchAndDecryptByStorageKey(client, bucket, chunkKey);
+    };
+    return decryptChunkedEnvelopeV2(envelope, keyBytes, fetchChunk);
+  }
+
+  return decryptEnvelope(rawData, keyBytes);
 }

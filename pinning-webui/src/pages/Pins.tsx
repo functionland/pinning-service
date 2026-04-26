@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { S3Client, ListObjectsCommand } from '@aws-sdk/client-s3';
@@ -18,7 +18,12 @@ import {
   parseEnvelope,
   isChunkedEnvelopeV2,
   decryptChunkedEnvelopeV2,
+  decryptFxFile,
 } from '../services/encryptionService';
+import {
+  downloadAllFxFiles,
+  type BulkProgress,
+} from '../services/fxFilesBulkDownload';
 import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
 import {
   storeEncryptionKey,
@@ -170,6 +175,10 @@ export default function Pins() {
     blobUrl: string;
     mimeType: string;
   } | null>(null);
+
+  // Bulk "Download All" state for the FxFiles tab
+  const [fxBulkProgress, setFxBulkProgress] = useState<BulkProgress | null>(null);
+  const fxBulkAborterRef = useRef<AbortController | null>(null);
 
   // Decryption state
   const [encryptionKeyReady, setEncryptionKeyReady] = useState(false);
@@ -900,42 +909,11 @@ export default function Pins() {
 
       const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
 
-      // Fetch using storage key (CID) - fula-client returns raw S3 data
-      // file.key contains the storageKey (obfuscated CID) which is needed for fetching
+      // file.key contains the storageKey (obfuscated CID). decryptFxFile fetches
+      // the raw S3 data and transparently handles single-block and chunked-v2
+      // envelopes (same logic shared with the bulk Download-All path).
       console.log('[FxFiles] Downloading file:', { bucket: fxNavigation.currentBucket, storageKey: file.key });
-      const rawData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket, file.key);
-
-      // Check if this is a JSON envelope that needs manual decryption
-      // fula-client WASM does NOT decrypt the file - it returns the JSON envelope
-      let decryptedData: Uint8Array;
-      if (isJsonEnvelope(rawData)) {
-        console.log('[FxFiles] Data is JSON envelope, performing manual decryption...');
-
-        // Parse envelope to check version
-        const { version, envelope } = parseEnvelope(rawData);
-        console.log('[FxFiles] Envelope version:', version, 'Fields:', Object.keys(envelope).join(', '));
-
-        if (isChunkedEnvelopeV2(envelope)) {
-          // Version 2 chunked file - need to fetch and decrypt each chunk
-          console.log(`[FxFiles] Chunked file v2: ${envelope.chunkCount} chunks, chunkSize: ${envelope.chunkSize}`);
-
-          // Create chunk fetcher that gets chunk data from S3
-          const fetchChunk = async (chunkIndex: number): Promise<Uint8Array> => {
-            const chunkKey = `${file.key}.chunks/${chunkIndex.toString().padStart(8, '0')}`;
-            console.log(`[FxFiles] Fetching chunk ${chunkIndex}: ${chunkKey}`);
-            const chunkData = await fetchAndDecryptByStorageKey(client, fxNavigation.currentBucket!, chunkKey);
-            return chunkData;
-          };
-
-          decryptedData = await decryptChunkedEnvelopeV2(envelope, keyBytes, fetchChunk);
-        } else {
-          // Version 1 single-block envelope
-          decryptedData = await decryptEnvelope(rawData, keyBytes);
-        }
-      } else {
-        // Already decrypted or unencrypted file
-        decryptedData = rawData;
-      }
+      const decryptedData = await decryptFxFile(client, fxNavigation.currentBucket, file.key, keyBytes);
 
       // Detect MIME type
       const mimeType = detectMimeType(decryptedData);
@@ -954,6 +932,59 @@ export default function Pins() {
         return next;
       });
     }
+  };
+
+  // Bulk download: ZIP every file across every bucket and save to disk.
+  const handleDownloadAllFxFiles = async () => {
+    if (!user?.id || !user?.email) return;
+    if (fxBulkProgress && fxBulkProgress.phase !== 'done' && fxBulkProgress.phase !== 'aborted' && fxBulkProgress.phase !== 'error') {
+      return; // already running
+    }
+    if (fxBuckets.length === 0) {
+      setFxFilesError(t.pins.downloadAllNoFiles || 'No files to download.');
+      return;
+    }
+
+    setFxFilesError(null);
+
+    let accessToken: string;
+    try {
+      const tokenRes = await fetch('/api/keys/active', { credentials: 'include' });
+      if (!tokenRes.ok) throw new Error(t.pins.apiKeyRequired || 'API key required');
+      const parsed = await tokenRes.json();
+      accessToken = parsed.key;
+    } catch (err) {
+      setFxFilesError(err instanceof Error ? err.message : 'Failed to get API key');
+      return;
+    }
+
+    const aborter = new AbortController();
+    fxBulkAborterRef.current = aborter;
+
+    try {
+      await downloadAllFxFiles({
+        buckets: fxBuckets,
+        user: { id: user.id, email: user.email, provider: user.provider },
+        apiToken: accessToken,
+        signal: aborter.signal,
+        onProgress: (p) => setFxBulkProgress(p),
+      });
+    } catch (err) {
+      console.error('[FxFiles] Bulk download failed:', err);
+      setFxFilesError(err instanceof Error ? err.message : 'Bulk download failed');
+    } finally {
+      if (fxBulkAborterRef.current === aborter) {
+        fxBulkAborterRef.current = null;
+      }
+    }
+  };
+
+  const handleCancelDownloadAllFxFiles = () => {
+    fxBulkAborterRef.current?.abort();
+  };
+
+  const dismissFxBulkProgress = () => {
+    setFxBulkProgress(null);
   };
 
   // Preview a file
@@ -2242,6 +2273,43 @@ export default function Pins() {
     );
   };
 
+  // Render the "Download All" button shown above both FxFiles views.
+  const renderFxBulkDownloadHeader = () => {
+    const phase = fxBulkProgress?.phase;
+    const isRunning =
+      phase === 'listing' || phase === 'downloading' || phase === 'finalizing';
+    return (
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-base font-semibold text-gray-900">
+            {t.pins.tabFxFiles || 'FxFiles'}
+          </h3>
+          <p className="text-sm text-gray-500">
+            {t.pins.downloadAllHint ||
+              'Export every encrypted file across all your buckets, decrypted, into a single ZIP.'}
+          </p>
+        </div>
+        <button
+          onClick={handleDownloadAllFxFiles}
+          disabled={isRunning || fxBuckets.length === 0}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          title={t.pins.downloadAll || 'Download All'}
+        >
+          {isRunning ? (
+            <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          ) : (
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+          )}
+          <span>{t.pins.downloadAll || 'Download All'}</span>
+        </button>
+      </div>
+    );
+  };
+
   // Render FxFiles Tab Content
   const renderFxFilesTab = () => {
     // Loading state
@@ -2292,8 +2360,10 @@ export default function Pins() {
       }
 
       return (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {fxBuckets.map((bucket) => (
+        <div className="space-y-4">
+          {renderFxBulkDownloadHeader()}
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {fxBuckets.map((bucket) => (
             <div
               key={bucket.name}
               onClick={() => navigateToFxDirectory(bucket.name, '')}
@@ -2316,6 +2386,7 @@ export default function Pins() {
               </div>
             </div>
           ))}
+          </div>
         </div>
       );
     }
@@ -2323,6 +2394,7 @@ export default function Pins() {
     // File browser view
     return (
       <div className="space-y-4">
+        {renderFxBulkDownloadHeader()}
         {/* Breadcrumb Navigation with Refresh Button */}
         <div className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
           <div className="flex items-center gap-2 text-sm flex-wrap">
@@ -2652,6 +2724,91 @@ export default function Pins() {
           {t.pins.copied}
         </div>
       )}
+
+      {/* FxFiles bulk Download All progress panel */}
+      {fxBulkProgress && (() => {
+        const p = fxBulkProgress;
+        const pct = p.bytesTotal > 0
+          ? Math.min(100, Math.floor((p.bytesDone / p.bytesTotal) * 100))
+          : (p.filesTotal > 0 ? Math.min(100, Math.floor((p.filesDone / p.filesTotal) * 100)) : 0);
+        const isRunning = p.phase === 'listing' || p.phase === 'downloading' || p.phase === 'finalizing';
+        const isFinal = p.phase === 'done' || p.phase === 'aborted' || p.phase === 'error';
+        const phaseLabel =
+          p.phase === 'listing' ? (t.pins.downloadAllListing || 'Listing buckets…')
+          : p.phase === 'downloading' ? (t.pins.downloadAllDownloading || 'Decrypting files…')
+          : p.phase === 'finalizing' ? (t.pins.downloadAllFinalizing || 'Building archive…')
+          : p.phase === 'done' ? (t.pins.downloadAllDone || 'Download complete')
+          : p.phase === 'aborted' ? (t.pins.downloadAllAborted || 'Download cancelled')
+          : (t.pins.downloadAllError || 'Download failed');
+        const mb = (n: number) => (n / (1024 * 1024)).toFixed(1);
+        return (
+          <div className="fixed bottom-4 right-4 w-80 bg-white border border-gray-200 rounded-xl shadow-2xl p-4 z-50">
+            <div className="flex items-start justify-between mb-2">
+              <div>
+                <div className="text-sm font-semibold text-gray-900">
+                  {t.pins.downloadAll || 'Download All'}
+                </div>
+                <div className="text-xs text-gray-500">{phaseLabel}</div>
+              </div>
+              {isFinal && (
+                <button
+                  onClick={dismissFxBulkProgress}
+                  className="text-gray-400 hover:text-gray-700"
+                  title={t.pins.dismiss || 'Dismiss'}
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              )}
+            </div>
+
+            {p.bufferingFallback && p.phase === 'downloading' && (
+              <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mb-2">
+                {t.pins.downloadAllStreamingNote ||
+                  'Your browser does not support streaming saves; the archive will be built in memory.'}
+              </div>
+            )}
+
+            <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden mb-2">
+              <div
+                className={`h-2 rounded-full transition-all ${p.phase === 'error' ? 'bg-red-500' : p.phase === 'aborted' ? 'bg-gray-500' : 'bg-green-600'}`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+
+            <div className="text-xs text-gray-600 mb-2">
+              {p.filesTotal > 0
+                ? `${p.filesDone} / ${p.filesTotal} ${t.pins.files || 'files'}`
+                : `${p.bucketsDone} / ${p.bucketsTotal} ${t.pins.buckets || 'buckets'}`}
+              {p.bytesTotal > 0 && (
+                <span className="ml-2">({mb(p.bytesDone)} / {mb(p.bytesTotal)} MB)</span>
+              )}
+            </div>
+
+            {p.currentFile && isRunning && (
+              <div className="text-xs text-gray-500 truncate mb-2" title={p.currentFile}>
+                {p.currentFile}
+              </div>
+            )}
+
+            {p.failures.length > 0 && (
+              <div className="text-xs text-red-600 mb-2">
+                {(t.pins.downloadAllPartialFailures || '{count} files could not be decrypted; see _failures.txt inside the ZIP.').replace('{count}', String(p.failures.length))}
+              </div>
+            )}
+
+            {isRunning && (
+              <button
+                onClick={handleCancelDownloadAllFxFiles}
+                className="w-full px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                {t.pins.cancel || 'Cancel'}
+              </button>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

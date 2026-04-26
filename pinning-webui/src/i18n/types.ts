@@ -175,6 +175,19 @@ export interface Translations {
     apiKeyRequired: string;
     file: string;
     files: string;
+    // Bulk "Download All" — optional so locales can rely on inline fallbacks
+    downloadAll?: string;
+    downloadAllHint?: string;
+    downloadAllListing?: string;
+    downloadAllDownloading?: string;
+    downloadAllFinalizing?: string;
+    downloadAllDone?: string;
+    downloadAllAborted?: string;
+    downloadAllError?: string;
+    downloadAllNoFiles?: string;
+    downloadAllStreamingNote?: string;
+    downloadAllPartialFailures?: string;
+    dismiss?: string;
   };
   view: {
     loading: string;

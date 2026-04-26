@@ -3151,7 +3151,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // ============ CID Policies (Admin) ============
   // Gateway (ipfs-server) reads blocked_cids to short-circuit responses:
   //   mode='block'    → HTTP 451
-  //   mode='redirect' → HTTP 301 to https://ipfs.io/ipfs/{cid}
+  //   mode='redirect' → HTTP 301 to https://{cid}.ipfs.dweb.link/
   // Table name stays `blocked_cids` for backward compat; admin path is /cid-policies.
 
   // Lazy CID loader — multiformats is ESM-only; its typings aren't reachable

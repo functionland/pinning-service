@@ -134,7 +134,7 @@ export default function AdminCidPolicies() {
                 checked={newMode === 'redirect'}
                 onChange={() => setNewMode('redirect')}
               />
-              <span>Redirect to ipfs.io (HTTP 301)</span>
+              <span>Redirect to dweb.link (HTTP 301)</span>
             </label>
           </div>
           {addError && <p className="text-red-600 text-sm">{addError}</p>}
@@ -190,7 +190,7 @@ export default function AdminCidPolicies() {
                   <td className="px-4 py-2">
                     {e.mode === 'redirect' ? (
                       <span className="inline-block px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-700 whitespace-nowrap">
-                        Redirect → ipfs.io
+                        Redirect → dweb.link
                       </span>
                     ) : (
                       <span className="inline-block px-2 py-0.5 text-xs rounded bg-red-100 text-red-700">

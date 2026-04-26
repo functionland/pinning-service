@@ -260,14 +260,14 @@ if (!fs.existsSync(config.uploadDir)) {
     return res.status(451).json({ error: 'Content blocked due to security policy', cid });
   }
 
-  // 301 to canonical IPFS gateway. Short cache so admin policy changes propagate quickly.
-  // Query string is intentionally dropped: gateway-specific flags (?raw, ?view, ?agreed,
-  // ?download) are meaningless on ipfs.io.
+  // 301 to public IPFS subdomain gateway. Short cache so admin policy changes propagate
+  // quickly. Query string is intentionally dropped: gateway-specific flags (?raw, ?view,
+  // ?agreed, ?download) are meaningless on dweb.link.
   function sendRedirect(req, res, normalizedCid) {
     res.setHeader('Cache-Control', 'public, max-age=60');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.removeHeader('X-Frame-Options');
-    return res.redirect(301, `https://ipfs.io/ipfs/${normalizedCid}`);
+    return res.redirect(301, `https://${normalizedCid}.ipfs.dweb.link/`);
   }
 
   // --- Disclaimer-wrapper helpers ------------------------------------------

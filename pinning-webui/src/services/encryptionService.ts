@@ -961,11 +961,34 @@ export async function decryptEnvelope(
 }
 
 /**
- * Check if data looks like a JSON encrypted envelope
- * (starts with '{' character, 0x7b)
+ * Check if data is a JSON-encoded encryption envelope (NOT just any JSON).
+ *
+ * The previous implementation returned true for *any* data starting with `{`,
+ * which caused 135+ false positives in the Download All flow: plaintext JSON
+ * application files (shares lists, sync mappings, collab manifests, face/tag
+ * metadata, NFT collections) start with `{` too and have a top-level `version`
+ * field, so the envelope decoder mistook them for v1 envelopes and threw
+ * either "Missing ciphertext in envelope" or "Unsupported envelope version".
+ *
+ * Real envelopes always carry one of:
+ *   - `ciphertext: string`                 (v1 single-block, see decryptEnvelopeV1)
+ *   - `chunkCount: number` + `chunks: []`  (v2 chunked, see ChunkedEnvelopeV2)
+ *
+ * Anything else starting with `{` is plaintext JSON and should be passed
+ * through unchanged by the callers' existing fall-through branches.
  */
 export function isJsonEnvelope(data: Uint8Array): boolean {
-  return data.length > 0 && data[0] === 0x7b; // '{' character
+  if (data.length === 0 || data[0] !== 0x7b) return false; // must start with '{'
+  try {
+    const obj = JSON.parse(new TextDecoder().decode(data));
+    if (!obj || typeof obj !== 'object') return false;
+    return (
+      typeof obj.ciphertext === 'string' ||
+      (typeof obj.chunkCount === 'number' && Array.isArray(obj.chunks))
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

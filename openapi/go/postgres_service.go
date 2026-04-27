@@ -192,7 +192,11 @@ func (s *PostgresService) AddPinWithSize(ctx context.Context, username string, p
 		th = hashToken(sessionToken)
 	}
 
-	uid := hashToken(username) // user_id = SHA-256(email)
+	// `username` here is the value returned by ValidateSession /
+	// extractUserIDFromAuth, which is the already-hashed sessions.user_id
+	// (i.e. sha256(lowercase_email)). Hashing it again would produce a
+	// "shadow" id that's invisible to the credit/deposit pipeline.
+	uid := username
 
 	// New entries: no plain-text username or session_token stored.
 	// Old entries retain their plain-text values for fallback during migration.
@@ -355,7 +359,9 @@ func (s *PostgresService) GetExistingPinByCID(ctx context.Context, username, cid
 		return nil, nil
 	}
 
-	uid := hashToken(username)
+	// `username` here is the already-hashed user_id from extractUserIDFromAuth
+	// (sha256(lowercase_email)). Do not re-hash.
+	uid := username
 	query := `
 		SELECT requestid, cid, name, origins, meta, status, delegates, info, created_at
 		FROM pins
@@ -484,8 +490,10 @@ func (s *PostgresService) GetPins(ctx context.Context, username string, cid []st
 		return nil, 0, errors.New("username cannot be empty")
 	}
 
-	// Build WHERE clause — use user_id with fallback to username for old entries
-	uid := hashToken(username)
+	// Build WHERE clause — use user_id with fallback to username for old entries.
+	// `username` here is the already-hashed user_id from extractUserIDFromAuth
+	// (sha256(lowercase_email)). Do not re-hash.
+	uid := username
 	whereClause := "(user_id = $1 OR username = $2) AND status != 'deleted'"
 	whereArgs := []interface{}{uid, username}
 	argNum := 3
@@ -1208,7 +1216,9 @@ func (s *PostgresService) GetStorageByUser(ctx context.Context, username string)
 		return StorageUsage{}, errors.New("username cannot be empty")
 	}
 
-	uid := hashToken(username)
+	// `username` here is the already-hashed user_id from extractUserIDFromAuth /
+	// GetCreditStatus (sha256(lowercase_email)). Do not re-hash.
+	uid := username
 	query := `
 		SELECT COALESCE(SUM(size), 0) as total_size, COUNT(*) as pin_count
 		FROM pins
@@ -1231,7 +1241,9 @@ func (s *PostgresService) GetStorageByUserSessions(ctx context.Context, username
 		return nil, errors.New("username cannot be empty")
 	}
 
-	uid := hashToken(username)
+	// `username` here is the already-hashed user_id (sha256(lowercase_email)).
+	// Do not re-hash.
+	uid := username
 	query := `
 		SELECT COALESCE(token_hash, session_token), COALESCE(SUM(size), 0) as total_size, COUNT(*) as pin_count
 		FROM pins
@@ -1350,7 +1362,11 @@ func (s *PostgresService) GetCreditStatus(ctx context.Context, username string) 
 	var isSuspended int
 	freeTierBytes := DefaultFreeTierBytes
 
-	uid := hashToken(username)
+	// `username` here is the already-hashed user_id from extractUserIDFromAuth
+	// (sha256(lowercase_email)). user_credits.user_id is also single-hashed
+	// (the WebUI stores deposits via emailToUserId(email) in TS). Do not
+	// re-hash; this was the cross-system bug that caused all 402 errors.
+	uid := username
 	err = s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(balance_fula, 0), COALESCE(is_suspended, 0)
 		FROM user_credits
@@ -1412,7 +1428,9 @@ func (s *PostgresService) GetUserCredits(ctx context.Context, username string) (
 	var isSuspended int
 	var lastDeductionAt, suspendedAt, createdAt, updatedAt sql.NullTime
 
-	uid2 := hashToken(username)
+	// `username` here is the already-hashed user_id (sha256(lowercase_email)).
+	// Do not re-hash — user_credits.user_id is single-hashed.
+	uid2 := username
 	err := s.db.QueryRowContext(ctx, `
 		SELECT balance_fula, total_deposited_fula, total_deducted_fula,
 		       is_suspended, last_deduction_at, suspended_at, created_at, updated_at

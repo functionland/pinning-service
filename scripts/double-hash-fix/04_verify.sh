@@ -87,9 +87,10 @@ FROM user_credits uc JOIN uid_migration_map m ON uc.user_id = m.shadow_id;
 SQL
 echo ""
 
-echo "=== Per-user spot-checks for the reported suspended ids ==="
+echo "=== Per-user spot-checks ==="
+echo "  ehsan (real id 2d2dfffd...41ff) — should hold the merged values"
+echo "  3fd26ed0... — real user (not a shadow); should still hold its data"
 "${PSQL[@]}" -c "
-\echo '--- ehsan (real id 2d2dfffd…41ff) ---'
 SELECT 'ehsan_real_credits' AS check, balance_fula, total_deposited_fula,
        total_deducted_fula, is_suspended
 FROM user_credits
@@ -108,12 +109,11 @@ SELECT 'ehsan_pins_at_shadow_should_be_zero' AS check, COUNT(*) AS n
 FROM pins
 WHERE user_id = 'bf1d001f668c11f95da6c9e78b6d241733a50f201d0deac0549161d2b1d1796c';
 
-\echo '--- second reported suspended id ---'
-SELECT 'second_user_credits_at_shadow_should_be_zero' AS check, COUNT(*) AS n
+SELECT '3fd26ed0_user_credits_present' AS check, COUNT(*) AS n
 FROM user_credits
 WHERE user_id = '3fd26ed0fa8c266e48cb11267d32cc19ef667444358998452b9ce8de43bcfe28';
 
-SELECT 'second_pins_at_shadow_should_be_zero' AS check, COUNT(*) AS n
+SELECT '3fd26ed0_pins_present' AS check, COUNT(*) AS n
 FROM pins
 WHERE user_id = '3fd26ed0fa8c266e48cb11267d32cc19ef667444358998452b9ce8de43bcfe28';
 "

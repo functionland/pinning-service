@@ -49,6 +49,12 @@ HAVE_DOCKER=true
 command -v docker >/dev/null 2>&1 || HAVE_DOCKER=false
 $HAVE_DOCKER || log "WARN: docker not available — container-related sections will be skipped"
 
+# Always unpause ipfs_cluster on exit, even on Ctrl-C or mid-snapshot crash.
+# Without this, a failure between `docker pause` and `docker unpause` leaves the
+# cluster frozen indefinitely, blocking pinning-service traffic on the OLD server.
+# Safe to call even if cluster wasn't paused or doesn't exist.
+trap 'docker unpause ipfs_cluster >/dev/null 2>&1 || true' EXIT INT TERM
+
 # ============================================================================
 # 1. systemd unit files (use these verbatim on the new server)
 # ============================================================================
@@ -201,14 +207,20 @@ declare -A ENV_PATHS=(
 )
 for name in "${!ENV_PATHS[@]}"; do
   src="${ENV_PATHS[$name]}"
-  [ -f "$src" ] && cp "$src" "$W/env/${name}.env" 2>/dev/null || true
+  # Use `install -m 0600` instead of `cp` to make secret-file mode explicit and
+  # immune to source-file mode drift. The bundle tarball can sit at rest on the
+  # transfer host; bundled .env files must always be 0600.
+  [ -f "$src" ] && install -m 0600 "$src" "$W/env/${name}.env" 2>/dev/null || true
 done
 
 # ============================================================================
-# 13. Apple Sign-In key file
+# 13. Apple Sign-In key file (chmod 600 — Apple .p8 is signing-key sensitive)
 # ============================================================================
 log "apple key"
-[ -d /etc/apple ] && cp -rL /etc/apple/. "$W/apple/" 2>/dev/null || true
+if [ -d /etc/apple ]; then
+  cp -rL /etc/apple/. "$W/apple/" 2>/dev/null || true
+  find "$W/apple" -type f -exec chmod 600 {} \; 2>/dev/null || true
+fi
 
 # ============================================================================
 # 14. /home/root/password.txt (just in case)

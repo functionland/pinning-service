@@ -474,6 +474,7 @@ This keeps the host minimal: only daemons that systemd manages directly (nginx, 
 | `--kubo-data-host-path PATH` | No | Bind the `ipfs_host_data` docker volume to a host path (typically an external drive mount like `/mnt/ipfs-data`). Path must exist and be writable BEFORE running. NFS/CIFS warnings (kubo locks don't work over them). |
 | `--cluster-data-host-path PATH` | No | Same as above but for `ipfs_cluster_data`. CRDT state is small (tens of MB), rarely worth externalizing. |
 | `--defer-dns` | No | Skip `phase_dns_cutover_pause` and `phase_certs`. Use when DNS still points at the old server and you want to test the new one first via /etc/hosts. After DNS cutover, re-run with `--phase=certs` (without this flag). |
+| `--force-wipe` | No | Required for `--phase=pg_restore` re-runs against a database that already has data. Without this, the phase refuses to DROP+restore so accidental re-runs don't wipe data accumulated since the bundle was made. Use only when you accept losing data added since the bundle was created. |
 | `-h\|--help` | — | Print usage. |
 
 ---
@@ -492,7 +493,7 @@ The 29 phases run in dependency order. Each writes a checkpoint to `/var/lib/ful
 | 6 | `docker_volumes` | Creates the 3 named volumes (`postgres-pinning-data`, `ipfs_host_data`, `ipfs_cluster_data`). If `--kubo-data-host-path` is provided, the kubo volume becomes a bind-mount. Extracts kubo + cluster data from bundle (or rsync source) BEFORE first daemon start, so identities are preserved. | No | docker volumes |
 | 7 | `load_fula_image` | `docker load` of the bundled fula-gateway image. If absent, will rebuild from source in phase 16. | No | docker images |
 | 8 | `docker_infra_start` | `docker run` for postgres-pinning, ipfs_host, ipfs_cluster. Cross-checks kubo peer ID against bundle, both IPNS keys in keystore, cluster peer ID against bundle. FAILs if any identity drift. | No | running containers |
-| 9 | `pg_restore` | Drops + recreates `pinning_service` database, restores `bundle/postgres/pinning-fresh.dump`. Distinguishes pg_restore warnings (rc=1, continue) from errors (rc≥2, fatal). | No | postgres |
+| 9 | `pg_restore` | Live-data guard: refuses to DROP if pinning_service DB already has rows unless `--force-wipe` is set. Drops + recreates database, restores `bundle/postgres/pinning-fresh.dump`. Distinguishes pg_restore warnings (rc=1, continue) from errors (rc≥2, fatal). After restore, applies every file in `migrations/postgres/*.sql` idempotently to catch any new migrations added since the bundle was created. | No | postgres |
 | 10 | `verify_ipns_path` | Diagnostic: resolves DB IPNS, fetches + decrypts manifest, restores into TEMP db `pinning_service_ipns_check`, schema-diffs against production restore. Skipped if `--skip-ipns-verify`. | Yes (DHT) | (temp DB, dropped at end) |
 | 11 | `apply_kubo_keys` | Verifies both IPNS keys are in the running kubo's keystore. | No | — |
 | 12 | `resolve_registry_cid` | Resolves the registry IPNS name and writes `/var/lib/fula-gateway/registry.cid`. Restores prior gateway state from bundle. Retries 4×20s if IPNS slow to converge. | Yes (DHT) | `/var/lib/fula-gateway/` |

@@ -22,6 +22,10 @@
 #                                     # and you want to validate the new server first via
 #                                     # /etc/hosts on a test machine. After DNS cutover,
 #                                     # re-run with: --phase=certs (without --defer-dns)
+#     [--force-wipe]                  # required for `--phase=pg_restore` re-runs against
+#                                     # a database that already has data. Without this,
+#                                     # phase_pg_restore refuses to DROP+restore to avoid
+#                                     # wiping data accumulated since the bundle was made.
 
 set -euo pipefail
 
@@ -41,6 +45,7 @@ BLOCKS_RSYNC=""
 KUBO_DATA_HOST_PATH=""
 CLUSTER_DATA_HOST_PATH=""
 DEFER_DNS=false
+FORCE_WIPE=false
 
 WORK_DIR="/var/lib/fula-recovery"
 BUNDLE_DIR="$WORK_DIR/bundle"
@@ -130,14 +135,16 @@ print_summary() {
   echo "============================================================"
 }
 # Trap on every exit. If rc!=0 and we're mid-phase, log where we died.
+# INT and TERM are also trapped so Ctrl-C and `kill <pid>` produce a summary
+# rather than dying silently mid-phase.
 trap '
   rc=$?
   if [ "$rc" -ne 0 ] && [ -n "$CURRENT_PHASE" ] && ! $SUMMARY_PRINTED; then
     echo
     log "exited at phase $CURRENT_PHASE (rc=$rc)"
-    print_summary "ERROR (rc=$rc)"
+    print_summary "INTERRUPTED (rc=$rc)"
   fi
-' EXIT
+' EXIT INT TERM
 
 # Phase checkpoint tracking — phases that have completed don't re-run
 phase_completed() { [ -f "$STATE_DIR/${1}.done" ]; }
@@ -192,12 +199,15 @@ my_public_ip() {
 dns_points_here() {
   local domain="$1"
   command -v dig >/dev/null 2>&1 || return 2
-  local me target
+  local me targets
   me=$(my_public_ip)
   [ -z "$me" ] && return 2
-  target=$(dig +short +time=3 +tries=2 "$domain" A 2>/dev/null | grep -E '^[0-9.]+$' | head -1)
-  [ -z "$target" ] && return 2
-  [ "$me" = "$target" ]
+  # Get ALL A records, not just the first. Multiple records are common during
+  # DNS cutover (old + new IP both present transiently) and in round-robin
+  # setups. Match if our IP appears anywhere in the result.
+  targets=$(dig +short +time=3 +tries=2 "$domain" A 2>/dev/null | grep -E '^[0-9.]+$')
+  [ -z "$targets" ] && return 2
+  echo "$targets" | grep -qxF "$me"
 }
 
 # ============================================================================
@@ -219,7 +229,8 @@ while [[ $# -gt 0 ]]; do
     --kubo-data-host-path) KUBO_DATA_HOST_PATH="$2"; shift 2 ;;
     --cluster-data-host-path) CLUSTER_DATA_HOST_PATH="$2"; shift 2 ;;
     --defer-dns)           DEFER_DNS=true; shift ;;
-    -h|--help)             sed -n '2,25p' "$0"; exit 0 ;;
+    --force-wipe)          FORCE_WIPE=true; shift ;;
+    -h|--help)             sed -n '2,28p' "$0"; exit 0 ;;
     *) fatal "Unknown flag: $1" ;;
   esac
 done
@@ -423,6 +434,15 @@ phase_apply_system_state() {
   if [ -f "$BUNDLE_DIR/letsencrypt.tgz" ]; then
     log "restoring /etc/letsencrypt"
     tar -xzf "$BUNDLE_DIR/letsencrypt.tgz" -C /
+    # Defense in depth: tar preserves source mode, but if anything in the
+    # transport chain dropped permissions, force private keys to 0600.
+    if [ -d /etc/letsencrypt/archive ]; then
+      find /etc/letsencrypt/archive -type f -name 'privkey*.pem' \
+        -exec chmod 600 {} \; 2>/dev/null || true
+    fi
+    if [ -d /etc/letsencrypt/keys ]; then
+      find /etc/letsencrypt/keys -type f -exec chmod 600 {} \; 2>/dev/null || true
+    fi
   fi
 
   # sysctl + ulimits
@@ -690,6 +710,25 @@ phase_pg_restore() {
   pg_user=$(env_get "$PINNING_HOME/.env" POSTGRES_USER)
   pg_user="${pg_user:-pinning_user}"
 
+  # Live-data safeguard: if the existing pinning_service DB already has rows,
+  # refuse to DROP+restore unless --force-wipe is set. This protects against
+  # accidental re-runs of `--phase=pg_restore` on a server that's been live and
+  # accumulating data since the bundle was created. The full-run path is fine
+  # because the DB doesn't exist on a fresh server.
+  local existing_rows=0
+  existing_rows=$(docker exec "$PG_CONTAINER" psql -U "$pg_user" -d pinning_service -tAc \
+      "SELECT COALESCE(SUM(n_live_tup), 0) FROM pg_stat_user_tables" 2>/dev/null \
+      | tr -d '[:space:]' || echo 0)
+  existing_rows="${existing_rows:-0}"
+  if [ "$existing_rows" -gt 0 ] && ! $FORCE_WIPE; then
+    fatal "pinning_service DB already has $existing_rows rows. \
+Refusing to DROP+restore — production data would be lost. \
+If you intend to wipe and re-restore, re-run with --force-wipe."
+  fi
+  if [ "$existing_rows" -gt 0 ] && $FORCE_WIPE; then
+    log "  --force-wipe: existing $existing_rows rows will be DROPPED"
+  fi
+
   # Terminate any existing connections, drop, recreate, restore
   docker exec -i "$PG_CONTAINER" psql -U "$pg_user" -d postgres -c \
     "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'pinning_service' AND pid <> pg_backend_pid();" \
@@ -731,6 +770,40 @@ phase_pg_restore() {
   fi
 
   log "pg_restore OK"
+
+  # Apply any migrations newer than the bundle's pg_dump. The bundle captured
+  # schema as of when migrate-zip.sh ran. If new migrations have landed in
+  # migrations/postgres/ since then, they need to apply on the new server.
+  # All migrations in this codebase are written idempotently (CREATE TABLE
+  # IF NOT EXISTS, ALTER TABLE ... DROP COLUMN IF EXISTS, etc. — see
+  # migrations/postgres/006-016 + deploy.sh:158-170 conventions), so applying
+  # them all is safe whether they're already in the dump or not.
+  local migrations_dir="$PINNING_REPO/migrations/postgres"
+  if [ -d "$migrations_dir" ] && ls "$migrations_dir"/*.sql >/dev/null 2>&1; then
+    local applied_count failed_count=0
+    applied_count=$(ls "$migrations_dir"/*.sql 2>/dev/null | wc -l)
+    log "  applying $applied_count migrations (idempotent re-application)"
+    local f
+    for f in $(ls "$migrations_dir"/*.sql | sort); do
+      local mname
+      mname=$(basename "$f")
+      if docker exec -i "$PG_CONTAINER" psql -U "$pg_user" -d pinning_service \
+            -v ON_ERROR_STOP=0 < "$f" >>"$LOG_FILE" 2>&1; then
+        log "    applied: $mname"
+      else
+        check_warn "migration $mname returned non-zero — check $LOG_FILE for details"
+        failed_count=$((failed_count + 1))
+      fi
+    done
+    if [ "$failed_count" -gt 0 ]; then
+      log "  $failed_count migration(s) had errors (may be benign for already-applied migrations)"
+    else
+      log "  all migrations applied cleanly"
+    fi
+  else
+    log "  no migrations directory at $migrations_dir — skipping migration step"
+  fi
+
   mark_phase_done pg_restore
 }
 
@@ -1559,7 +1632,7 @@ _verify_http_endpoints() {
     "http://127.0.0.1:4002/health              x402-gateway"
     "http://127.0.0.1:3002/health              mainnet-pool-server"
     "http://127.0.0.1:5667/health              mainnet-rewards-server"
-    "http://127.0.0.1:9000/                    fula-api-gateway"
+    "http://127.0.0.1:9000/healthz             fula-api-gateway"
   )
   local entry url name code
   for entry in "${probes[@]}"; do

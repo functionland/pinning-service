@@ -46,7 +46,9 @@ mkdir -p "$OUT_DIR"
 W="$OUT_DIR/$NAME"
 mkdir -p "$W"/{systemd,docker,kubo,cluster,cron,nginx,letsencrypt,ufw,sysctl,fula-gateway,redis,env,apple,services,postgres,images}
 
-log() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
+# log writes to STDERR so callers can redirect stdout (e.g., for capturing
+# command output to a file) without swallowing log lines into that file.
+log() { echo "[$(date -u +%H:%M:%SZ)] $*" >&2; }
 log "Bundle: $W"
 
 # ============================================================================
@@ -117,38 +119,75 @@ _low_impact() {
 # so if the script hangs, the user sees exactly which line is the culprit.
 _dexec() {
   local desc="$1"; shift
-  local cmd_preview="docker exec $* "
-  cmd_preview="${cmd_preview:0:120}"
   log "    [exec ${DOCKER_CTL_TIMEOUT}s] $desc"
-  if ! timeout "${DOCKER_CTL_TIMEOUT}" docker exec "$@"; then
-    local rc=$?
+  # Run the command; capture its real exit code BEFORE testing it, otherwise
+  # `if ! cmd` flips the exit status and we lose the actual rc.
+  timeout "${DOCKER_CTL_TIMEOUT}" docker exec "$@"
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-      log "    [TIMEOUT after ${DOCKER_CTL_TIMEOUT}s] $desc — skipping (cluster busy?)"
-      return 124
+      log "    [TIMEOUT after ${DOCKER_CTL_TIMEOUT}s] $desc — skipping (cluster/daemon busy?)"
+    else
+      log "    [exec rc=$rc] $desc — skipping"
     fi
-    log "    [exec rc=$rc] $desc — skipping"
-    return $rc
   fi
+  return $rc
 }
 
 _dcp() {
   local desc="$1" src="$2" dst="$3"
   log "    [cp ${DOCKER_CP_TIMEOUT}s] $desc ($src -> $dst)"
-  if ! timeout "${DOCKER_CP_TIMEOUT}" docker cp "$src" "$dst"; then
-    local rc=$?
+  timeout "${DOCKER_CP_TIMEOUT}" docker cp "$src" "$dst"
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
       log "    [TIMEOUT after ${DOCKER_CP_TIMEOUT}s] $desc — skipping"
-      return 124
+    else
+      log "    [cp rc=$rc] $desc — file not present at that path (path mismatch?)"
     fi
-    log "    [cp rc=$rc] $desc — skipping (file may not exist)"
-    return $rc
   fi
+  return $rc
 }
 
 # Detect docker availability up front
 HAVE_DOCKER=true
 command -v docker >/dev/null 2>&1 || HAVE_DOCKER=false
 $HAVE_DOCKER || log "WARN: docker not available — container-related sections will be skipped"
+
+# ----------------------------------------------------------------------------
+# Detect the IPFS data directory inside the kubo container. Stock kubo image
+# uses /data/ipfs but custom-installed setups can use /root/.ipfs or others.
+# Returns the in-container path on stdout, or empty if not found.
+# ----------------------------------------------------------------------------
+_detect_kubo_data_path() {
+  local container="$1" candidate
+  # Method 1: read IPFS_PATH from the daemon's environment
+  candidate=$(timeout 5 docker exec "$container" sh -c 'printf "%s" "$IPFS_PATH"' 2>/dev/null)
+  if [ -n "$candidate" ] && timeout 5 docker exec "$container" test -f "$candidate/config" 2>/dev/null; then
+    echo "$candidate"; return 0
+  fi
+  # Method 2: probe common paths
+  for candidate in /data/ipfs /root/.ipfs /home/ipfs/.ipfs; do
+    if timeout 5 docker exec "$container" test -f "$candidate/config" 2>/dev/null; then
+      echo "$candidate"; return 0
+    fi
+  done
+  return 1
+}
+
+_detect_cluster_data_path() {
+  local container="$1" candidate
+  candidate=$(timeout 5 docker exec "$container" sh -c 'printf "%s" "$IPFS_CLUSTER_PATH"' 2>/dev/null)
+  if [ -n "$candidate" ] && timeout 5 docker exec "$container" test -f "$candidate/identity.json" 2>/dev/null; then
+    echo "$candidate"; return 0
+  fi
+  for candidate in /data/ipfs-cluster /root/.ipfs-cluster; do
+    if timeout 5 docker exec "$container" test -f "$candidate/identity.json" 2>/dev/null; then
+      echo "$candidate"; return 0
+    fi
+  done
+  return 1
+}
 
 # Always unpause ipfs_cluster on exit, even on Ctrl-C or mid-snapshot crash.
 # Without this, a failure between `docker pause` and `docker unpause` leaves the
@@ -204,8 +243,17 @@ if $HAVE_DOCKER && docker inspect ipfs_host >/dev/null 2>&1; then
   _dexec "ipfs id"          ipfs_host ipfs id          > "$W/kubo/id.json"      2>/dev/null || true
   _dexec "ipfs key list -l" ipfs_host ipfs key list -l > "$W/kubo/key-list.txt" 2>/dev/null || true
 
+  # Auto-detect kubo data path (stock = /data/ipfs, but custom installs vary).
+  # Falls back to /data/ipfs and lets _dcp warn if files aren't there.
+  KUBO_PATH_IN_CONTAINER=$(_detect_kubo_data_path ipfs_host || echo "/data/ipfs")
+  if [ "$KUBO_PATH_IN_CONTAINER" = "/data/ipfs" ]; then
+    log "  kubo data path inside container: $KUBO_PATH_IN_CONTAINER (default)"
+  else
+    log "  kubo data path inside container: $KUBO_PATH_IN_CONTAINER (custom — auto-detected)"
+  fi
+
   # Raw config = peer ID + private key for the kubo node itself
-  _dcp "kubo raw config" ipfs_host:/data/ipfs/config "$W/kubo/raw-config.json" || true
+  _dcp "kubo raw config" "ipfs_host:${KUBO_PATH_IN_CONTAINER}/config" "$W/kubo/raw-config.json" || true
 
   # Export every IPNS key in the keystore (covers fula-db-backup AND fula-registry)
   mkdir -p "$W/kubo/exported-keys"
@@ -221,7 +269,7 @@ if $HAVE_DOCKER && docker inspect ipfs_host >/dev/null 2>&1; then
   fi
 
   # Defense in depth — grab the raw keystore directory too (alternate restore path)
-  _dcp "kubo keystore dir" ipfs_host:/data/ipfs/keystore "$W/kubo/keystore" || true
+  _dcp "kubo keystore dir" "ipfs_host:${KUBO_PATH_IN_CONTAINER}/keystore" "$W/kubo/keystore" || true
 fi
 
 # ============================================================================
@@ -230,9 +278,18 @@ fi
 if $HAVE_DOCKER && docker inspect ipfs_cluster >/dev/null 2>&1; then
   log "ipfs-cluster identity + state"
 
-  # Identity files are tiny — fast even on busy clusters
-  _dcp "identity.json" ipfs_cluster:/data/ipfs-cluster/identity.json "$W/cluster/" || true
-  _dcp "service.json"  ipfs_cluster:/data/ipfs-cluster/service.json  "$W/cluster/" || true
+  # Auto-detect cluster data path (stock = /data/ipfs-cluster).
+  CLUSTER_PATH_IN_CONTAINER=$(_detect_cluster_data_path ipfs_cluster || echo "/data/ipfs-cluster")
+  if [ "$CLUSTER_PATH_IN_CONTAINER" = "/data/ipfs-cluster" ]; then
+    log "  cluster data path inside container: $CLUSTER_PATH_IN_CONTAINER (default)"
+  else
+    log "  cluster data path inside container: $CLUSTER_PATH_IN_CONTAINER (custom — auto-detected)"
+  fi
+
+  # Identity files are tiny — fast even on busy clusters. Fall back gracefully
+  # if missing here; they're also inside cluster/data.tgz from the host-side tar.
+  _dcp "identity.json" "ipfs_cluster:${CLUSTER_PATH_IN_CONTAINER}/identity.json" "$W/cluster/" || true
+  _dcp "service.json"  "ipfs_cluster:${CLUSTER_PATH_IN_CONTAINER}/service.json"  "$W/cluster/" || true
 
   # peers ls is small (1 entry per cluster member). Quick.
   _dexec "ipfs-cluster-ctl peers ls" ipfs_cluster ipfs-cluster-ctl peers ls \
@@ -258,14 +315,30 @@ if $HAVE_DOCKER && docker inspect ipfs_cluster >/dev/null 2>&1; then
   if $INCLUDE_CLUSTER_DATA; then
     log "  pausing ipfs_cluster ~3s for consistent CRDT snapshot"
     docker pause ipfs_cluster >/dev/null
-    CLUSTER_SRC=$(docker inspect ipfs_cluster --format '{{range .Mounts}}{{if eq .Destination "/data/ipfs-cluster"}}{{.Source}}{{end}}{{end}}')
+    # Look up the host-side bind path for the auto-detected in-container path
+    CLUSTER_SRC=$(docker inspect ipfs_cluster \
+      --format "{{range .Mounts}}{{if eq .Destination \"${CLUSTER_PATH_IN_CONTAINER}\"}}{{.Source}}{{end}}{{end}}")
+    if [ -z "$CLUSTER_SRC" ]; then
+      # Fallback to common destination paths
+      for d in /data/ipfs-cluster /root/.ipfs-cluster; do
+        CLUSTER_SRC=$(docker inspect ipfs_cluster \
+          --format "{{range .Mounts}}{{if eq .Destination \"$d\"}}{{.Source}}{{end}}{{end}}")
+        [ -n "$CLUSTER_SRC" ] && break
+      done
+    fi
     if [ -n "$CLUSTER_SRC" ] && [ -d "$CLUSTER_SRC" ]; then
+      log "  cluster data source on host: $CLUSTER_SRC"
       # CRDT state is small (tens of MB even with millions of pins). Compress
       # at level 1 with pigz for speed; nice+ionice keep this off the critical
       # CPU/IO path. Cluster is paused throughout.
-      _low_impact tar -c -C "$(dirname "$CLUSTER_SRC")" "$(basename "$CLUSTER_SRC")" 2>/dev/null \
-        | _compress 1 > "$W/cluster/data.tgz" \
-        || log "  WARN: cluster data tar produced errors"
+      if _low_impact tar -c -C "$(dirname "$CLUSTER_SRC")" "$(basename "$CLUSTER_SRC")" 2>/dev/null \
+           | _compress 1 > "$W/cluster/data.tgz"; then
+        log "  cluster CRDT snapshot saved: $(du -sh "$W/cluster/data.tgz" 2>/dev/null | cut -f1) (this contains identity.json + service.json + CRDT state)"
+      else
+        log "  WARN: cluster data tar produced errors — recover.sh will fall back to identity.json + service.json copies"
+      fi
+    else
+      log "  WARN: cluster data source not found on host (tried $CLUSTER_PATH_IN_CONTAINER, /data/ipfs-cluster, /root/.ipfs-cluster)"
     fi
     docker unpause ipfs_cluster >/dev/null
     log "  resumed ipfs_cluster"

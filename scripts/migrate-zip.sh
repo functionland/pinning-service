@@ -295,6 +295,11 @@ if $HAVE_DOCKER && docker inspect ipfs_host >/dev/null 2>&1; then
   # Raw config = peer ID + private key for the kubo node itself
   _dcp "kubo raw config" "ipfs_host:${KUBO_PATH_IN_CONTAINER}/config" "$W/kubo/raw-config.json" || true
 
+  # datastore_spec describes WHERE blocks + pebbleds live (relative or absolute
+  # paths). Critical for restoring on a new server: without this, the new kubo
+  # creates a default spec and won't find migrated data at custom paths.
+  _dcp "kubo datastore_spec" "ipfs_host:${KUBO_PATH_IN_CONTAINER}/datastore_spec" "$W/kubo/datastore_spec" || true
+
   # Export every IPNS key in the keystore (covers fula-db-backup AND fula-registry)
   mkdir -p "$W/kubo/exported-keys"
   KEY_NAMES=$(timeout "${DOCKER_CTL_TIMEOUT}" docker exec ipfs_host ipfs key list 2>/dev/null || echo "")

@@ -11,7 +11,7 @@ const {
   normalizeCid,
   getBlockedCidMode,
 } = require('./database/postgres.js');
-const { renderWrapper } = require('./viewWrapper.js');
+const { renderWrapper, renderWebsiteWrapper } = require('./viewWrapper.js');
 
 let create, fileTypeFromBuffer;
 
@@ -280,11 +280,22 @@ if (!fs.existsSync(config.uploadDir)) {
     'image/svg+xml',
   ]);
 
+  // text/html uses the stricter renderWebsiteWrapper which embeds the source
+  // bytes directly in the wrapper page; cap the embed at 5MB so a large site
+  // does not bloat first paint or browser memory. Above the cap we still show
+  // the popup but disable the "see code" choice.
+  const MAX_HTML_EMBED_SIZE = 5 * 1024 * 1024;
+
   function isInlineViewable(mime) {
     if (!mime) return false;
     const base = String(mime).split(';')[0].trim().toLowerCase();
     if (INLINE_VIEWABLE_MIMES.has(base)) return true;
     return base.startsWith('image/') || base.startsWith('video/') || base.startsWith('audio/');
+  }
+
+  function isHtmlMime(mime) {
+    if (!mime) return false;
+    return String(mime).split(';')[0].trim().toLowerCase() === 'text/html';
   }
 
   function isBrowserNav(req) {
@@ -357,11 +368,12 @@ if (!fs.existsSync(config.uploadDir)) {
     }
 
     // Browser nav + MIME already known to be inline → serve wrapper without
-    // re-fetching content. First-time visitors fall through to the sniff
-    // below, then get redirected to the wrapper after MIME is known.
+    // re-fetching content. text/html is excluded because the website wrapper
+    // embeds the source bytes and therefore needs the body in hand; those
+    // requests fall through to the sniff path below.
     if (browserNav) {
       const cachedMime = cidMimeCache.get(cid);
-      if (cachedMime && isInlineViewable(cachedMime)) {
+      if (cachedMime && isInlineViewable(cachedMime) && !isHtmlMime(cachedMime)) {
         return sendWrapper(req, res, rawCid);
       }
     }
@@ -434,9 +446,23 @@ if (!fs.existsSync(config.uploadDir)) {
         rememberMime(cid, contentType);
 
         // Top-level browser nav + inline-viewable MIME → serve wrapper
-        // instead of the content. The wrapper's iframe re-requests with
-        // ?agreed=1 to fetch the real content.
+        // instead of the content. text/html uses the stricter website
+        // wrapper (no iframe, source-only "see code" view, dweb.link
+        // redirect with countdown). Other inline types (images, video,
+        // audio, PDF, SVG) keep the original Agree/Disagree wrapper whose
+        // iframe re-requests with ?agreed=1.
         if (browserNav && isInlineViewable(contentType)) {
+          if (isHtmlMime(contentType)) {
+            const tooLarge = content.length > MAX_HTML_EMBED_SIZE;
+            const body = tooLarge ? '' : content.toString('utf8');
+            res.setHeader('Cache-Control', 'no-store, must-revalidate');
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            res.setHeader('Vary', 'Accept');
+            res.removeHeader('X-Frame-Options');
+            return res.status(200).send(
+              renderWebsiteWrapper(rawCid, cid, body, tooLarge)
+            );
+          }
           return sendWrapper(req, res, rawCid);
         }
 

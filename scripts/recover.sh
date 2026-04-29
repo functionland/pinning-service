@@ -301,35 +301,89 @@ phase_preflight() {
 phase_apt() {
   log_phase "2. apt — install required packages"
   export DEBIAN_FRONTEND=noninteractive
-  retry 3 30 apt-get update || warn "apt-get update had non-zero exits across all retries (mirror flapping?); continuing"
+
+  # Pre-flight curl bootstrap — minimal Ubuntu cloud images sometimes ship
+  # without curl, which we need for nodesource + Go binary download.
+  if ! command -v curl >/dev/null 2>&1; then
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y curl ca-certificates || fatal "could not bootstrap curl"
+  fi
+
+  retry 3 30 apt-get update || \
+    warn "apt-get update had non-zero exits across all retries (mirror flapping?); continuing"
+
+  # Core packages. Notes:
+  #  - postgresql-client (no version pin): host-side psql/pg_dump/pg_restore.
+  #    The actual postgres SERVER runs in Docker (postgres:15), so client
+  #    version mismatch is fine — newer clients connect to v15 servers without
+  #    issues, and we're using --no-owner --no-acl during restore anyway.
+  #  - dnsutils: provides `dig`, used by dns_points_here() in phase_certs and
+  #    _verify_tls.
+  #  - python3: used by phase_apply_nginx's heredoc parser to strip listen-443
+  #    server blocks. Ubuntu 22.04+ ships it by default but minimal cloud
+  #    images sometimes skip it.
+  #  - file: used by phase_build_libp2p_service to detect binary arch. Almost
+  #    always present, included for explicitness.
+  #  - cron: provides crontab for the verification phase; the cron daemon
+  #    itself is `cron.service` (Debian/Ubuntu) — installed implicitly.
+  #  - dnsutils + iproute2: dig + ss respectively.
   retry 3 30 apt-get install -y \
     docker.io docker-compose-plugin \
     nginx certbot python3-certbot-nginx \
-    jq postgresql-client-15 openssl build-essential git ufw fail2ban \
-    curl ca-certificates rsync redis-server \
+    jq openssl build-essential git ufw fail2ban \
+    curl ca-certificates rsync \
+    redis-server redis-tools \
+    postgresql-client \
+    dnsutils iproute2 \
+    python3 file cron \
     || fatal "apt-get install failed after 3 attempts — check network or mirror config"
 
+  # Ensure docker daemon is enabled and running. apt installs the unit but on
+  # some Ubuntu cloud-init configurations docker isn't auto-started.
+  if ! systemctl is-active --quiet docker; then
+    log "  enabling + starting docker.service"
+    systemctl enable --now docker || fatal "failed to start docker.service — check 'journalctl -u docker'"
+  fi
+  # Wait briefly for the daemon to be responsive
+  for i in 1 2 3 4 5; do
+    docker info >/dev/null 2>&1 && break
+    sleep 2
+  done
+  docker info >/dev/null 2>&1 || fatal "docker installed but daemon not responding"
+
+  # Make sure cron daemon is enabled (some minimal images ship cron disabled)
+  systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || \
+    warn "could not enable cron service — daily backups will not run automatically"
+
   # Go 1.22 (kubo + main_postgres.go + libp2p-service all want this)
-  if ! command -v go >/dev/null 2>&1 || ! go version | grep -q 'go1\.2[2-9]'; then
-    log "installing Go 1.22.7"
+  if ! command -v go >/dev/null 2>&1 || ! /usr/local/go/bin/go version 2>/dev/null | grep -q 'go1\.2[2-9]'; then
+    log "  installing Go 1.22.7"
     rm -rf /usr/local/go
-    curl -fsSL https://go.dev/dl/go1.22.7.linux-amd64.tar.gz | tar -C /usr/local -xz
+    retry 3 15 bash -c "curl -fsSL https://go.dev/dl/go1.22.7.linux-amd64.tar.gz | tar -C /usr/local -xz" \
+      || fatal "Go install failed — could not download or extract"
     grep -q '/usr/local/go/bin' /etc/profile.d/go.sh 2>/dev/null || \
       echo 'export PATH=$PATH:/usr/local/go/bin' > /etc/profile.d/go.sh
     export PATH=$PATH:/usr/local/go/bin
   fi
+  /usr/local/go/bin/go version >/dev/null 2>&1 || fatal "Go install verification failed"
 
   # Node 20
   if ! command -v node >/dev/null 2>&1 || ! node -v | grep -q '^v20\.'; then
-    log "installing Node 20"
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    apt-get install -y nodejs
+    log "  installing Node 20"
+    retry 3 15 bash -c "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -" \
+      || fatal "NodeSource setup failed"
+    retry 2 30 apt-get install -y nodejs || fatal "Node 20 install failed"
   fi
+  node -v >/dev/null 2>&1 || fatal "node not on PATH after install"
+  npm -v  >/dev/null 2>&1 || fatal "npm not on PATH after install"
 
   # pm2 for mainnet-pool-server
-  command -v pm2 >/dev/null 2>&1 || npm install -g pm2
+  if ! command -v pm2 >/dev/null 2>&1; then
+    log "  installing pm2 globally"
+    retry 2 15 npm install -g pm2 || fatal "pm2 install failed"
+  fi
 
-  log "apt phase OK"
+  log "apt phase OK — all required packages present"
   mark_phase_done apt
 }
 

@@ -40,7 +40,7 @@ Before touching either server, gather:
 - [ ] **DB IPNS name** — `k51qzi5uqu5dmguoei6kc4qdrnnawmvew4o8x5fzzg5346x4nii9qis3lpiub9`
 - [ ] **Registry IPNS name** — `k51qzi5uqu5dle8iqcdd8snk2xedugpt7kjh5bu3fip639pjoqrd2cwa5vu96q`
 - [ ] **Old server**: SSH access as root, all services running healthily.
-- [ ] **New server**: fresh Ubuntu 22.04 or 24.04, public IP, SSH access as root, sudo.
+- [ ] **New server**: fresh Ubuntu 22.04 or 24.04, public IP, SSH access as root, sudo. **No other prerequisites** — `recover.sh phase_apt` installs everything (Docker, nginx, certbot, Go 1.22, Node 20, pm2, postgres-client, redis, ufw, dnsutils, etc.). See Section 7a for the full list.
 - [ ] **Disk space planning** — on the old server, run:
       ```
       du -sh /home/root/ipfs_data         # kubo blocks (the big one)
@@ -404,6 +404,48 @@ If the old server is unreachable, you can still recover *most* state from the IP
 
 ---
 
+## Section 7a — What `phase_apt` installs
+
+The recovery script bootstraps a fresh Ubuntu host into a fully-equipped target with no manual prerequisites. Phase 2 (`apt`) runs as root and installs:
+
+**Via apt** (with 3× retry + 30s backoff per op):
+
+| Package(s) | Purpose |
+|---|---|
+| `docker.io`, `docker-compose-plugin` | Container runtime for postgres-pinning, ipfs_host, ipfs_cluster, fula-gateway-1. Daemon explicitly enabled + started. |
+| `nginx` | Reverse proxy / TLS terminator for all domain endpoints |
+| `certbot`, `python3-certbot-nginx` | Let's Encrypt cert issuance via the nginx plugin (HTTP-01 challenge) |
+| `postgresql-client` | host-side `psql`, `pg_dump`, `pg_restore` (postgres SERVER runs in Docker) |
+| `redis-server`, `redis-tools` | Used by mainnet-pool-server and mainnet-rewards-server for rate limiting + caching |
+| `dnsutils` | provides `dig` for the per-domain DNS-points-here check in `phase_certs` and `_verify_tls` |
+| `iproute2` | provides `ss` for the network listener verification |
+| `python3` | used by the heredoc parser in `phase_apply_nginx` to strip listen-443 server blocks |
+| `file` | used by `phase_build_libp2p_service` to detect binary architecture compatibility |
+| `cron` | daemon for scheduled backup + IPNS publish jobs (also enabled at the end of the apt phase) |
+| `ufw`, `fail2ban` | firewall + brute-force protection |
+| `jq`, `openssl`, `git`, `build-essential`, `curl`, `ca-certificates`, `rsync` | general utilities used throughout |
+
+**Out-of-band downloads** (with 3× retry):
+
+| Tool | Source | Why not apt |
+|---|---|---|
+| Go 1.22.7 | `https://go.dev/dl/go1.22.7.linux-amd64.tar.gz` extracted to `/usr/local/go` | Ubuntu 22.04 only ships Go 1.18; main_postgres.go needs ≥1.20 |
+| Node 20 | NodeSource setup script `https://deb.nodesource.com/setup_20.x` then `apt-get install nodejs` | Ubuntu's default Node varies; Node 20 LTS is consistent across distros |
+| pm2 | `npm install -g pm2` | not in apt repos |
+
+**What is NOT installed** (by design):
+
+- **postgres SERVER** — runs inside the `postgres-pinning` Docker container (image `postgres:15`)
+- **kubo / IPFS** — runs inside the `ipfs_host` Docker container (image `ipfs/kubo:release`)
+- **ipfs-cluster** — runs inside the `ipfs_cluster` Docker container (image `ipfs/ipfs-cluster:stable`)
+- **fula-gateway** — Rust binary runs inside the `fula-gateway-1` Docker container (image loaded from bundle or rebuilt from source)
+
+This keeps the host minimal: only daemons that systemd manages directly (nginx, redis, application services) are installed via apt; data substrates live in containerized form for clean upgrade paths.
+
+**Verification**: at the end of phase 2, the script verifies each tool is on PATH and the docker daemon responds to `docker info`. If any check fails, the phase exits fatal with a clear message. The check is performed even on re-runs so an interrupted apt install doesn't get silently skipped on the next attempt.
+
+---
+
 ## Section 7 — Flag reference
 
 ### `migrate-zip.sh`
@@ -443,7 +485,7 @@ The 29 phases run in dependency order. Each writes a checkpoint to `/var/lib/ful
 | # | Phase | What it does | Network? | State written |
 |---|---|---|---|---|
 | 1 | `preflight` | Validates flags, extracts bundle to `/var/lib/fula-recovery/bundle/`, checks SHA256 if present | No | bundle dir |
-| 2 | `apt` | Installs docker, nginx, certbot, jq, postgres-client, openssl, build-essential, Go 1.22, Node 20, npm, pm2, ufw, redis-server, rsync. Retries each apt op 3× with 30s backoff. | Yes | system |
+| 2 | `apt` | Installs docker.io, nginx, certbot, jq, postgres-client, openssl, build-essential, Go 1.22, Node 20, npm, pm2, ufw, fail2ban, redis-server + redis-tools, rsync, dnsutils (dig), python3, file, cron, iproute2 (ss). Enables docker.service + cron. Retries each apt op 3× with 30s backoff. Verifies each tool is on PATH after install. | Yes | system |
 | 3 | `clone` | git clones pinning-service, fula-api, mainnet-reward-server. Each clone retried 3× with 15s backoff. | Yes | `/opt/*` |
 | 4 | `apply_system_state` | Restores `/etc/letsencrypt`, `/etc/sysctl.d/*`, `/etc/security/limits.d/*`, `/etc/redis/redis.conf`, `/etc/apple/*`, `/home/root/password.txt` | No | system |
 | 5 | `apply_env_files` | Copies all 8 `.env` files from `bundle/env/` to their target paths. Validates pinning-webui.env has all required secrets (ENCRYPTION_KEY, JWT_SECRET, etc.). Persists `/root/.fula-backup-key`. | No | per-service .env |

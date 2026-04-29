@@ -46,9 +46,12 @@ mkdir -p "$OUT_DIR"
 W="$OUT_DIR/$NAME"
 mkdir -p "$W"/{systemd,docker,kubo,cluster,cron,nginx,letsencrypt,ufw,sysctl,fula-gateway,redis,env,apple,services,postgres,images}
 
-# log writes to STDERR so callers can redirect stdout (e.g., for capturing
-# command output to a file) without swallowing log lines into that file.
-log() { echo "[$(date -u +%H:%M:%SZ)] $*" >&2; }
+# Open FD 3 as a dedicated log channel pointing at whatever the original stderr
+# was (a terminal when run interactively). log() writes to FD 3, so callers
+# can redirect FD 1 (stdout) AND FD 2 (stderr) freely — common pattern in this
+# script:  `_dexec ... > capture.txt 2>/dev/null`  — without losing log lines.
+exec 3>&2
+log() { echo "[$(date -u +%H:%M:%SZ)] $*" >&3; }
 log "Bundle: $W"
 
 # ============================================================================
@@ -189,6 +192,43 @@ _detect_cluster_data_path() {
   return 1
 }
 
+# ----------------------------------------------------------------------------
+# Resolve an in-container path to its corresponding host path by finding the
+# longest matching mount destination prefix. Handles arbitrary mount layering
+# (Fula Box, vanilla, multi-bind, etc.).
+#
+# Example: container has these mounts:
+#     /uniondrive       (host) → /uniondrive       (container)
+#     /home/root/.fula  (host) → /internal         (container)
+#     /var/lib/docker/volumes/.../_data → /data/ipfs-cluster
+#
+# _resolve_container_path ipfs_cluster /uniondrive/ipfs-cluster
+#   → /uniondrive/ipfs-cluster   (matches /uniondrive prefix, suffix=/ipfs-cluster)
+#
+# _resolve_container_path ipfs_host /internal/ipfs_data
+#   → /home/root/.fula/ipfs_data (matches /internal prefix, suffix=/ipfs_data)
+# ----------------------------------------------------------------------------
+_resolve_container_path() {
+  local container="$1" in_path="$2"
+  docker inspect "$container" --format '{{json .Mounts}}' 2>/dev/null \
+    | python3 -c '
+import json, sys
+mounts = json.load(sys.stdin)
+p = sys.argv[1].rstrip("/")
+matches = [
+    m for m in mounts
+    if p == m["Destination"].rstrip("/")
+       or p.startswith(m["Destination"].rstrip("/") + "/")
+]
+if not matches:
+    sys.exit(1)
+best = max(matches, key=lambda m: len(m["Destination"].rstrip("/")))
+suffix = p[len(best["Destination"].rstrip("/")):].lstrip("/")
+src = best["Source"].rstrip("/")
+print(src + ("/" + suffix if suffix else ""))
+' "$in_path"
+}
+
 # Always unpause ipfs_cluster on exit, even on Ctrl-C or mid-snapshot crash.
 # Without this, a failure between `docker pause` and `docker unpause` leaves the
 # cluster frozen indefinitely, blocking pinning-service traffic on the OLD server.
@@ -313,32 +353,48 @@ if $HAVE_DOCKER && docker inspect ipfs_cluster >/dev/null 2>&1; then
   fi
 
   if $INCLUDE_CLUSTER_DATA; then
+    # Resolve the in-container data path to a host path via mount-prefix match.
+    # On Fula Box this is /uniondrive/ipfs-cluster (the bulky one) rather than
+    # the docker volume mounted at /data/ipfs-cluster (which is empty).
+    CLUSTER_SRC=$(_resolve_container_path ipfs_cluster "$CLUSTER_PATH_IN_CONTAINER" 2>/dev/null || echo "")
+
     log "  pausing ipfs_cluster ~3s for consistent CRDT snapshot"
     docker pause ipfs_cluster >/dev/null
-    # Look up the host-side bind path for the auto-detected in-container path
-    CLUSTER_SRC=$(docker inspect ipfs_cluster \
-      --format "{{range .Mounts}}{{if eq .Destination \"${CLUSTER_PATH_IN_CONTAINER}\"}}{{.Source}}{{end}}{{end}}")
-    if [ -z "$CLUSTER_SRC" ]; then
-      # Fallback to common destination paths
-      for d in /data/ipfs-cluster /root/.ipfs-cluster; do
-        CLUSTER_SRC=$(docker inspect ipfs_cluster \
-          --format "{{range .Mounts}}{{if eq .Destination \"$d\"}}{{.Source}}{{end}}{{end}}")
-        [ -n "$CLUSTER_SRC" ] && break
-      done
-    fi
+
     if [ -n "$CLUSTER_SRC" ] && [ -d "$CLUSTER_SRC" ]; then
-      log "  cluster data source on host: $CLUSTER_SRC"
-      # CRDT state is small (tens of MB even with millions of pins). Compress
-      # at level 1 with pigz for speed; nice+ionice keep this off the critical
-      # CPU/IO path. Cluster is paused throughout.
+      log "  cluster data source on host: $CLUSTER_SRC (resolved from $CLUSTER_PATH_IN_CONTAINER)"
+      ls -la "$CLUSTER_SRC" 2>/dev/null | tail -n +2 | head -20 | sed 's/^/    /' >&3 || true
+      local total_src_bytes total_src_human
+      total_src_bytes=$(du -sb "$CLUSTER_SRC" 2>/dev/null | cut -f1 || echo "0")
+      total_src_human=$(du -sh "$CLUSTER_SRC" 2>/dev/null | cut -f1 || echo "?")
+      log "  cluster data total size on host: ${total_src_human} (${total_src_bytes} bytes)"
+
+      # If the source is large (>100 MB), warn that this is now the heavy step
+      if [ "${total_src_bytes:-0}" -gt 104857600 ]; then
+        log "  NOTE: cluster CRDT is ${total_src_human}; tar+compress may take several minutes"
+      fi
+
       if _low_impact tar -c -C "$(dirname "$CLUSTER_SRC")" "$(basename "$CLUSTER_SRC")" 2>/dev/null \
            | _compress 1 > "$W/cluster/data.tgz"; then
-        log "  cluster CRDT snapshot saved: $(du -sh "$W/cluster/data.tgz" 2>/dev/null | cut -f1) (this contains identity.json + service.json + CRDT state)"
+        local tar_size_bytes tar_size_human
+        tar_size_bytes=$(stat -c%s "$W/cluster/data.tgz" 2>/dev/null || echo 0)
+        tar_size_human=$(du -sh "$W/cluster/data.tgz" 2>/dev/null | cut -f1)
+        log "  cluster CRDT snapshot saved: $tar_size_human ($tar_size_bytes bytes compressed)"
+        # Sanity check: tarball should be at least 10% of source size for typical
+        # CRDT data (compresses ~3-5x). If much smaller, something's wrong.
+        if [ "${total_src_bytes:-0}" -gt 1048576 ] && \
+           [ "${tar_size_bytes:-0}" -lt $((total_src_bytes / 20)) ]; then
+          log "  WARN: tarball is suspiciously small relative to source"
+          log "        (source ${total_src_human}, tarball ${tar_size_human})"
+          log "        This may indicate a mount-resolution mismatch. Investigate before transferring."
+        fi
       else
-        log "  WARN: cluster data tar produced errors — recover.sh will fall back to identity.json + service.json copies"
+        log "  WARN: cluster data tar produced errors"
       fi
     else
-      log "  WARN: cluster data source not found on host (tried $CLUSTER_PATH_IN_CONTAINER, /data/ipfs-cluster, /root/.ipfs-cluster)"
+      log "  WARN: could not resolve cluster data path '$CLUSTER_PATH_IN_CONTAINER' to a host path"
+      log "        Container mounts:"
+      docker inspect ipfs_cluster --format '{{range .Mounts}}{{printf "    %s -> %s\n" .Source .Destination}}{{end}}' >&3 2>/dev/null
     fi
     docker unpause ipfs_cluster >/dev/null
     log "  resumed ipfs_cluster"
@@ -522,7 +578,15 @@ fi
 # operator can monitor progress and understand why the host is busy.
 # ============================================================================
 if $HAVE_DOCKER && $INCLUDE_BLOCKS; then
-  KUBO_SRC=$(docker inspect ipfs_host --format '{{range .Mounts}}{{if eq .Destination "/data/ipfs"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+  # Resolve the in-container kubo data path (auto-detected earlier) to its
+  # host-side location via mount-prefix match. For Fula Box this gives
+  # /home/root/.fula/ipfs_data; for stock kubo it gives the docker volume's
+  # _data directory.
+  KUBO_SRC=$(_resolve_container_path ipfs_host "$KUBO_PATH_IN_CONTAINER" 2>/dev/null || echo "")
+  # Fallback to the legacy /data/ipfs lookup if mount resolution failed
+  if [ -z "$KUBO_SRC" ]; then
+    KUBO_SRC=$(docker inspect ipfs_host --format '{{range .Mounts}}{{if eq .Destination "/data/ipfs"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+  fi
   if [ -n "$KUBO_SRC" ] && [ -d "$KUBO_SRC" ]; then
     SIZE_HUMAN=$(du -sh "$KUBO_SRC" 2>/dev/null | cut -f1)
     SIZE_BYTES=$(du -sb "$KUBO_SRC" 2>/dev/null | cut -f1 || echo 0)
@@ -607,10 +671,27 @@ echo "      --db-ipns       k51qzi5uqu5dmguoei6kc4qdrnnawmvew4o8x5fzzg5346x4nii9
 echo "      --registry-ipns k51qzi5uqu5dle8iqcdd8snk2xedugpt7kjh5bu3fip639pjoqrd2cwa5vu96q"
 echo
 if ! $INCLUDE_BLOCKS; then
-  KUBO_SRC=$(docker inspect ipfs_host --format '{{range .Mounts}}{{if eq .Destination "/data/ipfs"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
-  if [ -n "$KUBO_SRC" ]; then
-    echo "Kubo blocks NOT included. Sync separately:"
-    echo "  rsync -aHP --info=progress2 ${KUBO_SRC}/ root@<new-server>:/home/root/ipfs_data/"
+  # Use mount-prefix matching to resolve the kubo data dir to its real host
+  # path. For Fula Box this is /home/root/.fula/ipfs_data, NOT the docker volume.
+  KUBO_HOST_PATH=$(_resolve_container_path ipfs_host "${KUBO_PATH_IN_CONTAINER:-/data/ipfs}" 2>/dev/null || echo "")
+  if [ -z "$KUBO_HOST_PATH" ]; then
+    KUBO_HOST_PATH=$(docker inspect ipfs_host --format '{{range .Mounts}}{{if eq .Destination "/data/ipfs"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+  fi
+  if [ -n "$KUBO_HOST_PATH" ] && [ -d "$KUBO_HOST_PATH" ]; then
+    KUBO_HOST_SIZE=$(du -sh "$KUBO_HOST_PATH" 2>/dev/null | cut -f1)
+    echo "Kubo blocks NOT included in bundle. Sync separately:"
+    echo "  Source on host:        $KUBO_HOST_PATH ($KUBO_HOST_SIZE)"
+    echo "  Container path:        ${KUBO_PATH_IN_CONTAINER:-/data/ipfs}"
+    echo "  rsync command:"
+    echo "    rsync -aHP --info=progress2 --bwlimit=50M \\"
+    echo "      $KUBO_HOST_PATH/ \\"
+    echo "      root@<new-server>:/path/on/new/server/ipfs_data/"
+    echo
+    echo "  IMPORTANT — kubo's Datastore.Spec may reference paths OUTSIDE this dir"
+    echo "  (e.g., a custom blocks location on a separate drive). Verify with:"
+    echo "    docker exec ipfs_host cat ${KUBO_PATH_IN_CONTAINER:-/data/ipfs}/datastore_spec"
+    echo "    docker exec ipfs_host du -sh ${KUBO_PATH_IN_CONTAINER:-/data/ipfs}/blocks 2>/dev/null"
+    echo "  If blocks are at a non-default path (e.g. /uniondrive/...), rsync that path too."
     echo
   fi
 fi

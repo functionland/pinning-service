@@ -364,28 +364,28 @@ if $HAVE_DOCKER && docker inspect ipfs_cluster >/dev/null 2>&1; then
     if [ -n "$CLUSTER_SRC" ] && [ -d "$CLUSTER_SRC" ]; then
       log "  cluster data source on host: $CLUSTER_SRC (resolved from $CLUSTER_PATH_IN_CONTAINER)"
       ls -la "$CLUSTER_SRC" 2>/dev/null | tail -n +2 | head -20 | sed 's/^/    /' >&3 || true
-      local total_src_bytes total_src_human
-      total_src_bytes=$(du -sb "$CLUSTER_SRC" 2>/dev/null | cut -f1 || echo "0")
-      total_src_human=$(du -sh "$CLUSTER_SRC" 2>/dev/null | cut -f1 || echo "?")
-      log "  cluster data total size on host: ${total_src_human} (${total_src_bytes} bytes)"
+      # Note: not using `local` here — we're at the script's top level, not in
+      # a function. (`local` is a syntax error outside function scope.)
+      TOTAL_SRC_BYTES=$(du -sb "$CLUSTER_SRC" 2>/dev/null | cut -f1 || echo "0")
+      TOTAL_SRC_HUMAN=$(du -sh "$CLUSTER_SRC" 2>/dev/null | cut -f1 || echo "?")
+      log "  cluster data total size on host: ${TOTAL_SRC_HUMAN} (${TOTAL_SRC_BYTES} bytes)"
 
       # If the source is large (>100 MB), warn that this is now the heavy step
-      if [ "${total_src_bytes:-0}" -gt 104857600 ]; then
-        log "  NOTE: cluster CRDT is ${total_src_human}; tar+compress may take several minutes"
+      if [ "${TOTAL_SRC_BYTES:-0}" -gt 104857600 ]; then
+        log "  NOTE: cluster CRDT is ${TOTAL_SRC_HUMAN}; tar+compress may take several minutes"
       fi
 
       if _low_impact tar -c -C "$(dirname "$CLUSTER_SRC")" "$(basename "$CLUSTER_SRC")" 2>/dev/null \
            | _compress 1 > "$W/cluster/data.tgz"; then
-        local tar_size_bytes tar_size_human
-        tar_size_bytes=$(stat -c%s "$W/cluster/data.tgz" 2>/dev/null || echo 0)
-        tar_size_human=$(du -sh "$W/cluster/data.tgz" 2>/dev/null | cut -f1)
-        log "  cluster CRDT snapshot saved: $tar_size_human ($tar_size_bytes bytes compressed)"
-        # Sanity check: tarball should be at least 10% of source size for typical
+        TAR_SIZE_BYTES=$(stat -c%s "$W/cluster/data.tgz" 2>/dev/null || echo 0)
+        TAR_SIZE_HUMAN=$(du -sh "$W/cluster/data.tgz" 2>/dev/null | cut -f1)
+        log "  cluster CRDT snapshot saved: $TAR_SIZE_HUMAN ($TAR_SIZE_BYTES bytes compressed)"
+        # Sanity check: tarball should be at least 5% of source size for typical
         # CRDT data (compresses ~3-5x). If much smaller, something's wrong.
-        if [ "${total_src_bytes:-0}" -gt 1048576 ] && \
-           [ "${tar_size_bytes:-0}" -lt $((total_src_bytes / 20)) ]; then
+        if [ "${TOTAL_SRC_BYTES:-0}" -gt 1048576 ] && \
+           [ "${TAR_SIZE_BYTES:-0}" -lt $((TOTAL_SRC_BYTES / 20)) ]; then
           log "  WARN: tarball is suspiciously small relative to source"
-          log "        (source ${total_src_human}, tarball ${tar_size_human})"
+          log "        (source ${TOTAL_SRC_HUMAN}, tarball ${TAR_SIZE_HUMAN})"
           log "        This may indicate a mount-resolution mismatch. Investigate before transferring."
         fi
       else

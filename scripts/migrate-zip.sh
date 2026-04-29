@@ -20,14 +20,19 @@ set -euo pipefail
 OUT_DIR="/tmp2"
 INCLUDE_BLOCKS=true
 INCLUDE_CLUSTER_DATA=true
+WITH_PIN_LIST=false
+DOCKER_CTL_TIMEOUT=30
+DOCKER_CP_TIMEOUT=60
 TIMESTAMP=$(date -u +%Y%m%d-%H%M%SZ)
 NAME="fula-migration-${TIMESTAMP}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --out)             OUT_DIR="$2"; shift 2 ;;
-    --no-blocks)       INCLUDE_BLOCKS=false; shift ;;
-    --no-cluster-data) INCLUDE_CLUSTER_DATA=false; shift ;;
+    --out)               OUT_DIR="$2"; shift 2 ;;
+    --no-blocks)         INCLUDE_BLOCKS=false; shift ;;
+    --no-cluster-data)   INCLUDE_CLUSTER_DATA=false; shift ;;
+    --with-pin-list)     WITH_PIN_LIST=true; shift ;;
+    --ctl-timeout)       DOCKER_CTL_TIMEOUT="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,18p' "$0"
       exit 0
@@ -102,6 +107,44 @@ _low_impact() {
   $NICE $IONICE "$@"
 }
 
+# Timeout-wrapped docker exec / docker cp. On a production server, individual
+# control-plane commands (e.g., `ipfs-cluster-ctl pin ls --enc=json`) can hang
+# for many minutes when the cluster has a large pin set. Without a timeout,
+# such a hang silently stalls the whole bundle. Default 30s for CTL queries,
+# 60s for file copies (kubo keystore, identity files).
+#
+# All wrappers PRINT what they're about to run (truncated) before executing,
+# so if the script hangs, the user sees exactly which line is the culprit.
+_dexec() {
+  local desc="$1"; shift
+  local cmd_preview="docker exec $* "
+  cmd_preview="${cmd_preview:0:120}"
+  log "    [exec ${DOCKER_CTL_TIMEOUT}s] $desc"
+  if ! timeout "${DOCKER_CTL_TIMEOUT}" docker exec "$@"; then
+    local rc=$?
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      log "    [TIMEOUT after ${DOCKER_CTL_TIMEOUT}s] $desc — skipping (cluster busy?)"
+      return 124
+    fi
+    log "    [exec rc=$rc] $desc — skipping"
+    return $rc
+  fi
+}
+
+_dcp() {
+  local desc="$1" src="$2" dst="$3"
+  log "    [cp ${DOCKER_CP_TIMEOUT}s] $desc ($src -> $dst)"
+  if ! timeout "${DOCKER_CP_TIMEOUT}" docker cp "$src" "$dst"; then
+    local rc=$?
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      log "    [TIMEOUT after ${DOCKER_CP_TIMEOUT}s] $desc — skipping"
+      return 124
+    fi
+    log "    [cp rc=$rc] $desc — skipping (file may not exist)"
+    return $rc
+  fi
+}
+
 # Detect docker availability up front
 HAVE_DOCKER=true
 command -v docker >/dev/null 2>&1 || HAVE_DOCKER=false
@@ -157,25 +200,28 @@ fi
 # ============================================================================
 if $HAVE_DOCKER && docker inspect ipfs_host >/dev/null 2>&1; then
   log "kubo identity + keys"
-  docker exec ipfs_host ipfs config show > "$W/kubo/config.json"  2>/dev/null || true
-  docker exec ipfs_host ipfs id          > "$W/kubo/id.json"      2>/dev/null || true
-  docker exec ipfs_host ipfs key list -l > "$W/kubo/key-list.txt" 2>/dev/null || true
+  _dexec "ipfs config show" ipfs_host ipfs config show > "$W/kubo/config.json"  2>/dev/null || true
+  _dexec "ipfs id"          ipfs_host ipfs id          > "$W/kubo/id.json"      2>/dev/null || true
+  _dexec "ipfs key list -l" ipfs_host ipfs key list -l > "$W/kubo/key-list.txt" 2>/dev/null || true
 
   # Raw config = peer ID + private key for the kubo node itself
-  docker cp ipfs_host:/data/ipfs/config "$W/kubo/raw-config.json" 2>/dev/null || true
+  _dcp "kubo raw config" ipfs_host:/data/ipfs/config "$W/kubo/raw-config.json" || true
 
   # Export every IPNS key in the keystore (covers fula-db-backup AND fula-registry)
   mkdir -p "$W/kubo/exported-keys"
-  docker exec ipfs_host ipfs key list 2>/dev/null | while read -r keyname; do
-    [ -z "$keyname" ] && continue
-    if docker exec ipfs_host sh -c "cd /tmp && ipfs key export '$keyname'" >/dev/null 2>&1; then
-      docker cp "ipfs_host:/tmp/${keyname}.key" "$W/kubo/exported-keys/${keyname}.key" 2>/dev/null
-      docker exec ipfs_host rm -f "/tmp/${keyname}.key" 2>/dev/null || true
-    fi
-  done
+  KEY_NAMES=$(timeout "${DOCKER_CTL_TIMEOUT}" docker exec ipfs_host ipfs key list 2>/dev/null || echo "")
+  if [ -n "$KEY_NAMES" ]; then
+    while read -r keyname; do
+      [ -z "$keyname" ] && continue
+      if timeout "${DOCKER_CTL_TIMEOUT}" docker exec ipfs_host sh -c "cd /tmp && ipfs key export '$keyname'" >/dev/null 2>&1; then
+        _dcp "key $keyname" "ipfs_host:/tmp/${keyname}.key" "$W/kubo/exported-keys/${keyname}.key" || true
+        timeout "${DOCKER_CTL_TIMEOUT}" docker exec ipfs_host rm -f "/tmp/${keyname}.key" 2>/dev/null || true
+      fi
+    done <<< "$KEY_NAMES"
+  fi
 
   # Defense in depth — grab the raw keystore directory too (alternate restore path)
-  docker cp ipfs_host:/data/ipfs/keystore "$W/kubo/keystore" 2>/dev/null || true
+  _dcp "kubo keystore dir" ipfs_host:/data/ipfs/keystore "$W/kubo/keystore" || true
 fi
 
 # ============================================================================
@@ -183,11 +229,31 @@ fi
 # ============================================================================
 if $HAVE_DOCKER && docker inspect ipfs_cluster >/dev/null 2>&1; then
   log "ipfs-cluster identity + state"
-  docker cp ipfs_cluster:/data/ipfs-cluster/identity.json "$W/cluster/" 2>/dev/null || true
-  docker cp ipfs_cluster:/data/ipfs-cluster/service.json  "$W/cluster/" 2>/dev/null || true
-  docker exec ipfs_cluster ipfs-cluster-ctl peers ls          > "$W/cluster/peers.txt"  2>/dev/null || true
-  docker exec ipfs_cluster ipfs-cluster-ctl pin ls --enc=json > "$W/cluster/pins.json"  2>/dev/null || true
-  docker exec ipfs_cluster ipfs-cluster-ctl status            > "$W/cluster/status.txt" 2>/dev/null || true
+
+  # Identity files are tiny — fast even on busy clusters
+  _dcp "identity.json" ipfs_cluster:/data/ipfs-cluster/identity.json "$W/cluster/" || true
+  _dcp "service.json"  ipfs_cluster:/data/ipfs-cluster/service.json  "$W/cluster/" || true
+
+  # peers ls is small (1 entry per cluster member). Quick.
+  _dexec "ipfs-cluster-ctl peers ls" ipfs_cluster ipfs-cluster-ctl peers ls \
+    > "$W/cluster/peers.txt" 2>/dev/null || true
+
+  # pin ls --enc=json walks the ENTIRE cluster pin set. On a production cluster
+  # with hundreds of thousands of pins this can take many minutes, lock the
+  # cluster API while it runs, AND produce a multi-GB JSON file. Skipped by
+  # default — the canonical pin set is in cluster/data.tgz (CRDT state) which
+  # we capture below. Re-enable with --with-pin-list if you specifically want
+  # the JSON dump as a diagnostic artifact.
+  if $WITH_PIN_LIST; then
+    log "  --with-pin-list: capturing pin list JSON (may take several minutes)"
+    _dexec "ipfs-cluster-ctl pin ls --enc=json" ipfs_cluster ipfs-cluster-ctl pin ls --enc=json \
+      > "$W/cluster/pins.json" 2>/dev/null || true
+    # status command similarly walks every pin's allocation state — heavy
+    _dexec "ipfs-cluster-ctl status" ipfs_cluster ipfs-cluster-ctl status \
+      > "$W/cluster/status.txt" 2>/dev/null || true
+  else
+    log "  skipping pin ls + status (canonical pin set is in cluster/data.tgz; pass --with-pin-list to override)"
+  fi
 
   if $INCLUDE_CLUSTER_DATA; then
     log "  pausing ipfs_cluster ~3s for consistent CRDT snapshot"

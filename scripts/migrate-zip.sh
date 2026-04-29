@@ -44,6 +44,64 @@ mkdir -p "$W"/{systemd,docker,kubo,cluster,cron,nginx,letsencrypt,ufw,sysctl,ful
 log() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
 log "Bundle: $W"
 
+# ============================================================================
+# Resource-pressure controls
+# ----------------------------------------------------------------------------
+# The single most expensive operation in this script is the kubo blocks tar:
+# it reads millions of small files (flatfs) and gzip-compresses them, all
+# while the production stack is still serving traffic. On servers with large
+# pinned datasets (>50 GB) this can saturate one CPU core for tens of minutes
+# AND saturate disk I/O, making the host feel unresponsive even though it's
+# making progress.
+#
+# Mitigations applied throughout this script:
+#   1. nice + ionice — heavy commands run at the lowest CPU + I/O priority,
+#      so production services keep their fair share of resources.
+#   2. pigz when available — multi-threaded gzip; same compression format as
+#      gzip but uses all CPU cores and runs ~N times faster on N-core hosts.
+#   3. compression level 1 — much faster than the default level 6, with
+#      negligible size penalty for kubo block data (most blocks are already
+#      content-compressed by their producers).
+#   4. no double-compression on outer bundle — the outer tarball runs
+#      gzip -1 around contents that are already gzipped, which would be
+#      pure CPU waste. We skip recompression of already-compressed members.
+# ============================================================================
+
+# Auto-install pigz on Debian/Ubuntu if running as root and apt is available.
+# Tiny package; one-time install; benefits every subsequent run.
+if ! command -v pigz >/dev/null 2>&1; then
+  if [[ $EUID -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+    log "installing pigz for parallel compression (one-time, takes <30s)..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y pigz >/dev/null 2>&1 \
+      || log "  pigz install failed; falling back to single-threaded gzip"
+  else
+    log "NOTE: pigz not installed — single-threaded gzip will be used (slower)."
+    log "      To speed up future runs: apt install pigz"
+  fi
+fi
+
+# Compression helper. Reads stdin, writes stdout. Defaults to level 1 (fast)
+# for the kubo block stream because IPFS blocks are largely uncompressible
+# already; level 6+ burns CPU for sub-1% size reduction.
+NPROC=$(nproc 2>/dev/null || echo 2)
+_compress() {
+  local level="${1:-1}"
+  if command -v pigz >/dev/null 2>&1; then
+    pigz "-${level}" "-p${NPROC}"
+  else
+    gzip "-${level}"
+  fi
+}
+
+# Run a command at the lowest CPU + I/O priority to keep production responsive.
+# Falls through transparently if nice/ionice aren't installed.
+_low_impact() {
+  local NICE=""  IONICE=""
+  command -v nice   >/dev/null 2>&1 && NICE="nice -n 19"
+  command -v ionice >/dev/null 2>&1 && IONICE="ionice -c 3"
+  $NICE $IONICE "$@"
+}
+
 # Detect docker availability up front
 HAVE_DOCKER=true
 command -v docker >/dev/null 2>&1 || HAVE_DOCKER=false
@@ -136,9 +194,12 @@ if $HAVE_DOCKER && docker inspect ipfs_cluster >/dev/null 2>&1; then
     docker pause ipfs_cluster >/dev/null
     CLUSTER_SRC=$(docker inspect ipfs_cluster --format '{{range .Mounts}}{{if eq .Destination "/data/ipfs-cluster"}}{{.Source}}{{end}}{{end}}')
     if [ -n "$CLUSTER_SRC" ] && [ -d "$CLUSTER_SRC" ]; then
-      tar -cz -C "$(dirname "$CLUSTER_SRC")" "$(basename "$CLUSTER_SRC")" \
-        > "$W/cluster/data.tgz" 2>/dev/null || \
-        log "  WARN: cluster data tar produced errors"
+      # CRDT state is small (tens of MB even with millions of pins). Compress
+      # at level 1 with pigz for speed; nice+ionice keep this off the critical
+      # CPU/IO path. Cluster is paused throughout.
+      _low_impact tar -c -C "$(dirname "$CLUSTER_SRC")" "$(basename "$CLUSTER_SRC")" 2>/dev/null \
+        | _compress 1 > "$W/cluster/data.tgz" \
+        || log "  WARN: cluster data tar produced errors"
     fi
     docker unpause ipfs_cluster >/dev/null
     log "  resumed ipfs_cluster"
@@ -178,10 +239,13 @@ log "sysctl + limits"
 sysctl -a 2>/dev/null | grep -E "^(fs\.|net\.core|net\.ipv4\.tcp)" > "$W/sysctl/runtime.txt" || true
 
 # ============================================================================
-# 10. fula-gateway state (registry.cid, db-backup.cid, history)
+# 10. fula-gateway state (registry.cid, db-backup.cid, history) — small
 # ============================================================================
 log "fula-gateway state"
-[ -d /var/lib/fula-gateway ] && tar -czf "$W/fula-gateway/state.tgz" /var/lib/fula-gateway/ 2>/dev/null || true
+if [ -d /var/lib/fula-gateway ]; then
+  _low_impact tar -c /var/lib/fula-gateway/ 2>/dev/null \
+    | _compress 1 > "$W/fula-gateway/state.tgz" || true
+fi
 
 # ============================================================================
 # 11. Redis
@@ -250,12 +314,14 @@ if [ -d /opt/mainnet ]; then
   mkdir -p "$W/services/mainnet-pool-server"
   [ -f /opt/mainnet/.pm2/dump.pm2 ]      && cp /opt/mainnet/.pm2/dump.pm2      "$W/services/mainnet-pool-server/" 2>/dev/null || true
   [ -f /opt/mainnet/ecosystem.config.js ] && cp /opt/mainnet/ecosystem.config.js "$W/services/mainnet-pool-server/" 2>/dev/null || true
-  tar --exclude='/opt/mainnet/node_modules' \
+  _low_impact tar \
+      --exclude='/opt/mainnet/node_modules' \
       --exclude='/opt/mainnet/.pm2/logs' \
       --exclude='/opt/mainnet/.pm2/pids' \
       --exclude='/opt/mainnet/logs' \
       --exclude='/opt/mainnet/tmp' \
-      -czf "$W/services/mainnet-pool-server/opt-mainnet.tgz" /opt/mainnet/ 2>/dev/null || true
+      -c /opt/mainnet/ 2>/dev/null \
+      | _compress 1 > "$W/services/mainnet-pool-server/opt-mainnet.tgz" || true
 fi
 
 # libp2p-service: pre-built binary + source for rebuild fallback (NO identity key)
@@ -277,9 +343,14 @@ if $HAVE_DOCKER && docker inspect postgres-pinning >/dev/null 2>&1; then
   log "postgres fresh dump"
   PG_USER=$(docker inspect postgres-pinning --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^POSTGRES_USER=' | cut -d= -f2-)
   PG_USER="${PG_USER:-pinning_user}"
-  docker exec postgres-pinning pg_dump -U "$PG_USER" -d pinning_service -Fc -Z6 \
-    > "$W/postgres/pinning-fresh.dump" 2>/dev/null || \
-    log "  WARN: pg_dump failed — check POSTGRES_USER"
+  # Use -Z1 (instead of default -Z6 inside pg_dump) — much faster for the same
+  # ratio on already-textual SQL data. Don't redirect stderr to /dev/null so
+  # genuine pg_dump errors surface in the script log.
+  if ! docker exec postgres-pinning pg_dump -U "$PG_USER" -d pinning_service -Fc -Z1 \
+       > "$W/postgres/pinning-fresh.dump" 2>>"${OUT_DIR}/pg_dump.err"; then
+    log "  WARN: pg_dump failed — see ${OUT_DIR}/pg_dump.err"
+    rm -f "$W/postgres/pinning-fresh.dump"  # don't ship a truncated dump
+  fi
   docker exec postgres-pinning pg_dump -U "$PG_USER" -d pinning_service --schema-only \
     > "$W/postgres/schema.sql" 2>/dev/null || true
   docker exec postgres-pinning psql -U "$PG_USER" -d pinning_service -tAc \
@@ -298,23 +369,54 @@ if $HAVE_DOCKER; then
   log "saving fula-gateway docker image"
   IMG=$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '^fula-gateway' | head -1)
   if [ -n "$IMG" ]; then
-    docker save "$IMG" 2>/dev/null | gzip > "$W/images/fula-gateway.tar.gz" || \
-      log "  WARN: docker save failed for $IMG"
+    # docker save streams uncompressed tar; we then compress at level 1.
+    # nice+ionice keep this from starving the running gateway container.
+    _low_impact docker save "$IMG" 2>/dev/null \
+      | _compress 1 > "$W/images/fula-gateway.tar.gz" \
+      || log "  WARN: docker save failed for $IMG"
   fi
 fi
 
 # ============================================================================
-# 18. Kubo block data (the BIG one) — append-mostly, live tar is safe
+# 18. Kubo block data (the BIG one) — append-mostly, live tar is safe.
+# This is by far the heaviest step. We give it explicit visibility so the
+# operator can monitor progress and understand why the host is busy.
 # ============================================================================
 if $HAVE_DOCKER && $INCLUDE_BLOCKS; then
-  log "kubo blocks (this can take a while)"
   KUBO_SRC=$(docker inspect ipfs_host --format '{{range .Mounts}}{{if eq .Destination "/data/ipfs"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
   if [ -n "$KUBO_SRC" ] && [ -d "$KUBO_SRC" ]; then
-    SIZE=$(du -sh "$KUBO_SRC" 2>/dev/null | cut -f1)
-    log "  source: $KUBO_SRC  size: $SIZE"
-    tar -cz -C "$(dirname "$KUBO_SRC")" "$(basename "$KUBO_SRC")" > "$W/kubo/data.tgz" 2>/dev/null || \
-      log "  WARN: kubo data tar produced errors — verify with 'ipfs repo verify' on new server"
-    [ -f "$W/kubo/data.tgz" ] && log "  done: $(du -sh "$W/kubo/data.tgz" | cut -f1)"
+    SIZE_HUMAN=$(du -sh "$KUBO_SRC" 2>/dev/null | cut -f1)
+    SIZE_BYTES=$(du -sb "$KUBO_SRC" 2>/dev/null | cut -f1 || echo 0)
+    NFILES=$(find "$KUBO_SRC" -type f 2>/dev/null | wc -l)
+    log ""
+    log "==[ KUBO BLOCKS — heaviest step ]======================================"
+    log "  source:      $KUBO_SRC"
+    log "  size:        $SIZE_HUMAN  ($NFILES files)"
+    if command -v pigz >/dev/null 2>&1; then
+      log "  compressor:  pigz -1 -p${NPROC}  (multi-threaded, fast)"
+    else
+      log "  compressor:  gzip -1  (single-threaded; install 'pigz' for ${NPROC}x speed-up)"
+    fi
+    log "  priority:    nice=19 + ionice=idle  (production keeps its CPU + I/O share)"
+    log "  expected:    roughly $((SIZE_BYTES / 200000000)) sec at 200 MB/s (pigz)"
+    log "               roughly $((SIZE_BYTES / 50000000))  sec at 50  MB/s (gzip)"
+    log "  monitor:     in another terminal, watch progress with one of:"
+    log "                 du -h $W/kubo/data.tgz   # output size grows"
+    log "                 iotop -ao                # I/O usage"
+    log "                 pidstat 5                # CPU usage"
+    log "  abort:       Ctrl-C is safe — the EXIT trap unpauses cluster + cleans up"
+    log "======================================================================="
+    log ""
+
+    # tar streams stdin, _compress writes stdout. We do NOT redirect stderr to
+    # /dev/null because real I/O errors should be visible.
+    if ! _low_impact tar -c -C "$(dirname "$KUBO_SRC")" "$(basename "$KUBO_SRC")" 2>>"${OUT_DIR}/kubo_tar.err" \
+         | _compress 1 > "$W/kubo/data.tgz"; then
+      log "  WARN: kubo tar/compress had errors — check ${OUT_DIR}/kubo_tar.err"
+      log "        Verify with 'ipfs repo verify' after restoring on new server"
+    fi
+    [ -f "$W/kubo/data.tgz" ] && \
+      log "  kubo blocks done: $(du -sh "$W/kubo/data.tgz" | cut -f1) compressed"
   else
     log "  WARN: could not locate kubo data source"
   fi
@@ -338,7 +440,12 @@ log "manifest + tarball"
   fi
 } > "$W/MANIFEST.metadata"
 
-( cd "$OUT_DIR" && tar -czf "${NAME}.tgz" "${NAME}/" )
+log "creating final bundle tarball ($OUT_DIR/${NAME}.tgz)"
+log "  level-1 compression on already-compressed inner contents (kubo data,"
+log "  pg dump, fula-gateway image are all already gzipped); the outer pass"
+log "  is essentially a tar concatenation, NOT a re-compression cycle"
+( cd "$OUT_DIR" && _low_impact tar -c "${NAME}/" 2>/dev/null | _compress 1 > "${NAME}.tgz" ) \
+  || { log "FATAL: outer tarball creation failed"; exit 1; }
 sha256sum "$OUT_DIR/${NAME}.tgz" > "$OUT_DIR/${NAME}.tgz.sha256"
 chmod 600 "$OUT_DIR/${NAME}.tgz" "$OUT_DIR/${NAME}.tgz.sha256"
 

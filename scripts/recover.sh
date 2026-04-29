@@ -26,6 +26,14 @@
 #                                     # a database that already has data. Without this,
 #                                     # phase_pg_restore refuses to DROP+restore to avoid
 #                                     # wiping data accumulated since the bundle was made.
+#     [--no-lan-isolation]            # skip the outbound LAN-isolation rules in
+#                                     # phase_apply_ufw. Use ONLY if the server needs to
+#                                     # reach other home devices outbound (e.g., a NAS for
+#                                     # backups, a LAN-only IPFS peer). By default, the
+#                                     # script blocks server-initiated connections to other
+#                                     # home devices to prevent lateral pivot if the server
+#                                     # is compromised. This flag is auto-skipped when the
+#                                     # default gateway is a public IP (cloud VPS, etc.).
 
 set -euo pipefail
 
@@ -46,6 +54,7 @@ KUBO_DATA_HOST_PATH=""
 CLUSTER_DATA_HOST_PATH=""
 DEFER_DNS=false
 FORCE_WIPE=false
+NO_LAN_ISOLATION=false
 
 WORK_DIR="/var/lib/fula-recovery"
 BUNDLE_DIR="$WORK_DIR/bundle"
@@ -230,7 +239,8 @@ while [[ $# -gt 0 ]]; do
     --cluster-data-host-path) CLUSTER_DATA_HOST_PATH="$2"; shift 2 ;;
     --defer-dns)           DEFER_DNS=true; shift ;;
     --force-wipe)          FORCE_WIPE=true; shift ;;
-    -h|--help)             sed -n '2,28p' "$0"; exit 0 ;;
+    --no-lan-isolation)    NO_LAN_ISOLATION=true; shift ;;
+    -h|--help)             sed -n '2,32p' "$0"; exit 0 ;;
     *) fatal "Unknown flag: $1" ;;
   esac
 done
@@ -269,8 +279,23 @@ phase_preflight() {
   [ -n "$BUNDLE_TGZ" ]              || fatal "--bundle required"
   [ -f "$BUNDLE_TGZ" ]              || fatal "bundle not found: $BUNDLE_TGZ"
   [ -n "$BACKUP_ENCRYPTION_KEY" ]   || fatal "--backup-key required"
-  [[ "$BACKUP_ENCRYPTION_KEY" =~ ^[0-9a-f]{64}$ ]] || \
-    fatal "--backup-key must be exactly 64 lowercase hex chars"
+
+  # Tolerate whitespace + CRLF (paste-from-clipboard / file-with-newlines) and
+  # accept either case for hex chars. openssl is case-insensitive on hex
+  # passphrases, but the encrypted backup uses the value verbatim — so we
+  # canonicalize to lowercase here AND also use the same canonical form in
+  # phase_verify_ipns_path. A clear error message helps when the input is
+  # genuinely malformed.
+  BACKUP_ENCRYPTION_KEY=$(printf '%s' "$BACKUP_ENCRYPTION_KEY" | tr -d '[:space:]' | tr 'A-F' 'a-f')
+  if ! [[ "$BACKUP_ENCRYPTION_KEY" =~ ^[0-9a-f]{64}$ ]]; then
+    local got_len="${#BACKUP_ENCRYPTION_KEY}"
+    local prefix="${BACKUP_ENCRYPTION_KEY:0:4}"
+    fatal "--backup-key must be exactly 64 hex chars (got ${got_len} chars after trim, starting with '${prefix}****'). \
+Common causes: trailing CR/LF from copy-paste, embedded spaces, quotes, or non-hex characters. \
+Verify on the old server: cat /root/.fula-backup-key | grep BACKUP_ENCRYPTION_KEY"
+  fi
+  export BACKUP_ENCRYPTION_KEY
+
   [ -n "$DB_IPNS" ]                 || fatal "--db-ipns required"
   [ -n "$REGISTRY_IPNS" ]           || fatal "--registry-ipns required"
   [[ "$DB_IPNS"       =~ ^k51[a-z0-9]{56,}$ ]] || fatal "--db-ipns malformed"
@@ -1321,19 +1346,131 @@ EOF
 # ============================================================================
 phase_apply_ufw() {
   log_phase "23. apply_ufw"
-  ufw allow 22/tcp    || true
-  ufw allow 80/tcp    || true
-  ufw allow 443/tcp   || true
-  ufw allow 4001/tcp  || true
-  ufw allow 4001/udp  || true
-  ufw allow 9096/tcp  || true
-  ufw allow 9096/udp  || true
-  ufw deny  5432/tcp  || true
-  ufw deny  5001/tcp  || true
-  ufw deny  9094/tcp  || true
-  ufw deny  9095/tcp  || true
+
+  # ----------------------------------------------------------------------------
+  # Part A: inbound rules (what the world can reach on this server)
+  # ----------------------------------------------------------------------------
+  # Public services — accept from anywhere (internet + LAN). Replies use
+  # conntrack so they're never blocked by Part B's outbound rules.
+  ufw allow 22/tcp    comment 'recover.sh: SSH'                 || true
+  ufw allow 80/tcp    comment 'recover.sh: HTTP'                || true
+  ufw allow 443/tcp   comment 'recover.sh: HTTPS'               || true
+  ufw allow 4001/tcp  comment 'recover.sh: IPFS swarm'          || true
+  ufw allow 4001/udp  comment 'recover.sh: IPFS swarm QUIC'     || true
+  ufw allow 9096/tcp  comment 'recover.sh: cluster swarm'       || true
+  ufw allow 9096/udp  comment 'recover.sh: cluster swarm QUIC'  || true
+  # Internal-only ports — defense in depth on top of 127.0.0.1 binding.
+  # These cover INBOUND only; they don't conflict with Part B (outbound).
+  ufw deny  5432/tcp  comment 'recover.sh: postgres internal'   || true
+  ufw deny  5001/tcp  comment 'recover.sh: kubo API internal'   || true
+  ufw deny  9094/tcp  comment 'recover.sh: cluster API internal'|| true
+  ufw deny  9095/tcp  comment 'recover.sh: cluster proxy intl'  || true
+
+  # ----------------------------------------------------------------------------
+  # Part B: outbound LAN isolation (server cannot pivot to home devices)
+  # ----------------------------------------------------------------------------
+  # No collision with Part A: UFW maintains separate INPUT and OUTPUT chains;
+  # inbound allow rules above govern packets coming TO the server, the deny
+  # rule below governs packets going FROM the server. Replies on existing
+  # incoming connections are exempt via UFW's stateful conntrack handling
+  # (ESTABLISHED,RELATED).
+  if $NO_LAN_ISOLATION; then
+    log "  --no-lan-isolation: skipping outbound LAN-isolation rules"
+  else
+    _apply_lan_isolation
+  fi
+
   ufw --force enable
   mark_phase_done apply_ufw
+}
+
+# ----------------------------------------------------------------------------
+# Helper for phase_apply_ufw Part B — adds outbound LAN-isolation rules.
+# Auto-detects gateway, LAN CIDR, and any LAN-resident DNS servers. Skips
+# silently on cloud VPS / public-IP setups where there's no home LAN to isolate.
+# Idempotent: rules carry a 'recover.sh: lan-iso' comment marker; re-running
+# the phase doesn't duplicate them (UFW dedupes identical rules).
+# ----------------------------------------------------------------------------
+_apply_lan_isolation() {
+  log "  detecting LAN configuration for outbound isolation..."
+
+  local gateway iface server_cidr lan_network
+  gateway=$(ip -4 route get 8.8.8.8 2>/dev/null | awk 'NR==1 {print $3}')
+  iface=$(ip -4 route get 8.8.8.8 2>/dev/null | awk 'NR==1 {print $5}')
+  server_cidr=$(ip -4 addr show "$iface" 2>/dev/null | awk '/inet /{print $2}' | head -1)
+
+  if [ -z "$gateway" ] || [ -z "$iface" ] || [ -z "$server_cidr" ]; then
+    check_warn "LAN config detection failed (gateway=$gateway iface=$iface cidr=$server_cidr); skipping LAN isolation"
+    return
+  fi
+
+  # Skip on public-IP setups (cloud VPS): no home LAN to isolate, and a
+  # `deny out to <public-network>` rule could break legitimate traffic.
+  # is_private_ipv4 returns 0 if the IP is in RFC1918 / link-local / etc.
+  if ! python3 -c "
+import ipaddress, sys
+sys.exit(0 if ipaddress.ip_address('$gateway').is_private else 1)
+" 2>/dev/null; then
+    log "  gateway $gateway is public (cloud server / direct-public IP) — LAN isolation does not apply, skipping"
+    return
+  fi
+
+  # Compute the network address from the server's CIDR.
+  lan_network=$(python3 -c "
+import ipaddress, sys
+try:
+    sys.stdout.write(str(ipaddress.ip_network('$server_cidr', strict=False)))
+except Exception:
+    pass
+" 2>/dev/null)
+  if [ -z "$lan_network" ]; then
+    check_warn "could not compute LAN network from $server_cidr; skipping LAN isolation"
+    return
+  fi
+
+  # Detect LAN-side DNS servers (Pi-hole, router DNS, etc.) — these need
+  # explicit allow-out so the deny rule doesn't break name resolution. Public
+  # DNS (1.1.1.1, 8.8.8.8, etc.) is fine — they don't need an explicit allow.
+  local lan_dns_servers=()
+  if [ -f /etc/resolv.conf ]; then
+    local ns
+    while read -r ns; do
+      [ -z "$ns" ] && continue
+      if python3 -c "
+import ipaddress, sys
+try:
+    sys.exit(0 if ipaddress.ip_address('$ns').is_private else 1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+        lan_dns_servers+=("$ns")
+      fi
+    done < <(awk '/^nameserver /{print $2}' /etc/resolv.conf)
+  fi
+
+  log "  LAN detected:    $lan_network"
+  log "  Gateway:         $gateway"
+  if [ "${#lan_dns_servers[@]}" -gt 0 ]; then
+    log "  LAN DNS servers: ${lan_dns_servers[*]} (will be allowed)"
+  else
+    log "  LAN DNS servers: none (using public DNS — fine)"
+  fi
+
+  # Order matters: more-specific allow rules must precede the broader deny.
+  # UFW's iptables chain processes rules top-to-bottom; first match wins.
+  # We add allows first, then the deny — UFW preserves insertion order.
+  log "  applying outbound LAN-isolation rules..."
+  ufw allow out to "$gateway"     comment 'recover.sh: lan-iso gateway' || true
+  for ns in "${lan_dns_servers[@]}"; do
+    ufw allow out to "$ns"        comment 'recover.sh: lan-iso DNS'     || true
+  done
+  ufw deny  out to "$lan_network" comment 'recover.sh: lan-iso block'   || true
+
+  log "  LAN isolation applied:"
+  log "    [OK]    server can reach internet via $gateway"
+  log "    [OK]    server can reach LAN DNS (if any)"
+  log "    [BLOCK] server cannot initiate to other home devices on $lan_network"
+  log "    [OK]    inbound replies on existing connections still work (conntrack)"
 }
 
 # ============================================================================
@@ -2004,6 +2141,28 @@ _verify_negative_exposure() {
       check_warn "ufw does not explicitly deny tcp/$port — relies on 127.0.0.1 binding only"
     fi
   done
+
+  # LAN-isolation verification — only relevant on private/home LANs. Cloud
+  # servers / public-IP setups skip this check entirely.
+  local gateway
+  gateway=$(ip -4 route get 8.8.8.8 2>/dev/null | awk 'NR==1 {print $3}')
+  if [ -n "$gateway" ] && python3 -c "
+import ipaddress, sys
+sys.exit(0 if ipaddress.ip_address('$gateway').is_private else 1)
+" 2>/dev/null; then
+    if $NO_LAN_ISOLATION; then
+      check_warn "LAN isolation explicitly disabled (--no-lan-isolation) — server can pivot to other home devices on the same subnet"
+    else
+      # The deny rule's comment is stored in /etc/ufw/user.rules (UFW
+      # `status` doesn't print comments, but the underlying rule file does).
+      if grep -q 'recover.sh: lan-iso block' /etc/ufw/user.rules 2>/dev/null; then
+        check_pass "outbound LAN-isolation rule active (server cannot pivot to home devices on $gateway's subnet)"
+      else
+        check_warn "outbound LAN-isolation rule NOT active — re-run phase_apply_ufw or pass --no-lan-isolation explicitly if intentional"
+      fi
+    fi
+  fi
+  # else: gateway is public (cloud VPS) — LAN isolation not applicable
 }
 
 # ============================================================================

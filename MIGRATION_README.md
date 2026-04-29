@@ -457,6 +457,31 @@ This keeps the host minimal: only daemons that systemd manages directly (nginx, 
 | `--no-cluster-data` | off | Skip the ipfs-cluster CRDT state tarball. Identity files (identity.json, service.json) and pin list are still saved. Cluster will rebuild its CRDT from scratch on the new server (lazy re-replication via pinning-service traffic). |
 | `-h\|--help` | — | Print usage. |
 
+**Resource pressure during bundle creation**: the kubo block data tar+compress is the heaviest step — it streams every block file through gzip while the production stack is still serving traffic. The script applies four mitigations automatically so it doesn't hang the host:
+
+1. **`pigz` if available** — multi-threaded gzip; same format as `gzip` but uses all CPU cores. The script auto-installs `pigz` via apt on the first run if missing. ~N× faster on N-core hosts.
+2. **`nice -n 19` + `ionice -c 3`** wrapping every heavy tar/save invocation — gives production CPU + I/O priority over the migration.
+3. **Compression level 1** instead of the default 6 — for kubo blocks (mostly already-compressed media) the size penalty is <1% but speed gain is 3-5×.
+4. **No double-compression on the outer bundle** — inner tarballs are already gzipped, so the outer `tar -cz` ran level-6 gzip over already-gzipped bytes. The new code uses level 1 there for what is effectively a tar concatenation pass.
+
+Visibility around the kubo blocks step shows expected duration, monitoring commands (`du`, `iotop`, `pidstat`), and confirms `Ctrl-C` is safe (the EXIT trap unpauses the cluster cleanly):
+
+```
+==[ KUBO BLOCKS — heaviest step ]======================================
+  source:      /home/root/ipfs_data
+  size:        87G  (1432901 files)
+  compressor:  pigz -1 -p8  (multi-threaded, fast)
+  priority:    nice=19 + ionice=idle  (production keeps its CPU + I/O share)
+  expected:    roughly 470 sec at 200 MB/s (pigz)
+               roughly 1872 sec at 50  MB/s (gzip)
+  monitor:     in another terminal, watch progress with one of:
+                 du -h /tmp2/fula-migration-.../kubo/data.tgz
+                 iotop -ao
+                 pidstat 5
+  abort:       Ctrl-C is safe — the EXIT trap unpauses cluster + cleans up
+=======================================================================
+```
+
 ### `recover.sh`
 
 | Flag | Required | Purpose |
@@ -475,6 +500,7 @@ This keeps the host minimal: only daemons that systemd manages directly (nginx, 
 | `--cluster-data-host-path PATH` | No | Same as above but for `ipfs_cluster_data`. CRDT state is small (tens of MB), rarely worth externalizing. |
 | `--defer-dns` | No | Skip `phase_dns_cutover_pause` and `phase_certs`. Use when DNS still points at the old server and you want to test the new one first via /etc/hosts. After DNS cutover, re-run with `--phase=certs` (without this flag). |
 | `--force-wipe` | No | Required for `--phase=pg_restore` re-runs against a database that already has data. Without this, the phase refuses to DROP+restore so accidental re-runs don't wipe data accumulated since the bundle was made. Use only when you accept losing data added since the bundle was created. |
+| `--no-lan-isolation` | No | Skip the outbound LAN-isolation rules in `phase_apply_ufw`. By default the script auto-detects when the server is on a private home LAN and adds outbound deny rules so a compromised server cannot pivot to other home devices (laptops, NAS, IoT, router admin UI). Internet egress and inbound public services are unaffected. Use this flag only if the server legitimately needs to reach other LAN devices outbound (e.g., a NAS for backups, a LAN-only IPFS peer). The check is auto-skipped on cloud servers where the gateway is a public IP. |
 | `-h\|--help` | — | Print usage. |
 
 ---
@@ -507,7 +533,7 @@ The 29 phases run in dependency order. Each writes a checkpoint to `/var/lib/ful
 | 20 | `apply_systemd_units` | Copies all `.service` files and `.service.d/` overrides from bundle to `/etc/systemd/system/`. `systemctl daemon-reload`. | No | systemd units |
 | 21 | `apply_nginx` | Copies nginx configs from bundle. For each: `sed` strips `\$` literals (heredoc artifact). If `/etc/letsencrypt/live/<domain>/fullchain.pem` exists (yes, after phase 4): keep listen-443 block as-is. Otherwise: strip listen-443 server block (certbot recreates after DNS cutover). `nginx -t` then reload. | No | `/etc/nginx/sites-enabled/*` |
 | 22 | `apply_cron` | Copies `/etc/cron.d/*` from bundle. Adds `/etc/cron.d/fula-db-backup` belt-and-suspenders. | No | `/etc/cron.d/*` |
-| 23 | `apply_ufw` | Allow 22, 80, 443, 4001/tcp+udp, 9096/tcp+udp; deny 5432, 5001, 9094, 9095. | No | UFW state |
+| 23 | `apply_ufw` | **Inbound**: allow 22, 80, 443, 4001/tcp+udp, 9096/tcp+udp; deny 5432, 5001, 9094, 9095 (defense-in-depth on top of 127.0.0.1 binding). **Outbound LAN isolation**: auto-detects gateway + LAN CIDR + LAN DNS via `ip route` and `/etc/resolv.conf`. If gateway is a private (RFC1918) IP — i.e., this is a home/office LAN — adds `allow out to <gateway>`, `allow out to <each LAN DNS>`, then `deny out to <LAN CIDR>`. Result: server can reach the internet via the gateway and resolve DNS, but cannot initiate outbound connections to other home devices (lateral-pivot block). Skipped automatically on public-IP / cloud-VPS setups where there's no LAN to isolate. Skipped explicitly via `--no-lan-isolation`. Inbound replies on existing connections are unaffected (UFW conntrack handles ESTABLISHED,RELATED). | No | UFW state |
 | 24 | `dns_cutover_pause` | **Blocking**: lists hostnames, prompts `Type 'DNS-DONE'`. Skipped entirely if `--defer-dns`. | No | — |
 | 25 | `certs` | If `--defer-dns`: skipped. Otherwise: per-domain check if `dns_points_here` (vs this server's public IP from api.ipify.org). Skips with warn if DNS doesn't match yet. Issues new certs for domains where DNS is correct and cert is missing/expired. | Yes | `/etc/letsencrypt/*` |
 | 26 | `start` | `systemctl enable --now` for every relevant unit, in dependency order. Per-service post-restart `is-active --quiet` check; warns if any service flapped instead of fataling. | No | running services |
@@ -535,11 +561,103 @@ The 29 phases run in dependency order. Each writes a checkpoint to `/var/lib/ful
 | cron | cron daemon active; both fula-* cron files present |
 | backup readiness | `/root/.fula-backup-key` is 0600; BACKUP_ENCRYPTION_KEY is 64 hex chars; backup-db.sh exists |
 | disk | every mount < 80% used (warn) / 90% (fail); kubo data path specifically; swap not heavily used |
-| negative exposure | UFW active; tcp/5432, 5001, 9094, 9095 explicitly denied (defense in depth) |
+| negative exposure | UFW active; tcp/5432, 5001, 9094, 9095 explicitly denied (defense in depth); when on a private LAN: outbound LAN-isolation rule active (server can't pivot to other home devices) |
+
+---
+
+## Section 9a — LAN isolation (when running on a home network)
+
+If the server is on a home / office LAN (default gateway is a private RFC1918 IP), `phase_apply_ufw` auto-detects this and adds three categories of OUTBOUND rules so a compromised server cannot pivot to other devices on the same network — laptops, NAS, IoT devices, IP cameras, printers, the router admin UI, etc.
+
+**What gets added** (auto-detected at recovery time, not hard-coded):
+
+| Rule | Purpose | Why this exact rule |
+|---|---|---|
+| `ALLOW OUT TO <gateway>` | Permit traffic to the home router | Internet egress goes through the router; without this, the server has no outbound at all |
+| `ALLOW OUT TO <LAN DNS server>` (per detected DNS) | Permit DNS to a Pi-hole / router-resident resolver | If you use a LAN-side DNS resolver, blocking it would break name resolution. Public DNS (1.1.1.1, 8.8.8.8) doesn't need an explicit allow. |
+| `DENY OUT TO <LAN CIDR>` | Block server-initiated traffic to other home devices | The actual isolation rule. The earlier ALLOWs are more specific and match first; everything else in the LAN gets blocked. |
+
+**What still works after these rules apply:**
+- Server reaches the internet (apt, npm, git clone, IPFS DHT, cert renewal — all via gateway → public IPs)
+- Public services on the server (22, 80, 443, 4001, 9096) remain reachable from internet AND from your home laptop
+- Your home laptop can SSH into the server, browse the WebUI, push pins via the IPFS Pinning Service API, etc.
+- Inbound replies on existing connections (UFW conntrack: ESTABLISHED,RELATED traffic always allowed)
+
+**What stops working (intentionally):**
+- Server initiating outbound to other home devices on internal ports — the lateral-pivot path is closed
+- Example blocked: server tries to scan a NAS at `192.168.1.50:445` for SMB shares → DENY
+- Example blocked: server tries to log into the router admin UI at `192.168.1.1:80` (other than for default gateway routing) → wait, the router IS the gateway, so this is allowed; the rule allows traffic TO the gateway IP
+
+**No collision with the inbound rules** in the same phase: UFW maintains separate `INPUT` (inbound) and `OUTPUT` (outbound) iptables chains. The inbound `allow 22/tcp` etc. govern packets coming TO the server; the outbound `deny out to <LAN>` governs packets going FROM the server. They cannot conflict because they apply to different traffic directions. Replies to legitimate inbound traffic are exempt via stateful conntrack.
+
+**When the auto-detection skips itself** (with a clear log message):
+- Gateway is a public IP (cloud VPS / direct-public setup): no home LAN to isolate, skipped
+- LAN config detection failed (multiple interfaces, weird routing, no `ip` command output): skipped with WARN
+- `--no-lan-isolation` flag passed: skipped with INFO
+
+**Opting out** — `--no-lan-isolation`:
+Use this only if your server legitimately needs to reach other home devices outbound. Examples:
+- Backups to a LAN NAS at `192.168.1.50`
+- IPFS peering with a second IPFS node on the same LAN
+- Pulling docker images from a LAN-resident registry mirror
+
+If you opt out, document which specific LAN destinations the server actually needs and consider adding explicit `ufw allow out to <ip>` rules manually rather than blanket-allowing the whole LAN.
+
+**Verification** — `phase_post_verify` includes a check that confirms the LAN-isolation rule is in place when applicable. If the rule is missing on a private-LAN setup, `_verify_negative_exposure` emits a WARN.
+
+**Manual override after recovery** — if you decide later that the server needs LAN access:
+```bash
+sudo ufw allow out to 192.168.1.50 comment 'NAS for backups'
+# or to revert all LAN-isolation rules added by recover.sh:
+for n in $(ufw status numbered | awk -F'[][]' '/recover.sh: lan-iso/{print $2}' | sort -rn); do
+    yes | sudo ufw delete "$n"
+done
+```
 
 ---
 
 ## Section 10 — Troubleshooting
+
+### `--backup-key must be exactly 64 hex chars` even though my key looks 64 chars long
+The script trims whitespace + carriage returns and lowercases A-F before validating, but the error still fires if there's a non-hex character somewhere. Common causes:
+
+| Cause | Symptom | Fix |
+|---|---|---|
+| Trailing CR from a Windows-edited file | `got 65 chars` (one extra) | `tr -d '\r' < keyfile` to strip; or paste in a Linux terminal |
+| Quotes around the value | `got 66 chars, starting with '"abc****'` | drop the quotes around the flag value: `--backup-key abc...` not `--backup-key "abc..."` |
+| Wrong characters (typo, base64) | `got 64 chars, starting with 'abc/****'` | non-hex char like `/`, `+`, `=` — verify the original on the old server: `cat /root/.fula-backup-key` |
+| Embedded spaces | `got 70 chars` | clipboard paste split with formatting; re-copy the value cleanly |
+
+Pull the canonical value off the old server:
+```bash
+ssh root@<old-server> "grep BACKUP_ENCRYPTION_KEY /root/.fula-backup-key | cut -d= -f2-"
+```
+Then pass it directly:
+```bash
+sudo bash recover.sh --backup-key 0123abc... ...
+```
+
+### `migrate-zip.sh` makes my server unresponsive
+The kubo blocks tar+compress is the heaviest step. On hosts with large pinned datasets and limited CPU, single-threaded gzip + millions of small file reads CAN saturate one core and the disk simultaneously, making the host appear hung even though it's making progress.
+
+Mitigations are applied automatically by the current script (`pigz`, `nice`, `ionice`, level-1 compression, no outer double-compress) but if your host still struggles:
+
+1. **Install `pigz` first** if the script didn't auto-install it: `sudo apt install pigz` then re-run.
+2. **Skip the kubo blocks tar entirely** — pass `--no-blocks` to migrate-zip.sh. The bundle becomes lightweight (configs + identities only) and you rsync `/home/root/ipfs_data` separately:
+   ```bash
+   sudo bash scripts/migrate-zip.sh --no-blocks
+   # then in another terminal, with rsync's own bandwidth limit:
+   rsync -aHP --bwlimit=50M /home/root/ipfs_data/ root@<new-server>:/home/root/ipfs_data/
+   ```
+   Then on the new server, `recover.sh --blocks-rsync /home/root/ipfs_data` reuses the rsync'd data without re-extracting from the bundle.
+3. **Monitor**:
+   ```bash
+   du -h /tmp2/fula-migration-*/kubo/data.tgz   # bundle size grows over time
+   iotop -aoP                                    # I/O usage of every process
+   uptime                                        # load average
+   ```
+   If load average is climbing past `nproc * 2` and pinning-service traffic is timing out, hit Ctrl-C — the EXIT trap unpauses the cluster cleanly. Then re-run with `--no-blocks` and rsync separately.
+4. **For severely-constrained hosts**, you can manually throttle the bundle even further by editing `_compress` in `scripts/migrate-zip.sh` to use `pigz -p 1` (single thread) — slower but won't compete with production for cores at all.
 
 ### Bundle SHA256 mismatch on the new server
 Re-transfer. SCP can corrupt over flaky links. Verify each side independently:

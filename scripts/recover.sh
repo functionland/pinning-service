@@ -185,6 +185,29 @@ retry() {
 }
 
 # ============================================================================
+# _safe_tar — wrap a tar invocation so rc=1 (warnings) doesn't kill the script.
+# tar exit codes:
+#   0 = success
+#   1 = warnings (e.g., timestamp implausible, attribute could not be set,
+#       file changed during read, file already existed with different attrs)
+#   2 = fatal (out of disk, permission denied, corrupt archive)
+# Migration almost always wants to tolerate rc=1; it means "extraction
+# completed but some non-data attribute was off." Without this wrapper,
+# `set -euo pipefail` aborts the script on rc=1.
+# ============================================================================
+_safe_tar() {
+  local desc="$1"; shift
+  local rc=0
+  tar "$@" || rc=$?
+  if [ "$rc" -ge 2 ]; then
+    fatal "$desc tar failed (rc=$rc) — out of disk, permission denied, or corrupt archive"
+  elif [ "$rc" -ne 0 ]; then
+    log "  $desc: tar warnings (rc=$rc); extraction completed, continuing"
+  fi
+  return 0
+}
+
+# ============================================================================
 # Network endpoint check helpers
 # ============================================================================
 # HTTP GET that returns the status code (0 if connection failed)
@@ -333,7 +356,7 @@ Verify on the old server: cat /root/.fula-backup-key | grep BACKUP_ENCRYPTION_KE
     log "extracting bundle to $BUNDLE_DIR"
     rm -rf "$BUNDLE_DIR"
     mkdir -p "$BUNDLE_DIR"
-    tar -xzf "$BUNDLE_TGZ" -C "$BUNDLE_DIR" --strip-components=1
+    _safe_tar "outer bundle extract" -xzf "$BUNDLE_TGZ" -C "$BUNDLE_DIR" --strip-components=1
   else
     log "bundle already extracted at $BUNDLE_DIR (re-running)"
   fi
@@ -517,7 +540,7 @@ phase_apply_system_state() {
   # Let's Encrypt
   if [ -f "$BUNDLE_DIR/letsencrypt.tgz" ]; then
     log "restoring /etc/letsencrypt"
-    tar -xzf "$BUNDLE_DIR/letsencrypt.tgz" -C /
+    _safe_tar "letsencrypt extract" -xzf "$BUNDLE_DIR/letsencrypt.tgz" -C /
     # Defense in depth: tar preserves source mode, but if anything in the
     # transport chain dropped permissions, force private keys to 0600.
     if [ -d /etc/letsencrypt/archive ]; then
@@ -692,11 +715,11 @@ phase_docker_volumes() {
       log "  extracting $tarball → $kubo_vol/${name}/ ($(du -sh "$tarball" | cut -f1))"
       # No --strip-components: tarball contains "<basename>/..." entries;
       # extract preserves that prefix at the destination.
-      tar -xzf "$tarball" -C "$kubo_vol"
+      _safe_tar "kubo data-$name extract" -xzf "$tarball" -C "$kubo_vol"
     done
   elif [ -f "$BUNDLE_DIR/kubo/data.tgz" ]; then
     log "extracting legacy single kubo tarball into $kubo_vol"
-    tar -xzf "$BUNDLE_DIR/kubo/data.tgz" -C "$kubo_vol" --strip-components=1
+    _safe_tar "kubo data legacy extract" -xzf "$BUNDLE_DIR/kubo/data.tgz" -C "$kubo_vol" --strip-components=1
   else
     log "no kubo data tarballs in bundle — assuming blocks/datastore were rsynced separately to $kubo_vol/{blocks,datastore}"
   fi
@@ -775,7 +798,7 @@ PY
   # Cluster data — same single-leading-dir layout
   if [ -f "$BUNDLE_DIR/cluster/data.tgz" ]; then
     log "extracting cluster CRDT state into $cluster_vol"
-    tar -xzf "$BUNDLE_DIR/cluster/data.tgz" -C "$cluster_vol" --strip-components=1
+    _safe_tar "cluster CRDT extract" -xzf "$BUNDLE_DIR/cluster/data.tgz" -C "$cluster_vol" --strip-components=1
   else
     log "cluster data.tgz missing — placing identity + service.json only"
     [ -f "$BUNDLE_DIR/cluster/identity.json" ] && cp "$BUNDLE_DIR/cluster/identity.json" "$cluster_vol/"
@@ -1084,8 +1107,7 @@ phase_resolve_registry_cid() {
 
   # Restore any saved gateway state first (registry.cid, db-backup.cid, history)
   if [ -f "$BUNDLE_DIR/fula-gateway/state.tgz" ]; then
-    tar -xzf "$BUNDLE_DIR/fula-gateway/state.tgz" -C / 2>/dev/null || \
-      warn "fula-gateway/state.tgz extracted with errors — check tarball"
+    _safe_tar "fula-gateway state extract" -xzf "$BUNDLE_DIR/fula-gateway/state.tgz" -C /
   fi
 
   # Override registry.cid with a fresh resolve (in case the bundled one is stale).
@@ -1250,7 +1272,7 @@ phase_build_mainnet_rewards() {
   if [ -f "$snap" ]; then
     log "  extracting /opt/mainnet-rewards snapshot from bundle"
     install -d -m 0755 /opt/mainnet-rewards
-    tar -xzf "$snap" -C /
+    _safe_tar "/opt/mainnet-rewards extract" -xzf "$snap" -C /
     chmod 600 /opt/mainnet-rewards/.env 2>/dev/null || true
     # Build directly from the deployed location — no separate clone+build dir
     if [ -f /opt/mainnet-rewards/package.json ]; then
@@ -1288,7 +1310,7 @@ phase_build_mainnet_pool() {
 
   if [ -f "$snap" ]; then
     log "  extracting /opt/mainnet snapshot"
-    tar -xzf "$snap" -C /
+    _safe_tar "/opt/mainnet extract" -xzf "$snap" -C /
     chmod 600 /opt/mainnet/.env 2>/dev/null || true
   elif [ -n "$MAINNET_POOL_REPO" ]; then
     log "  cloning $MAINNET_POOL_REPO"

@@ -615,9 +615,78 @@ phase_docker_volumes() {
     log "extracting kubo data into $kubo_vol"
     tar -xzf "$BUNDLE_DIR/kubo/data.tgz" -C "$kubo_vol" --strip-components=1
   else
-    log "no full kubo data — placing raw config + keystore only (peer ID preserved)"
-    [ -f "$BUNDLE_DIR/kubo/raw-config.json" ] && cp "$BUNDLE_DIR/kubo/raw-config.json" "$kubo_vol/config"
-    [ -d "$BUNDLE_DIR/kubo/keystore" ] && cp -r "$BUNDLE_DIR/kubo/keystore" "$kubo_vol/"
+    log "no kubo data.tgz in bundle — assuming blocks/datastore were rsynced separately to $kubo_vol"
+  fi
+
+  # Always restore kubo identity files from bundle (small, idempotent). These
+  # may already be inside data.tgz from the bundle-with-blocks path; copying
+  # again is harmless. If user ran migrate-zip.sh --no-blocks AND rsynced data
+  # separately, this is the path that gets the identity into place.
+  [ -f "$BUNDLE_DIR/kubo/raw-config.json" ] && cp "$BUNDLE_DIR/kubo/raw-config.json" "$kubo_vol/config"
+  if [ -d "$BUNDLE_DIR/kubo/keystore" ]; then
+    mkdir -p "$kubo_vol/keystore"
+    cp -rT "$BUNDLE_DIR/kubo/keystore" "$kubo_vol/keystore"
+  fi
+
+  # Translate datastore_spec: kubo writes absolute paths in the spec when the
+  # daemon was running with custom paths (e.g., Fula Box's
+  # /uniondrive/ipfs_datastore/blocks). On the new server we want kubo's
+  # IPFS_PATH to be /data/ipfs (the default in the stock image) and have the
+  # data live in the volume's mountpoint — which the user can point at any
+  # external drive via --kubo-data-host-path. Translating absolute paths to
+  # relative ("blocks", "datastore", etc.) makes that work.
+  if [ -f "$BUNDLE_DIR/kubo/datastore_spec" ]; then
+    local spec_in spec_out had_absolute
+    spec_in=$(cat "$BUNDLE_DIR/kubo/datastore_spec")
+    spec_out=$(python3 - "$spec_in" <<'PY'
+import json, sys
+spec = json.loads(sys.argv[1])
+had_abs = [False]
+def walk(node):
+    if isinstance(node, dict):
+        if "path" in node and isinstance(node["path"], str) and node["path"].startswith("/"):
+            had_abs[0] = True
+            # Take last path component as the relative form
+            node["path"] = node["path"].rstrip("/").split("/")[-1]
+        for v in node.values():
+            walk(v)
+    elif isinstance(node, list):
+        for v in node:
+            walk(v)
+walk(spec)
+sys.stderr.write("had_absolute=" + ("yes" if had_abs[0] else "no") + "\n")
+sys.stdout.write(json.dumps(spec, separators=(",", ":")))
+PY
+)
+    had_absolute=$(python3 - "$spec_in" <<'PY'
+import json, sys
+spec = json.loads(sys.argv[1])
+def has_abs(node):
+    if isinstance(node, dict):
+        if "path" in node and isinstance(node["path"], str) and node["path"].startswith("/"):
+            return True
+        return any(has_abs(v) for v in node.values())
+    if isinstance(node, list):
+        return any(has_abs(v) for v in node)
+    return False
+print("yes" if has_abs(spec) else "no")
+PY
+)
+    echo "$spec_out" > "$kubo_vol/datastore_spec"
+    if [ "$had_absolute" = "yes" ]; then
+      log "  translated datastore_spec absolute paths → relative (so kubo finds data inside IPFS_PATH=/data/ipfs)"
+      log "  for this to work, the rsynced kubo data must be at: $kubo_vol/blocks/ and $kubo_vol/datastore/"
+      # Sanity check: do those dirs exist?
+      for d in blocks datastore; do
+        if [ -d "$kubo_vol/$d" ]; then
+          log "    [OK] $kubo_vol/$d present ($(du -sh "$kubo_vol/$d" 2>/dev/null | cut -f1))"
+        else
+          check_warn "$kubo_vol/$d missing — kubo will start with empty $d (use BLOCKS_RSYNC or place data here)"
+        fi
+      done
+    else
+      log "  datastore_spec uses relative paths (default kubo layout); installed verbatim"
+    fi
   fi
 
   # Cluster data — same single-leading-dir layout

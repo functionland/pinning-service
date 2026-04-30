@@ -684,19 +684,79 @@ if ! $INCLUDE_BLOCKS; then
   fi
   if [ -n "$KUBO_HOST_PATH" ] && [ -d "$KUBO_HOST_PATH" ]; then
     KUBO_HOST_SIZE=$(du -sh "$KUBO_HOST_PATH" 2>/dev/null | cut -f1)
-    echo "Kubo blocks NOT included in bundle. Sync separately:"
-    echo "  Source on host:        $KUBO_HOST_PATH ($KUBO_HOST_SIZE)"
-    echo "  Container path:        ${KUBO_PATH_IN_CONTAINER:-/data/ipfs}"
-    echo "  rsync command:"
-    echo "    rsync -aHP --info=progress2 --bwlimit=50M \\"
-    echo "      $KUBO_HOST_PATH/ \\"
-    echo "      root@<new-server>:/path/on/new/server/ipfs_data/"
+    echo "==[ KUBO DATA — sync separately ]======================================"
+    echo "Kubo blocks NOT included in bundle (you used --no-blocks)."
     echo
-    echo "  IMPORTANT — kubo's Datastore.Spec may reference paths OUTSIDE this dir"
-    echo "  (e.g., a custom blocks location on a separate drive). Verify with:"
-    echo "    docker exec ipfs_host cat ${KUBO_PATH_IN_CONTAINER:-/data/ipfs}/datastore_spec"
-    echo "    docker exec ipfs_host du -sh ${KUBO_PATH_IN_CONTAINER:-/data/ipfs}/blocks 2>/dev/null"
-    echo "  If blocks are at a non-default path (e.g. /uniondrive/...), rsync that path too."
+    echo "Container path:        ${KUBO_PATH_IN_CONTAINER:-/data/ipfs}"
+    echo "Default-path source:   $KUBO_HOST_PATH ($KUBO_HOST_SIZE)"
+    echo
+
+    # If the user has a custom datastore_spec (Fula Box pattern), the actual
+    # blocks live at a path OUTSIDE the IPFS_PATH dir. Read the spec and
+    # display every path referenced.
+    SPEC_FILE=""
+    if [ -f "$W/kubo/datastore_spec" ]; then
+      SPEC_FILE="$W/kubo/datastore_spec"
+    fi
+    if [ -n "$SPEC_FILE" ]; then
+      echo "datastore_spec mounts (from your kubo config):"
+      python3 - "$SPEC_FILE" <<'PY' 2>/dev/null
+import json, sys, os
+with open(sys.argv[1]) as f:
+    spec = json.load(f)
+seen = set()
+def walk(n, mountpoint=""):
+    if isinstance(n, dict):
+        mp = n.get("mountpoint", mountpoint)
+        if "path" in n and isinstance(n["path"], str):
+            print(f"  {n.get('type','?'):>10} at {mp:>10}  →  {n['path']}")
+            if n["path"].startswith("/"):
+                # Absolute path — host-side this exact path is what to rsync
+                seen.add(n["path"])
+        for v in n.values():
+            walk(v, mp)
+    elif isinstance(n, list):
+        for v in n:
+            walk(v, mountpoint)
+walk(spec)
+print()
+if seen:
+    print("RSYNC THESE ABSOLUTE PATHS (each present on this host):")
+    for p in sorted(seen):
+        try:
+            size = os.popen(f"du -sh {p} 2>/dev/null").read().split('\t')[0].strip()
+        except Exception:
+            size = "?"
+        print(f"  {p}  ({size})")
+PY
+      echo
+      echo "Recommended workflow on new server:"
+      echo "  1. Mount your external drive at /mnt/ipfs-data (or any path)."
+      echo "  2. rsync EACH absolute-path directory above into a subdirectory of"
+      echo "     /mnt/ipfs-data named after its last path component:"
+      echo "       rsync -aHP --info=progress2 --bwlimit=50M \\"
+      echo "         <absolute-path-on-host>/ \\"
+      echo "         root@<new-server>:/mnt/ipfs-data/<last-path-component>/"
+      echo "     For example, if datastore_spec has /uniondrive/ipfs_datastore/blocks:"
+      echo "         /uniondrive/ipfs_datastore/blocks/ → /mnt/ipfs-data/blocks/"
+      echo "  3. Run recover.sh with --kubo-data-host-path /mnt/ipfs-data — recover.sh"
+      echo "     will translate the datastore_spec absolute paths to relative ones"
+      echo "     so kubo reads from /mnt/ipfs-data/<subdir> on the new host."
+      echo
+    fi
+
+    # Cluster data — also rsync-able to an external drive on the new server
+    if [ -d /uniondrive/ipfs-cluster ] || [ -d /var/lib/docker/volumes/*/ipfs-cluster ]; then
+      echo "==[ CLUSTER DATA — also rsync-able if you want it on external drive ]"
+      echo "  rsync -aHP --info=progress2 \\"
+      echo "    \$CLUSTER_HOST_PATH/ \\"
+      echo "    root@<new-server>:/mnt/cluster-data/"
+      echo "  Then run recover.sh with --cluster-data-host-path /mnt/cluster-data"
+      echo "  (Cluster data is already in this bundle as cluster/data.tgz, but if"
+      echo "  yours is huge, rsync may be faster than transferring the full bundle.)"
+      echo
+    fi
+    echo "======================================================================="
     echo
   fi
 fi

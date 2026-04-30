@@ -185,21 +185,66 @@ The script runs through 29 phases and pauses at phase 24 with a `Type 'DNS-DONE'
 4. Type `DNS-DONE` at the prompt.
 5. Recovery continues with cert issuance and final health checks.
 
-### Recipe B — external storage for pins
+### Recipe B — external storage for pins (kubo and/or cluster on a separate drive)
 
-You want: kubo block data on `/mnt/ipfs-data` (mounted in step 2.1).
+You want: kubo block data and/or cluster CRDT data on a different drive than the OS root. Both can be on the same external drive or different drives — your choice.
 
 ```bash
+# 1. Mount external drive(s) on the new server (one-time setup)
+sudo mkdir -p /mnt/ipfs-data /mnt/cluster-data
+echo "LABEL=ipfs-data    /mnt/ipfs-data    ext4 defaults,noatime,nodiratime,nofail 0 2" | sudo tee -a /etc/fstab
+echo "LABEL=cluster-data /mnt/cluster-data ext4 defaults,noatime,nofail            0 2" | sudo tee -a /etc/fstab
+sudo mount -a
+
+# 2. Run recover.sh with both paths
 sudo bash /opt/pinning-service/scripts/recover.sh \
     --bundle /tmp2/fula-migration-<ts>.tgz \
     --backup-key <hex> \
     --db-ipns       k51qzi5uqu5dmguoei6kc4qdrnnawmvew4o8x5fzzg5346x4nii9qis3lpiub9 \
     --registry-ipns k51qzi5uqu5dle8iqcdd8snk2xedugpt7kjh5bu3fip639pjoqrd2cwa5vu96q \
     --ssl-email     hi@fx.land \
-    --kubo-data-host-path /mnt/ipfs-data
+    --kubo-data-host-path    /mnt/ipfs-data \
+    --cluster-data-host-path /mnt/cluster-data
 ```
 
-The kubo docker volume `ipfs_host_data` becomes a bind-mount to `/mnt/ipfs-data`. The bundle's kubo blocks extract directly to the external drive — no double-copy on the small SSD.
+What happens:
+- The docker volumes `ipfs_host_data` and `ipfs_cluster_data` become bind-mounts to your chosen paths.
+- The bundle's data (or your separately-rsynced data) extracts/lives directly on the external drive.
+- No double-copy on the small SSD.
+
+**If your old server uses a custom `datastore_spec`** (e.g. Fula Box's `/uniondrive/ipfs_datastore/{blocks,datastore}` layout), recover.sh translates the absolute paths in the spec to relative paths automatically. Your rsync workflow becomes:
+
+```bash
+# On OLD server (before transfer): inspect kubo's datastore_spec
+docker exec ipfs_host cat /internal/ipfs_data/datastore_spec
+# Example output:
+#   {"mounts":[
+#     {"path":"/uniondrive/ipfs_datastore/blocks","type":"flatfs",...},
+#     {"path":"/uniondrive/ipfs_datastore/datastore","type":"pebbleds",...}
+#   ]}
+
+# rsync the actual host paths to subdirectories of the NEW server's external drive,
+# named after the LAST PATH COMPONENT of each absolute path:
+rsync -aHP --info=progress2 --bwlimit=50M \
+    /uniondrive/ipfs_datastore/blocks/ \
+    root@<new-server>:/mnt/ipfs-data/blocks/
+
+rsync -aHP --info=progress2 --bwlimit=50M \
+    /uniondrive/ipfs_datastore/datastore/ \
+    root@<new-server>:/mnt/ipfs-data/datastore/
+
+# Same for cluster (if you used --cluster-data-host-path):
+rsync -aHP --info=progress2 --bwlimit=50M \
+    /uniondrive/ipfs-cluster/ \
+    root@<new-server>:/mnt/cluster-data/
+```
+
+When you run recover.sh with `--kubo-data-host-path /mnt/ipfs-data`:
+- recover.sh writes `/mnt/ipfs-data/config`, `/mnt/ipfs-data/keystore/`, and a translated `/mnt/ipfs-data/datastore_spec` (with `path: "blocks"`, `path: "datastore"`).
+- New kubo container starts with default `IPFS_PATH=/data/ipfs` (the volume mount), reads the translated spec, and finds blocks at `/data/ipfs/blocks/` (= `/mnt/ipfs-data/blocks/` on host) ✓
+- The new server doesn't need a `/uniondrive` directory at all.
+
+The `migrate-zip.sh` script's final output now reads your existing `datastore_spec` and lists the exact host paths to rsync, with the destination subdirectory names already computed for you.
 
 ### Recipe C — defer DNS cutover, validate new server first (RECOMMENDED if you can afford the workflow)
 

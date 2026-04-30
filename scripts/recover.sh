@@ -168,8 +168,12 @@ retry() {
   local attempts="$1" delay="$2"; shift 2
   local i rc=1
   for i in $(seq 1 "$attempts"); do
-    if "$@"; then return 0; fi
+    # Run the command on its own line, then capture $?. If we used
+    # `if "$@"; then return 0; fi` followed by `rc=$?`, $? would be the
+    # if-construct's exit (0 when no branch taken), NOT the command's exit.
+    "$@"
     rc=$?
+    if [ "$rc" -eq 0 ]; then return 0; fi
     if [ "$i" -lt "$attempts" ]; then
       log "  retry $i/$attempts failed (rc=$rc); waiting ${delay}s"
       sleep "$delay"
@@ -377,8 +381,9 @@ phase_apt() {
   #  - cron: provides crontab for the verification phase; the cron daemon
   #    itself is `cron.service` (Debian/Ubuntu) — installed implicitly.
   #  - dnsutils + iproute2: dig + ss respectively.
+  # Required packages — fail if any of these can't install
   retry 3 30 apt-get install -y \
-    docker.io docker-compose-plugin \
+    docker.io \
     nginx certbot python3-certbot-nginx \
     jq openssl build-essential git ufw fail2ban \
     curl ca-certificates rsync \
@@ -387,6 +392,19 @@ phase_apt() {
     dnsutils iproute2 \
     python3 file cron \
     || fatal "apt-get install failed after 3 attempts — check network or mirror config"
+
+  # Optional: docker compose plugin. Package name varies across Ubuntu
+  # versions (`docker-compose-plugin` on jammy/older, `docker-compose-v2` on
+  # noble/newer; `docker-compose` is the legacy v1 in some distros). We don't
+  # actually use `docker compose` in this script (only `docker exec`/`run`),
+  # so this is purely operator convenience — install whichever exists, skip
+  # otherwise.
+  for pkg in docker-compose-v2 docker-compose-plugin docker-compose; do
+    if apt-cache show "$pkg" >/dev/null 2>&1; then
+      apt-get install -y "$pkg" >/dev/null 2>&1 && \
+        log "  installed compose plugin: $pkg" && break
+    fi
+  done
 
   # Ensure docker daemon is enabled and running. apt installs the unit but on
   # some Ubuntu cloud-init configurations docker isn't auto-started.

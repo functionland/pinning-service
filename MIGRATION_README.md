@@ -390,6 +390,298 @@ sudo bash /opt/pinning-service/scripts/recover.sh \
 
 ---
 
+### Recipe E — Step-by-step for split SSD + HDD layout (Fula Box → standard server)
+
+This recipe is a complete copy-paste walkthrough for one specific hardware + software combination:
+
+- **OLD server**: Fula Box with the `/uniondrive` storage layout, custom kubo `datastore_spec` pointing at `/uniondrive/ipfs_datastore/{blocks,datastore}`, ipfs-cluster CRDT at `/uniondrive/ipfs-cluster`.
+- **NEW server**: fresh Ubuntu 22.04 / 24.04 with two drives:
+  - **SSD** (boot drive, e.g. 500 GB Samsung with DRAM) → holds OS, Docker, postgres, **ipfs-cluster pebble**
+  - **HDD** (e.g. 4 TB) → holds **kubo blocks + pebbleds** (the bulky content data)
+
+Every command below is annotated with which server to run it on. Substitute `<hex>` with your `BACKUP_ENCRYPTION_KEY`, `<old-server>` with your old server's hostname or IP, and adjust the bundle filename to your actual one.
+
+#### Step 1 — On OLD server: produce the bundle (skip if already done)
+
+```bash
+ssh root@<old-server>
+cd ~/pinning-service
+git pull
+sudo bash scripts/migrate-zip.sh --no-blocks
+# Note the output filename, e.g. /tmp2/fula-migration-20260430-031742Z.tgz
+```
+
+The bundle is ~44 GB (cluster CRDT + identities + env + secrets + postgres dump + fula-gateway image). Kubo blocks are excluded — you'll rsync those in step 6.
+
+#### Step 2 — On NEW server: identify, format, and mount the HDD
+
+```bash
+ssh root@<new-server>
+
+# Identify the HDD device (look for ~4 TB unmounted block device)
+lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+# Example output:
+#   NAME    SIZE TYPE MOUNTPOINT
+#   sda     465G disk
+#   |-sda1  ...      /
+#   sdb     3.6T disk           ← this is your HDD
+#   |-sdb1  3.6T part
+
+# Format with ext4 + label (DESTRUCTIVE — confirms the HDD is empty)
+sudo mkfs.ext4 -L ipfs-data /dev/sdb1
+
+# Mount + persist via fstab
+sudo mkdir -p /mnt/ipfs-data
+echo "LABEL=ipfs-data /mnt/ipfs-data ext4 defaults,noatime,nodiratime,nofail 0 2" | sudo tee -a /etc/fstab
+sudo mount -a
+
+# Verify
+df -h /mnt/ipfs-data
+mount | grep ipfs-data
+# Expect: /dev/sdb1 on /mnt/ipfs-data type ext4 (rw,noatime,nodiratime)
+```
+
+#### Step 3 — On NEW server: install the recovery script
+
+```bash
+# Get the pinning-service repo so you have recover.sh
+sudo apt-get update && sudo apt-get install -y git
+sudo git clone https://github.com/functionland/pinning-service.git /opt/pinning-service
+ls /opt/pinning-service/scripts/recover.sh
+```
+
+#### Step 4 — On NEW server: set up SSH key access to the old server
+
+```bash
+# Generate an ssh key on the new server (one-time)
+[ -f /root/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
+
+# Copy the public key onto the OLD server's root authorized_keys.
+# (Run this once, you'll be prompted for the OLD server's root password.)
+ssh-copy-id -i /root/.ssh/id_ed25519.pub root@<old-server>
+
+# Test
+ssh root@<old-server> echo OK
+# Expect: OK
+```
+
+This allows the upcoming rsyncs to run unattended without prompting for passwords. If you already have SSH keys set up, skip this step.
+
+#### Step 5 — On NEW server: pull the bundle (~44 GB, resumable)
+
+```bash
+sudo mkdir -p /tmp2
+sudo rsync -aHP --partial --info=progress2 \
+    root@<old-server>:/tmp2/fula-migration-<ts>.tgz \
+    /tmp2/
+sudo rsync -aHP --partial \
+    root@<old-server>:/tmp2/fula-migration-<ts>.tgz.sha256 \
+    /tmp2/
+
+# Verify integrity
+cd /tmp2 && sha256sum -c fula-migration-<ts>.tgz.sha256
+# Expect: fula-migration-<ts>.tgz: OK
+```
+
+If `rsync` is interrupted, just re-run the same command — `--partial` resumes from where it stopped.
+
+#### Step 6 — On NEW server: pull kubo data to the HDD (~162 GB)
+
+This is the big one. With `--bwlimit=50M` it takes ~55 min; without, much less depending on home upload speed. Each path is independently resumable.
+
+```bash
+# Blocks (the actual content — ~159 GB)
+sudo rsync -aHP --partial --info=progress2 --bwlimit=50M \
+    root@<old-server>:/uniondrive/ipfs_datastore/blocks/ \
+    /mnt/ipfs-data/blocks/
+
+# Pebbleds (kubo's local metadata — pin set, IPNS records — ~2.5 GB)
+sudo rsync -aHP --partial --info=progress2 --bwlimit=50M \
+    root@<old-server>:/uniondrive/ipfs_datastore/datastore/ \
+    /mnt/ipfs-data/datastore/
+
+# Verify both subdirectories are populated
+sudo du -sh /mnt/ipfs-data/blocks /mnt/ipfs-data/datastore
+# Expect sizes roughly matching what was on the old server (~159 GB and ~2.5 GB)
+```
+
+**No need to rsync `/uniondrive/ipfs-cluster/`** — it's already inside the bundle as `cluster/data.tgz` and recover.sh extracts it to the SSD-resident docker volume automatically.
+
+#### Step 7 — On NEW server: run recover.sh
+
+```bash
+sudo bash /opt/pinning-service/scripts/recover.sh \
+    --bundle /tmp2/fula-migration-<ts>.tgz \
+    --backup-key <hex> \
+    --db-ipns       k51qzi5uqu5dmguoei6kc4qdrnnawmvew4o8x5fzzg5346x4nii9qis3lpiub9 \
+    --registry-ipns k51qzi5uqu5dle8iqcdd8snk2xedugpt7kjh5bu3fip639pjoqrd2cwa5vu96q \
+    --ssl-email     hi@fx.land \
+    --kubo-data-host-path /mnt/ipfs-data \
+    --defer-dns
+```
+
+What this does:
+- **System packages**: docker, nginx, certbot, postgres-client, Go 1.22, Node 20, pm2, pigz, redis, etc. (auto-installed)
+- **Volumes**: `ipfs_host_data` bind-mounts to `/mnt/ipfs-data` (HDD); `ipfs_cluster_data` uses Docker's default `/var/lib/docker/volumes/...` location on the SSD
+- **Restores all identities**: kubo peer ID, both IPNS keys, ipfs-cluster identity + service.json
+- **Database**: drops + restores from bundled `pinning-fresh.dump`; runs any new migrations idempotently
+- **Builds**: pinning-service Go binary (main_postgres.go), ipfs-server, pinning-webui, x402-skale, fula-ai-service, mainnet-rewards-server, mainnet-pool-server (from `/opt/mainnet` snapshot in bundle), libp2p-service
+- **Kubo data**: extracts `kubo/data-*.tgz` from bundle into `/mnt/ipfs-data/{blocks,datastore}/` if you used Option 1 (no `--no-blocks`); detects your already-rsynced data if you used Option 2
+- **`datastore_spec` translation**: rewrites absolute paths (`/uniondrive/ipfs_datastore/blocks` → `blocks`) so the new kubo finds data at `/data/ipfs/blocks` inside the container = `/mnt/ipfs-data/blocks` on host
+- **`--defer-dns`**: skips the DNS-cutover pause and certbot phase. The new server comes up using the certs restored from `/etc/letsencrypt` in the bundle (still valid for weeks). You'll switch DNS in step 9.
+
+Watch the output for any FAIL lines. WARNs are usually fine; investigate FAILs.
+
+#### Step 8 — On NEW server: validate before DNS cutover
+
+The new server is fully operational now but DNS still points at the old server. To validate the new one without affecting users, edit your laptop's hosts file:
+
+**On your laptop** (Linux/macOS — `/etc/hosts`; Windows — `C:\Windows\System32\drivers\etc\hosts`):
+```
+<new-server-public-ip>  api.cloud.fx.land cloud.fx.land ipfs.cloud.fx.land api1.cloud.fx.land
+<new-server-public-ip>  pools.fx.land rewards.1.pools.fula.network x402.api.cloud.fx.land
+```
+
+Then on your laptop:
+```bash
+# Confirm /etc/hosts override is working (should return new server IP)
+dig +short api.cloud.fx.land
+
+# Browse the WebUI — TLS cert from old server still serves correctly
+open https://cloud.fx.land/
+
+# Login with your existing Google account → if it works, ENCRYPTION_KEY decrypts encrypted_email correctly
+# Pin a test CID via the API:
+curl -X POST https://api.cloud.fx.land/pins \
+    -H "Authorization: Bearer <your test API key>" \
+    -d '{"cid":"bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"}'
+```
+
+**On the new server**, confirm the test pin propagated to ipfs-cluster:
+```bash
+docker exec ipfs_cluster ipfs-cluster-ctl pin ls | grep bafybei
+```
+
+When you're satisfied everything works, **remove the `/etc/hosts` entries from your laptop**.
+
+#### Step 9 — Cut DNS over
+
+At your DNS registrar (Cloudflare, Route53, etc.), update the A records for these hostnames to point at the new server's public IP:
+
+```
+api.cloud.fx.land
+api1.cloud.fx.land
+cloud.fx.land
+ipfs.cloud.fx.land
+x402.api.cloud.fx.land
+pools.fx.land
+rewards.1.pools.fula.network
+cluster.1.pools.functionyard.fula.network
+hub.dev.fx.land   (if applicable)
+```
+
+Verify propagation from a fresh terminal (one without /etc/hosts overrides):
+```bash
+for d in api.cloud.fx.land cloud.fx.land ipfs.cloud.fx.land api1.cloud.fx.land \
+         pools.fx.land rewards.1.pools.fula.network x402.api.cloud.fx.land; do
+    echo "$d → $(dig +short $d | tr '\n' ' ')"
+done
+```
+
+#### Step 10 — On NEW server: finalize certs after DNS cutover
+
+```bash
+sudo bash /opt/pinning-service/scripts/recover.sh \
+    --bundle /tmp2/fula-migration-<ts>.tgz \
+    --backup-key <hex> \
+    --db-ipns       k51qzi5uqu5dmguoei6kc4qdrnnawmvew4o8x5fzzg5346x4nii9qis3lpiub9 \
+    --registry-ipns k51qzi5uqu5dle8iqcdd8snk2xedugpt7kjh5bu3fip639pjoqrd2cwa5vu96q \
+    --ssl-email     hi@fx.land \
+    --kubo-data-host-path /mnt/ipfs-data \
+    --phase=certs
+    # NOTE: omit --defer-dns this time
+```
+
+This re-runs only `phase_certs`. For each domain whose DNS now points at the new server, certbot either confirms the existing cert (still valid from the bundle) or issues a new one. Domains where DNS hasn't propagated yet warn-skip — re-run after they propagate.
+
+After this, certbot's daily renew cron handles long-term renewal automatically.
+
+#### Step 11 — On NEW server: full health verification
+
+```bash
+sudo bash /opt/pinning-service/scripts/recover.sh \
+    --bundle /tmp2/fula-migration-<ts>.tgz \
+    --backup-key <hex> \
+    --db-ipns ... --registry-ipns ... \
+    --kubo-data-host-path /mnt/ipfs-data \
+    --phase=post_verify
+```
+
+Expected output ends with:
+```
+============================================================
+ RECOVERY SUMMARY — ALL GREEN
+============================================================
+  PASS: NN   WARN: 0   FAIL: 0
+```
+
+If FAIL > 0, do not decommission the old server until resolved.
+
+#### Step 12 — On NEW server: optional — apply LAN isolation if server is on home network
+
+If your new server is on your home network (not a colocated VPS), apply network-level hardening so a compromised server can't pivot to home devices:
+
+```bash
+sudo bash /opt/pinning-service/scripts/recover.sh \
+    --bundle /tmp2/fula-migration-<ts>.tgz \
+    --backup-key <hex> \
+    --db-ipns ... --registry-ipns ... \
+    --kubo-data-host-path /mnt/ipfs-data \
+    --phase=apply_ufw
+```
+
+This re-runs the firewall phase, which auto-detects the home LAN and adds outbound deny rules. Skip if you're on a cloud VPS (the script auto-detects and skips on its own).
+
+#### Step 13 — Decommission the old server (after 24+ hours of new server serving live traffic)
+
+On the OLD server:
+```bash
+ssh root@<old-server>
+
+# Final belt-and-suspenders snapshot of /etc/letsencrypt before powering off
+sudo tar -czf /tmp/letsencrypt-final.tgz /etc/letsencrypt/
+
+# Stop services
+sudo systemctl stop fula-pinning-service fula-pinning-webui fula-upload-server \
+                     fula-gateway fula-ai-service x402-gateway libp2p-service \
+                     mainnet-pool-server mainnet-rewards-server
+
+# Stop containers
+sudo docker stop fula-gateway-1 ipfs_cluster ipfs_host postgres-pinning
+
+# (Optional) Power off / reclaim VM
+sudo shutdown -h now
+```
+
+#### Verification of the final disk layout (on NEW server)
+
+```bash
+df -h /
+df -h /mnt/ipfs-data
+
+du -sh /var/lib/docker/volumes/postgres-pinning-data/_data         # postgres on SSD
+du -sh /var/lib/docker/volumes/ipfs_cluster_data/_data             # cluster pebble on SSD (~44 GB after extract)
+du -sh /mnt/ipfs-data/blocks /mnt/ipfs-data/datastore              # kubo on HDD (~162 GB)
+```
+
+Expected:
+- SSD usage: ~150-180 GB (OS + docker + postgres + cluster pebble)
+- HDD usage: ~165 GB (kubo content) + lots of headroom for growth
+
+That's the complete recipe. Each step has a single, atomic command (or a small group of related commands) — work through them in order.
+
+---
+
 ## Section 4 — Validate before DNS cutover (Recipe C only)
 
 On your laptop or any machine with a browser, edit your hosts file to send the production hostnames to the new server's IP:

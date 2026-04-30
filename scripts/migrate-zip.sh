@@ -26,6 +26,11 @@ DOCKER_CP_TIMEOUT=60
 TIMESTAMP=$(date -u +%Y%m%d-%H%M%SZ)
 NAME="fula-migration-${TIMESTAMP}"
 
+# Used in the printed-at-end rsync hint as the SSH source hostname.
+# Defaults to this server's hostname; override by exporting MIGRATE_HOSTNAME
+# before running (e.g. if the new server reaches you via a different DNS name).
+MIGRATE_HOSTNAME="${MIGRATE_HOSTNAME:-$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "<old-server>")}"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --out)               OUT_DIR="$2"; shift 2 ;;
@@ -786,30 +791,60 @@ if seen:
         print(f"  {p}  ({size})")
 PY
       echo
-      echo "Recommended workflow on new server:"
+      echo "Recommended workflow — run THESE COMMANDS ON THE NEW SERVER (pulling):"
       echo "  1. Mount your external drive at /mnt/ipfs-data (or any path)."
-      echo "  2. rsync EACH absolute-path directory above into a subdirectory of"
-      echo "     /mnt/ipfs-data named after its last path component:"
-      echo "       rsync -aHP --info=progress2 --bwlimit=50M \\"
-      echo "         <absolute-path-on-host>/ \\"
-      echo "         root@<new-server>:/mnt/ipfs-data/<last-path-component>/"
-      echo "     For example, if datastore_spec has /uniondrive/ipfs_datastore/blocks:"
-      echo "         /uniondrive/ipfs_datastore/blocks/ → /mnt/ipfs-data/blocks/"
-      echo "  3. Run recover.sh with --kubo-data-host-path /mnt/ipfs-data — recover.sh"
-      echo "     will translate the datastore_spec absolute paths to relative ones"
-      echo "     so kubo reads from /mnt/ipfs-data/<subdir> on the new host."
+      echo "  2. For EACH absolute-path directory above, run on the new server:"
+      echo "       sudo rsync -aHP --partial --info=progress2 --bwlimit=50M \\"
+      echo "         root@${MIGRATE_HOSTNAME:-<old-server>}:<absolute-path-on-old-server>/ \\"
+      echo "         /mnt/ipfs-data/<last-path-component>/"
+      echo
+      # Print exact commands for THIS host's paths
+      python3 - "$SPEC_FILE" "${MIGRATE_HOSTNAME:-<old-server>}" <<'PY' 2>/dev/null
+import json, sys
+with open(sys.argv[1]) as f:
+    spec = json.load(f)
+host = sys.argv[2]
+seen = []
+def walk(n):
+    if isinstance(n, dict):
+        if "path" in n and isinstance(n["path"], str) and n["path"].startswith("/"):
+            if n["path"] not in seen:
+                seen.append(n["path"])
+        for v in n.values():
+            walk(v)
+    elif isinstance(n, list):
+        for v in n:
+            walk(v)
+walk(spec)
+if seen:
+    print("     Concrete commands for your dataset:")
+    for p in seen:
+        last = p.rstrip("/").split("/")[-1]
+        print(f"       sudo rsync -aHP --partial --info=progress2 --bwlimit=50M \\")
+        print(f"         root@{host}:{p}/ \\")
+        print(f"         /mnt/ipfs-data/{last}/")
+        print()
+PY
+      echo "  3. Run recover.sh with --kubo-data-host-path /mnt/ipfs-data — it will"
+      echo "     translate the datastore_spec absolute paths to relative ones so"
+      echo "     kubo reads from /mnt/ipfs-data/<subdir> on the new host."
+      echo
+      echo "  (Push-style alternative — run on the OLD server if firewall blocks new→old SSH:"
+      echo "     swap source/destination of the rsync commands above; same result.)"
       echo
     fi
 
-    # Cluster data — also rsync-able to an external drive on the new server
-    if [ -d /uniondrive/ipfs-cluster ] || [ -d /var/lib/docker/volumes/*/ipfs-cluster ]; then
-      echo "==[ CLUSTER DATA — also rsync-able if you want it on external drive ]"
-      echo "  rsync -aHP --info=progress2 \\"
-      echo "    \$CLUSTER_HOST_PATH/ \\"
-      echo "    root@<new-server>:/mnt/cluster-data/"
-      echo "  Then run recover.sh with --cluster-data-host-path /mnt/cluster-data"
-      echo "  (Cluster data is already in this bundle as cluster/data.tgz, but if"
-      echo "  yours is huge, rsync may be faster than transferring the full bundle.)"
+    # Cluster data — only relevant if user passed --no-cluster-data (rare).
+    # By default, the bundle has cluster/data.tgz and recover.sh extracts it
+    # to --cluster-data-host-path automatically. Mention this only if the user
+    # explicitly disabled cluster bundling.
+    if ! $INCLUDE_CLUSTER_DATA; then
+      echo "==[ CLUSTER DATA — also needs separate rsync (--no-cluster-data was set) ]"
+      echo "  On the new server (pulling from old):"
+      echo "    sudo rsync -aHP --partial --info=progress2 \\"
+      echo "      root@${MIGRATE_HOSTNAME:-<old-server>}:/uniondrive/ipfs-cluster/ \\"
+      echo "      /mnt/cluster-data/"
+      echo "  Then pass --cluster-data-host-path /mnt/cluster-data to recover.sh."
       echo
     fi
     echo "======================================================================="

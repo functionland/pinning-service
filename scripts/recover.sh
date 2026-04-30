@@ -301,11 +301,25 @@ Verify on the old server: cat /root/.fula-backup-key | grep BACKUP_ENCRYPTION_KE
   [[ "$DB_IPNS"       =~ ^k51[a-z0-9]{56,}$ ]] || fatal "--db-ipns malformed"
   [[ "$REGISTRY_IPNS" =~ ^k51[a-z0-9]{56,}$ ]] || fatal "--registry-ipns malformed"
 
-  # Verify checksum if a .sha256 file is present alongside the bundle
+  # Verify checksum if a .sha256 file is present alongside the bundle.
+  # We don't use `sha256sum -c` directly because the .sha256 file embeds the
+  # absolute path the bundle had at creation time (e.g., /tmp2/...). When the
+  # bundle is moved to a different directory on the new server, that path
+  # doesn't resolve. Extract just the expected hash and compare to the actual
+  # hash of the bundle at its current location.
   if [ -f "${BUNDLE_TGZ}.sha256" ]; then
     log "verifying bundle checksum"
-    ( cd "$(dirname "$BUNDLE_TGZ")" && sha256sum -c "$(basename "${BUNDLE_TGZ}.sha256")" ) \
-      || fatal "bundle checksum mismatch"
+    local expected_hash actual_hash
+    expected_hash=$(awk 'NF{print $1; exit}' "${BUNDLE_TGZ}.sha256")
+    if ! [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]]; then
+      warn "could not parse SHA256 from ${BUNDLE_TGZ}.sha256 — skipping verification"
+    else
+      actual_hash=$(sha256sum "$BUNDLE_TGZ" | awk '{print $1}')
+      if [ "$expected_hash" != "$actual_hash" ]; then
+        fatal "bundle checksum mismatch (expected $expected_hash, got $actual_hash) — re-transfer the bundle"
+      fi
+      log "  checksum OK"
+    fi
   fi
 
   # Extract bundle if not already extracted

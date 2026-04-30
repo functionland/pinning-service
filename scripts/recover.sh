@@ -606,16 +606,40 @@ phase_docker_volumes() {
   kubo_vol=$(docker volume inspect ipfs_host_data --format '{{.Mountpoint}}')
   cluster_vol=$(docker volume inspect ipfs_cluster_data --format '{{.Mountpoint}}')
 
-  # Kubo data — migrate-zip.sh tars from $(dirname SRC) with $(basename SRC),
-  # so entries look like "<basename>/blocks/...", one leading directory.
+  # Kubo data — three possible sources:
+  #
+  #   1. --blocks-rsync HOST_PATH        (user rsynced data dir directly)
+  #   2. bundle has kubo/data-*.tgz      (NEW format: one tarball per
+  #                                       datastore_spec storage path)
+  #   3. bundle has kubo/data.tgz        (LEGACY format: single tarball)
+  #   4. nothing in bundle               (user used --no-blocks; assumes data
+  #                                       was rsynced separately to subdirs of
+  #                                       $kubo_vol — e.g. /mnt/ipfs-data/blocks)
+  #
+  # The new format (kubo/data-*.tgz) preserves the basename in tar entries
+  # ("blocks/file1", "datastore/file2", etc.), so we extract WITHOUT
+  # --strip-components and the data lands at $kubo_vol/blocks/, $kubo_vol/datastore/.
+  # Combined with the translated datastore_spec (paths rewritten to relative
+  # "blocks", "datastore"), kubo on the new server reads from those subdirs.
   if [ -n "$BLOCKS_RSYNC" ]; then
     log "rsyncing kubo data from $BLOCKS_RSYNC"
     rsync -aHP --info=progress2 "$BLOCKS_RSYNC/" "$kubo_vol/"
+  elif ls "$BUNDLE_DIR"/kubo/data-*.tgz >/dev/null 2>&1; then
+    log "extracting per-path kubo tarballs into $kubo_vol"
+    local tarball name
+    for tarball in "$BUNDLE_DIR"/kubo/data-*.tgz; do
+      [ -f "$tarball" ] || continue
+      name=$(basename "$tarball" .tgz); name="${name#data-}"
+      log "  extracting $tarball → $kubo_vol/${name}/ ($(du -sh "$tarball" | cut -f1))"
+      # No --strip-components: tarball contains "<basename>/..." entries;
+      # extract preserves that prefix at the destination.
+      tar -xzf "$tarball" -C "$kubo_vol"
+    done
   elif [ -f "$BUNDLE_DIR/kubo/data.tgz" ]; then
-    log "extracting kubo data into $kubo_vol"
+    log "extracting legacy single kubo tarball into $kubo_vol"
     tar -xzf "$BUNDLE_DIR/kubo/data.tgz" -C "$kubo_vol" --strip-components=1
   else
-    log "no kubo data.tgz in bundle — assuming blocks/datastore were rsynced separately to $kubo_vol"
+    log "no kubo data tarballs in bundle — assuming blocks/datastore were rsynced separately to $kubo_vol/{blocks,datastore}"
   fi
 
   # Always restore kubo identity files from bundle (small, idempotent). These

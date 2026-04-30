@@ -189,14 +189,37 @@ The script runs through 29 phases and pauses at phase 24 with a `Type 'DNS-DONE'
 
 You want: kubo block data and/or cluster CRDT data on a different drive than the OS root. Both can be on the same external drive or different drives — your choice.
 
+There are **two ways** to bring the pinned data along, depending on whether you want a single transfer or split transfers. Both produce an equally complete recovery; pick based on bandwidth and resume tolerance. **All commands shown below are run on the NEW server** (pulling data from old) so you stay in one shell session and don't need outbound SSH from old → new.
+
+#### Step 1 (common to both options): mount external drive(s) on the new server
+
 ```bash
-# 1. Mount external drive(s) on the new server (one-time setup)
 sudo mkdir -p /mnt/ipfs-data /mnt/cluster-data
 echo "LABEL=ipfs-data    /mnt/ipfs-data    ext4 defaults,noatime,nodiratime,nofail 0 2" | sudo tee -a /etc/fstab
 echo "LABEL=cluster-data /mnt/cluster-data ext4 defaults,noatime,nofail            0 2" | sudo tee -a /etc/fstab
 sudo mount -a
+df -h /mnt/ipfs-data /mnt/cluster-data    # confirm
+```
 
-# 2. Run recover.sh with both paths
+#### Option 1 — single self-contained bundle (no rsync)
+
+The simplest path: `migrate-zip.sh` reads your kubo `datastore_spec`, follows every storage path it references (including custom paths like Fula Box's `/uniondrive/ipfs_datastore/{blocks,datastore}`), and tars each into a separate file inside the bundle. `recover.sh` extracts them into the right subdirectories of your external drive automatically.
+
+```bash
+# ----- on OLD server (one command) -----
+sudo bash scripts/migrate-zip.sh                 # NO --no-blocks
+# Bundle is now ~150-200 GB depending on dataset size; one file in /tmp2/
+
+# ----- on NEW server: pull the bundle from the old (resumable via --partial) -----
+rsync -aHP --partial --info=progress2 \
+    root@<old-server>:/tmp2/fula-migration-<ts>.tgz \
+    /tmp2/
+rsync -aHP --partial \
+    root@<old-server>:/tmp2/fula-migration-<ts>.tgz.sha256 \
+    /tmp2/
+
+# ----- on NEW server: run recovery -----
+cd /tmp2 && sha256sum -c fula-migration-<ts>.tgz.sha256
 sudo bash /opt/pinning-service/scripts/recover.sh \
     --bundle /tmp2/fula-migration-<ts>.tgz \
     --backup-key <hex> \
@@ -207,44 +230,114 @@ sudo bash /opt/pinning-service/scripts/recover.sh \
     --cluster-data-host-path /mnt/cluster-data
 ```
 
-What happens:
-- The docker volumes `ipfs_host_data` and `ipfs_cluster_data` become bind-mounts to your chosen paths.
-- The bundle's data (or your separately-rsynced data) extracts/lives directly on the external drive.
-- No double-copy on the small SSD.
+Pros / cons:
+- ✅ One transfer, no manual coordination, simplest mental model
+- ✅ recover.sh handles every detail (datastore_spec translation, kubo subdir layout, cluster CRDT extraction)
+- ⚠️ Single big file. Use `rsync --partial` to pull (shown above) so a dropped connection resumes from where it stopped; native `scp` does not resume.
+- ⚠️ Tar+pigz of a multi-GB-to-TB dataset on the OLD server takes 30-60+ min. Kubo and cluster keep running; only some background CPU/IO load.
 
-**If your old server uses a custom `datastore_spec`** (e.g. Fula Box's `/uniondrive/ipfs_datastore/{blocks,datastore}` layout), recover.sh translates the absolute paths in the spec to relative paths automatically. Your rsync workflow becomes:
+#### Option 2 — bundle without blocks + separate rsyncs (best for very large datasets)
+
+Build a small bundle with only the metadata (cluster CRDT, identities, env files, postgres dump, etc.), then rsync the bulky kubo data dirs separately. Each transfer is independently resumable.
 
 ```bash
-# On OLD server (before transfer): inspect kubo's datastore_spec
-docker exec ipfs_host cat /internal/ipfs_data/datastore_spec
-# Example output:
+# ----- on OLD server: build small bundle -----
+sudo bash scripts/migrate-zip.sh --no-blocks    # ~44 GB bundle (no kubo block data)
+
+# Inspect the datastore_spec to know which paths to rsync next.
+docker exec ipfs_host cat /internal/ipfs_data/datastore_spec | jq
+# Example output for Fula Box:
 #   {"mounts":[
-#     {"path":"/uniondrive/ipfs_datastore/blocks","type":"flatfs",...},
-#     {"path":"/uniondrive/ipfs_datastore/datastore","type":"pebbleds",...}
+#     {"path":"/uniondrive/ipfs_datastore/blocks", "type":"flatfs"},
+#     {"path":"/uniondrive/ipfs_datastore/datastore", "type":"pebbleds"}
 #   ]}
 
-# rsync the actual host paths to subdirectories of the NEW server's external drive,
-# named after the LAST PATH COMPONENT of each absolute path:
-rsync -aHP --info=progress2 --bwlimit=50M \
+# ----- on NEW server: pull the bundle -----
+rsync -aHP --partial --info=progress2 \
+    root@<old-server>:/tmp2/fula-migration-<ts>.tgz \
+    /tmp2/
+rsync -aHP --partial \
+    root@<old-server>:/tmp2/fula-migration-<ts>.tgz.sha256 \
+    /tmp2/
+cd /tmp2 && sha256sum -c fula-migration-<ts>.tgz.sha256
+
+# ----- on NEW server: pull each kubo data path -----
+# Rule: trailing-/-on-source means "copy contents". Destination subdirectory
+# name MUST match the LAST component of the source path
+# (e.g. .../blocks/ → /mnt/ipfs-data/blocks/).
+
+sudo rsync -aHP --partial --info=progress2 --bwlimit=50M \
+    root@<old-server>:/uniondrive/ipfs_datastore/blocks/ \
+    /mnt/ipfs-data/blocks/
+
+sudo rsync -aHP --partial --info=progress2 --bwlimit=50M \
+    root@<old-server>:/uniondrive/ipfs_datastore/datastore/ \
+    /mnt/ipfs-data/datastore/
+
+# ----- on NEW server: cluster data — usually NOT needed -----
+# By default the bundle has cluster CRDT (compressed inside it) and recover.sh
+# extracts it to /mnt/cluster-data automatically. ONLY do this rsync if you
+# additionally pass --no-cluster-data to migrate-zip.sh:
+#
+# sudo rsync -aHP --partial --info=progress2 --bwlimit=50M \
+#     root@<old-server>:/uniondrive/ipfs-cluster/ \
+#     /mnt/cluster-data/
+
+# ----- on NEW server: run recovery -----
+sudo bash /opt/pinning-service/scripts/recover.sh \
+    --bundle /tmp2/fula-migration-<ts>.tgz \
+    --backup-key <hex> \
+    --db-ipns       k51qzi5uqu5dmguoei6kc4qdrnnawmvew4o8x5fzzg5346x4nii9qis3lpiub9 \
+    --registry-ipns k51qzi5uqu5dle8iqcdd8snk2xedugpt7kjh5bu3fip639pjoqrd2cwa5vu96q \
+    --ssl-email     hi@fx.land \
+    --kubo-data-host-path    /mnt/ipfs-data \
+    --cluster-data-host-path /mnt/cluster-data
+```
+
+Pros / cons:
+- ✅ Each transfer is independently resumable. A dropped connection mid-way means resuming that one rsync from where it stopped, not redoing 200 GB.
+- ✅ Smaller "validate-then-commit" bundle: pull the 44 GB bundle first, sanity-check it (`sha256sum -c`), peek at contents, then commit to the long block transfer.
+- ⚠️ Two extra rsync commands to remember (the kubo block dirs).
+- ⚠️ Requires SSH from new → old (already needed for the bundle transfer anyway).
+
+#### Which option for what situation
+
+| Situation | Recommended |
+|---|---|
+| Wired LAN transfer, fast both sides, dataset under ~50 GB | Option 1 |
+| Home upload speed (asymmetric DSL/cable), dataset > ~50 GB | Option 2 |
+| Server-to-server in same datacenter, dataset < 200 GB | Option 1 |
+| You want to validate the bundle works before committing to the long transfer | Option 2 |
+| You don't want to think about it | Option 2 (rsync `--partial` is bulletproof; smaller test bundle) |
+
+#### How recover.sh recognizes which option you used
+
+It auto-detects from the bundle contents — **same recover.sh invocation works for both options**:
+
+| Bundle contains | recover.sh action |
+|---|---|
+| `kubo/data-*.tgz` files (Option 1, current format) | Extracts each into matching subdir of `/mnt/ipfs-data` |
+| `kubo/data.tgz` (legacy single-tar from older bundles) | Extracts with `--strip-components=1` (legacy compat) |
+| Nothing (Option 2 — used `--no-blocks`) | Logs `assuming blocks/datastore were rsynced separately to /mnt/ipfs-data/{blocks,datastore}` and continues. If the rsync didn't happen, kubo starts with empty subdirectories and bitswap will try to backfill from the network. |
+
+In all three cases, recover.sh writes the translated `datastore_spec` (with relative paths) plus restored `config` and `keystore/` into the volume root, so kubo finds everything regardless of how the bulk data arrived.
+
+#### Push-style alternative (run on the OLD server)
+
+If you'd rather initiate from the OLD server (e.g., the new server can't reach the old via SSH yet because firewall rules), invert source/destination:
+
+```bash
+# Run on the OLD server. Same data ends up in the same places.
+sudo rsync -aHP --partial --info=progress2 --bwlimit=50M \
     /uniondrive/ipfs_datastore/blocks/ \
     root@<new-server>:/mnt/ipfs-data/blocks/
 
-rsync -aHP --info=progress2 --bwlimit=50M \
+sudo rsync -aHP --partial --info=progress2 --bwlimit=50M \
     /uniondrive/ipfs_datastore/datastore/ \
     root@<new-server>:/mnt/ipfs-data/datastore/
-
-# Same for cluster (if you used --cluster-data-host-path):
-rsync -aHP --info=progress2 --bwlimit=50M \
-    /uniondrive/ipfs-cluster/ \
-    root@<new-server>:/mnt/cluster-data/
 ```
 
-When you run recover.sh with `--kubo-data-host-path /mnt/ipfs-data`:
-- recover.sh writes `/mnt/ipfs-data/config`, `/mnt/ipfs-data/keystore/`, and a translated `/mnt/ipfs-data/datastore_spec` (with `path: "blocks"`, `path: "datastore"`).
-- New kubo container starts with default `IPFS_PATH=/data/ipfs` (the volume mount), reads the translated spec, and finds blocks at `/data/ipfs/blocks/` (= `/mnt/ipfs-data/blocks/` on host) ✓
-- The new server doesn't need a `/uniondrive` directory at all.
-
-The `migrate-zip.sh` script's final output now reads your existing `datastore_spec` and lists the exact host paths to rsync, with the destination subdirectory names already computed for you.
+Either direction works — the data lands in the same place either way. Pull-style (run on new) is what we recommend by default because it keeps you in one shell session during the recovery.
 
 ### Recipe C — defer DNS cutover, validate new server first (RECOMMENDED if you can afford the workflow)
 

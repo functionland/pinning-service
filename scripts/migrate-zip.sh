@@ -578,56 +578,112 @@ if $HAVE_DOCKER; then
 fi
 
 # ============================================================================
-# 18. Kubo block data (the BIG one) — append-mostly, live tar is safe.
-# This is by far the heaviest step. We give it explicit visibility so the
-# operator can monitor progress and understand why the host is busy.
+# 18. Kubo block data — follows datastore_spec to find every storage path.
+#
+# The previous implementation tarred only IPFS_PATH on host. That works for
+# default kubo (where blocks live under IPFS_PATH/blocks) but BREAKS for
+# custom datastore_spec layouts that put data on a different drive (e.g.,
+# Fula Box's /uniondrive/ipfs_datastore/{blocks,datastore}). The kubo daemon
+# reads each "path" from datastore_spec when it starts; we must capture each
+# of those paths to make the bundle self-sufficient.
+#
+# For each mount entry in datastore_spec.mounts:
+#   - if path is absolute: capture that exact host path
+#   - if path is relative: capture IPFS_PATH/<path>
+# Result: kubo/data-<basename>.tgz per storage path, e.g.:
+#   kubo/data-blocks.tgz       ← from /uniondrive/ipfs_datastore/blocks (or relative "blocks")
+#   kubo/data-datastore.tgz    ← from /uniondrive/ipfs_datastore/datastore
 # ============================================================================
 if $HAVE_DOCKER && $INCLUDE_BLOCKS; then
-  # Resolve the in-container kubo data path (auto-detected earlier) to its
-  # host-side location via mount-prefix match. For Fula Box this gives
-  # /home/root/.fula/ipfs_data; for stock kubo it gives the docker volume's
-  # _data directory.
-  KUBO_SRC=$(_resolve_container_path ipfs_host "$KUBO_PATH_IN_CONTAINER" 2>/dev/null || echo "")
-  # Fallback to the legacy /data/ipfs lookup if mount resolution failed
-  if [ -z "$KUBO_SRC" ]; then
-    KUBO_SRC=$(docker inspect ipfs_host --format '{{range .Mounts}}{{if eq .Destination "/data/ipfs"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
-  fi
-  if [ -n "$KUBO_SRC" ] && [ -d "$KUBO_SRC" ]; then
-    SIZE_HUMAN=$(du -sh "$KUBO_SRC" 2>/dev/null | cut -f1)
-    SIZE_BYTES=$(du -sb "$KUBO_SRC" 2>/dev/null | cut -f1 || echo 0)
-    NFILES=$(find "$KUBO_SRC" -type f 2>/dev/null | wc -l)
-    log ""
-    log "==[ KUBO BLOCKS — heaviest step ]======================================"
-    log "  source:      $KUBO_SRC"
-    log "  size:        $SIZE_HUMAN  ($NFILES files)"
-    if command -v pigz >/dev/null 2>&1; then
-      log "  compressor:  pigz -1 -p${NPROC}  (multi-threaded, fast)"
-    else
-      log "  compressor:  gzip -1  (single-threaded; install 'pigz' for ${NPROC}x speed-up)"
-    fi
-    log "  priority:    nice=19 + ionice=idle  (production keeps its CPU + I/O share)"
-    log "  expected:    roughly $((SIZE_BYTES / 200000000)) sec at 200 MB/s (pigz)"
-    log "               roughly $((SIZE_BYTES / 50000000))  sec at 50  MB/s (gzip)"
-    log "  monitor:     in another terminal, watch progress with one of:"
-    log "                 du -h $W/kubo/data.tgz   # output size grows"
-    log "                 iotop -ao                # I/O usage"
-    log "                 pidstat 5                # CPU usage"
-    log "  abort:       Ctrl-C is safe — the EXIT trap unpauses cluster + cleans up"
-    log "======================================================================="
-    log ""
-
-    # tar streams stdin, _compress writes stdout. We do NOT redirect stderr to
-    # /dev/null because real I/O errors should be visible.
-    if ! _low_impact tar -c -C "$(dirname "$KUBO_SRC")" "$(basename "$KUBO_SRC")" 2>>"${OUT_DIR}/kubo_tar.err" \
-         | _compress 1 > "$W/kubo/data.tgz"; then
-      log "  WARN: kubo tar/compress had errors — check ${OUT_DIR}/kubo_tar.err"
-      log "        Verify with 'ipfs repo verify' after restoring on new server"
-    fi
-    [ -f "$W/kubo/data.tgz" ] && \
-      log "  kubo blocks done: $(du -sh "$W/kubo/data.tgz" | cut -f1) compressed"
+  SPEC_FILE="$W/kubo/datastore_spec"
+  if [ ! -f "$SPEC_FILE" ]; then
+    log "  WARN: no datastore_spec captured (older bundle?); falling back to single-tar of $KUBO_PATH_IN_CONTAINER"
+    KUBO_PATHS_TO_TAR="$KUBO_PATH_IN_CONTAINER:data"
   else
-    log "  WARN: could not locate kubo data source"
+    # Parse datastore_spec, emit "in_container_path:tarball_name" lines.
+    # tarball_name = last component of path; if path is relative, prefix with
+    # IPFS_PATH inside the container before resolving.
+    KUBO_PATHS_TO_TAR=$(python3 - "$SPEC_FILE" "$KUBO_PATH_IN_CONTAINER" <<'PY'
+import json, sys
+spec = json.load(open(sys.argv[1]))
+ipfs_path = sys.argv[2].rstrip("/")
+seen = []
+def walk(node):
+    if isinstance(node, dict):
+        if "path" in node and isinstance(node["path"], str):
+            p = node["path"]
+            tarball = p.rstrip("/").split("/")[-1] or "root"
+            in_path = p if p.startswith("/") else (ipfs_path + "/" + p.lstrip("/"))
+            entry = (in_path, tarball)
+            if entry not in seen:
+                seen.append(entry)
+        for v in node.values():
+            walk(v)
+    elif isinstance(node, list):
+        for v in node:
+            walk(v)
+walk(spec)
+for in_path, tarball in seen:
+    print(f"{in_path}:{tarball}")
+PY
+)
   fi
+
+  if [ -z "$KUBO_PATHS_TO_TAR" ]; then
+    log "  WARN: could not derive any kubo data paths to tar — bundle will lack block data"
+  fi
+
+  # Compute total byte estimate up front for visibility
+  TOTAL_KUBO_BYTES=0
+  declare -A KUBO_RESOLVED=()  # in_path -> host_path
+  while IFS=: read -r in_path tarball; do
+    [ -z "$in_path" ] && continue
+    host_path=$(_resolve_container_path ipfs_host "$in_path" 2>/dev/null || echo "")
+    if [ -z "$host_path" ] || [ ! -d "$host_path" ]; then
+      log "  WARN: cannot resolve $in_path → host path; skipping (will be missing from bundle)"
+      continue
+    fi
+    KUBO_RESOLVED["$in_path"]="$host_path"
+    bytes=$(du -sb "$host_path" 2>/dev/null | cut -f1 || echo 0)
+    TOTAL_KUBO_BYTES=$((TOTAL_KUBO_BYTES + bytes))
+  done <<< "$KUBO_PATHS_TO_TAR"
+
+  TOTAL_KUBO_HUMAN=$(numfmt --to=iec-i --suffix=B "$TOTAL_KUBO_BYTES" 2>/dev/null || echo "${TOTAL_KUBO_BYTES} bytes")
+  log ""
+  log "==[ KUBO DATA — heaviest step ]========================================"
+  log "  derived from datastore_spec; tarring each storage path separately so"
+  log "  recover.sh can place data at the right relative subdirectory in IPFS_PATH"
+  log "  total to tar:    $TOTAL_KUBO_HUMAN"
+  if command -v pigz >/dev/null 2>&1; then
+    log "  compressor:      pigz -1 -p${NPROC}  (multi-threaded)"
+  else
+    log "  compressor:      gzip -1  (install 'pigz' for ${NPROC}x speed-up)"
+  fi
+  log "  priority:        nice=19 + ionice=idle"
+  log "  expected total:  roughly $((TOTAL_KUBO_BYTES / 200000000)) sec at 200 MB/s pigz"
+  log "                   roughly $((TOTAL_KUBO_BYTES / 50000000))  sec at  50 MB/s gzip"
+  log "  monitor:         du -h $W/kubo/data-*.tgz   # tarball sizes grow"
+  log "                   iotop -ao                  # I/O usage"
+  log "  abort:           Ctrl-C is safe — EXIT trap unpauses cluster + cleans"
+  log "======================================================================="
+  log ""
+
+  # Tar each path separately
+  while IFS=: read -r in_path tarball; do
+    [ -z "$in_path" ] && continue
+    host_path="${KUBO_RESOLVED[$in_path]:-}"
+    [ -z "$host_path" ] && continue
+    out_tgz="$W/kubo/data-${tarball}.tgz"
+    log "  tarring $host_path → kubo/data-${tarball}.tgz"
+    if ! _low_impact tar -c -C "$(dirname "$host_path")" "$(basename "$host_path")" \
+           2>>"${OUT_DIR}/kubo_tar.err" \
+           | _compress 1 > "$out_tgz"; then
+      log "    WARN: tar for $host_path produced errors — check ${OUT_DIR}/kubo_tar.err"
+    fi
+    if [ -f "$out_tgz" ]; then
+      log "    done: $(du -sh "$out_tgz" | cut -f1) compressed"
+    fi
+  done <<< "$KUBO_PATHS_TO_TAR"
 fi
 
 # ============================================================================

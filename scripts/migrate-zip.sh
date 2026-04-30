@@ -529,6 +529,21 @@ if [ -d /opt/mainnet ]; then
       | _compress 1 > "$W/services/mainnet-pool-server/opt-mainnet.tgz" || true
 fi
 
+# mainnet-rewards: PRIVATE repo on github.com/functionland/mainnet-rewards.
+# Snapshot the deployed source from /opt/mainnet-rewards so the new server
+# never has to authenticate to GitHub to clone a private repo. Same pattern
+# as mainnet-pool-server above.
+if [ -d /opt/mainnet-rewards ]; then
+  log "mainnet-rewards-server snapshot"
+  mkdir -p "$W/services/mainnet-rewards-server"
+  _low_impact tar \
+      --exclude='/opt/mainnet-rewards/node_modules' \
+      --exclude='/opt/mainnet-rewards/logs' \
+      --exclude='/opt/mainnet-rewards/tmp' \
+      -c /opt/mainnet-rewards/ 2>/dev/null \
+      | _compress 1 > "$W/services/mainnet-rewards-server/opt-mainnet-rewards.tgz" || true
+fi
+
 # libp2p-service: pre-built binary + source for rebuild fallback (NO identity key)
 if [ -d /opt/mainnet/libp2p-service ]; then
   log "libp2p-service binary + source"

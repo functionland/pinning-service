@@ -11,6 +11,8 @@
 #     [--phase=NAME]              # run single phase (idempotent)
 #     [--ssl-email hi@fx.land]
 #     [--mainnet-pool-repo URL]   # fallback if /opt/mainnet snapshot missing from bundle
+#                                 # (the canonical URL is
+#                                 # https://github.com/functionland/join-server.git)
 #     [--prewarm-cluster]         # optional pin pre-warm from DB after start
 #     [--skip-ipns-verify]        # skip the IPNS round-trip diagnostic
 #     [--blocks-rsync HOST:PATH]  # kubo blocks pre-rsynced separately (skip tar extraction)
@@ -462,20 +464,45 @@ phase_clone() {
   log_phase "3. clone repos"
   mkdir -p /opt /home/root
 
-  if [ ! -d "$PINNING_REPO/.git" ]; then
-    retry 3 15 git clone https://github.com/functionland/pinning-service.git "$PINNING_REPO" \
-      || fatal "clone pinning-service failed after 3 attempts"
-  fi
+  # Disable git's interactive credential prompt during these clones. Public
+  # repos shouldn't need auth; if a URL is wrong, this fails fast with 404
+  # rather than blocking on a "Username:" prompt for hours. To override
+  # (e.g., for cloning private repos), set GIT_TERMINAL_PROMPT=1 before running.
+  export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"
 
-  if [ ! -d "$FULA_API_REPO/.git" ]; then
-    retry 3 15 git clone https://github.com/functionland/fula-api.git "$FULA_API_REPO" \
-      || fatal "clone fula-api failed after 3 attempts"
-  fi
+  # Helper — clone if target dir doesn't exist OR is empty. Treats a populated
+  # directory as "already provided by some other means" (rsync, manual copy,
+  # bundle extraction) and skips the clone. This makes the phase tolerant of
+  # private repos (where the user supplies the source out-of-band) and stale
+  # partial-clone state from a previous failed attempt.
+  _clone_if_empty() {
+    local repo_name="$1" url="$2" dest="$3" required="${4:-required}"
+    if [ -d "$dest/.git" ]; then
+      log "  $repo_name: already cloned at $dest (skipping)"
+      return 0
+    fi
+    if [ -d "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
+      log "  $repo_name: $dest is non-empty (assuming source provided out-of-band — skipping clone)"
+      return 0
+    fi
+    [ -e "$dest" ] && rm -rf "$dest"
+    if retry 3 15 git clone "$url" "$dest"; then
+      return 0
+    fi
+    if [ "$required" = "required" ]; then
+      fatal "clone $repo_name from $url failed after 3 attempts"
+    else
+      warn "clone $repo_name failed — if it's a PRIVATE repo, rsync the source from your old server to $dest, OR set GIT_TERMINAL_PROMPT=1 and configure GitHub auth before re-running"
+      return 1
+    fi
+  }
 
-  if [ ! -d "$MAINNET_REWARDS_REPO/.git" ]; then
-    retry 3 15 git clone https://github.com/functionland/mainnet-reward-server.git "$MAINNET_REWARDS_REPO" \
-      || warn "clone mainnet-reward-server failed (URL may differ — set the right URL or skip phase_build_mainnet_rewards)"
-  fi
+  _clone_if_empty pinning-service "https://github.com/functionland/pinning-service.git" "$PINNING_REPO" required
+  _clone_if_empty fula-api        "https://github.com/functionland/fula-api.git"        "$FULA_API_REPO" required
+  # mainnet-rewards is PRIVATE — recover.sh prefers the bundle snapshot
+  # (extracted later in phase_build_mainnet_rewards). Falling through to clone
+  # is a fallback for the rare case the bundle doesn't have the snapshot.
+  _clone_if_empty mainnet-rewards "https://github.com/functionland/mainnet-rewards.git" "$MAINNET_REWARDS_REPO" optional || true
 
   log "clone phase OK"
   mark_phase_done clone
@@ -1212,19 +1239,43 @@ EOF
 # ============================================================================
 phase_build_mainnet_rewards() {
   log_phase "17. build_mainnet_rewards"
-  if [ ! -d "$MAINNET_REWARDS_REPO" ]; then
-    log "  WARN: $MAINNET_REWARDS_REPO not present (clone phase failed?). Skipping."
-    mark_phase_done build_mainnet_rewards
-    return
+
+  # Source resolution priority (in order):
+  #  1. Bundle snapshot at services/mainnet-rewards-server/opt-mainnet-rewards.tgz
+  #     (preferred — captures exact deployed state from old server, including
+  #     any local modifications, and works without GitHub auth for the private repo)
+  #  2. Pre-existing $MAINNET_REWARDS_REPO directory (from clone or rsync)
+  #  3. Skip with warning
+  local snap="$BUNDLE_DIR/services/mainnet-rewards-server/opt-mainnet-rewards.tgz"
+  if [ -f "$snap" ]; then
+    log "  extracting /opt/mainnet-rewards snapshot from bundle"
+    install -d -m 0755 /opt/mainnet-rewards
+    tar -xzf "$snap" -C /
+    chmod 600 /opt/mainnet-rewards/.env 2>/dev/null || true
+    # Build directly from the deployed location — no separate clone+build dir
+    if [ -f /opt/mainnet-rewards/package.json ]; then
+      ( cd /opt/mainnet-rewards && npm ci && \
+        if grep -q '"build"' package.json 2>/dev/null; then npm run build; fi && \
+        npm install --omit=dev && npm rebuild ) \
+        || warn "mainnet-rewards build/install had errors — check logs"
+    else
+      warn "mainnet-rewards snapshot extracted but no package.json — service may not be runnable"
+    fi
+  elif [ -d "$MAINNET_REWARDS_REPO" ] && [ -f "$MAINNET_REWARDS_REPO/package.json" ]; then
+    log "  building from $MAINNET_REWARDS_REPO (clone or manually-provided source)"
+    ( cd "$MAINNET_REWARDS_REPO" && npm ci && \
+      if grep -q '"build"' package.json 2>/dev/null; then npm run build; fi )
+    install -d -m 0755 /opt/mainnet-rewards
+    rsync -a --delete "$MAINNET_REWARDS_REPO/dist/" /opt/mainnet-rewards/dist/ 2>/dev/null || true
+    for f in package.json package-lock.json; do
+      [ -f "$MAINNET_REWARDS_REPO/$f" ] && cp "$MAINNET_REWARDS_REPO/$f" /opt/mainnet-rewards/
+    done
+    ( cd /opt/mainnet-rewards && npm install --omit=dev && npm rebuild )
+  else
+    check_warn "no mainnet-rewards source available (no bundle snapshot, no $MAINNET_REWARDS_REPO/package.json). \
+For private repos, either re-bundle on the old server (latest migrate-zip.sh now snapshots /opt/mainnet-rewards) \
+or rsync /opt/mainnet-rewards from old server to new server, then re-run --phase=build_mainnet_rewards"
   fi
-  ( cd "$MAINNET_REWARDS_REPO" && npm ci && \
-    if grep -q '"build"' package.json 2>/dev/null; then npm run build; fi )
-  install -d -m 0755 /opt/mainnet-rewards
-  rsync -a --delete "$MAINNET_REWARDS_REPO/dist/" /opt/mainnet-rewards/dist/ 2>/dev/null || true
-  for f in package.json package-lock.json; do
-    [ -f "$MAINNET_REWARDS_REPO/$f" ] && cp "$MAINNET_REWARDS_REPO/$f" /opt/mainnet-rewards/
-  done
-  ( cd /opt/mainnet-rewards && npm install --omit=dev && npm rebuild )
   mark_phase_done build_mainnet_rewards
 }
 

@@ -564,23 +564,30 @@ phase_apply_system_state() {
   # Apple Sign-In key
   if [ -d "$BUNDLE_DIR/apple" ] && [ -n "$(ls -A "$BUNDLE_DIR/apple" 2>/dev/null)" ]; then
     install -d -m 0700 /etc/apple
-    cp -p "$BUNDLE_DIR/apple/." /etc/apple/ 2>/dev/null
+    # `-r` is REQUIRED — `cp -p source/. dest/` (without -r) exits rc=1 with
+    # "omitting directory" because cp won't descend into a directory without
+    # -r/-R. The trailing `|| true` shields set -e from any harmless cp warning.
+    cp -rp "$BUNDLE_DIR/apple/." /etc/apple/ 2>/dev/null || true
     chmod 600 /etc/apple/* 2>/dev/null || true
   fi
 
-  # Redis state + config
+  # Redis state + config — every command needs `|| true` so a missing/odd
+  # destination path doesn't kill phase_apply_system_state under set -e.
   if [ -f "$BUNDLE_DIR/redis/redis.conf" ]; then
-    cp "$BUNDLE_DIR/redis/redis.conf" /etc/redis/redis.conf
+    cp "$BUNDLE_DIR/redis/redis.conf" /etc/redis/redis.conf 2>/dev/null || \
+      check_warn "could not install redis.conf — /etc/redis may be missing or not writable"
   fi
   if [ -f "$BUNDLE_DIR/redis/dump.rdb" ]; then
     install -d -m 0750 -o redis -g redis /var/lib/redis 2>/dev/null || true
-    cp "$BUNDLE_DIR/redis/dump.rdb" /var/lib/redis/dump.rdb
+    cp "$BUNDLE_DIR/redis/dump.rdb" /var/lib/redis/dump.rdb 2>/dev/null || \
+      check_warn "could not install redis dump.rdb"
     chown redis:redis /var/lib/redis/dump.rdb 2>/dev/null || true
   fi
 
   # password.txt (if user keeps notes there)
-  [ -f "$BUNDLE_DIR/password.txt" ] && \
-    install -m 0600 "$BUNDLE_DIR/password.txt" /home/root/password.txt
+  if [ -f "$BUNDLE_DIR/password.txt" ]; then
+    install -m 0600 "$BUNDLE_DIR/password.txt" /home/root/password.txt 2>/dev/null || true
+  fi
 
   log "system state restored"
   mark_phase_done apply_system_state

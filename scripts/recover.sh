@@ -741,25 +741,69 @@ phase_docker_volumes() {
     cp -rT "$BUNDLE_DIR/kubo/keystore" "$kubo_vol/keystore"
   fi
 
-  # Translate datastore_spec: kubo writes absolute paths in the spec when the
-  # daemon was running with custom paths (e.g., Fula Box's
-  # /uniondrive/ipfs_datastore/blocks). On the new server we want kubo's
-  # IPFS_PATH to be /data/ipfs (the default in the stock image) and have the
-  # data live in the volume's mountpoint — which the user can point at any
-  # external drive via --kubo-data-host-path. Translating absolute paths to
-  # relative ("blocks", "datastore", etc.) makes that work.
+  # Translate kubo datastore paths: when the old daemon ran with custom paths
+  # (e.g., Fula Box's /uniondrive/ipfs_datastore/blocks), absolute paths get
+  # baked into BOTH files kubo reads:
+  #   1. /data/ipfs/config           — the Datastore.Spec field (FULL form,
+  #                                    with `measure` wrappers around each mount)
+  #   2. /data/ipfs/datastore_spec   — the standalone spec file (SIMPLE form;
+  #                                    kubo computes this from config by
+  #                                    stripping the measure wrappers, then
+  #                                    compares to the disk file on every start)
+  # If the two disagree, kubo refuses to start with "datastore configuration
+  # ... does not match what is on disk". We must translate paths in BOTH but
+  # preserve their distinct shapes — translating only one leaves the other as
+  # the absolute-paths source of truth.
+  #
+  # Pass 1: translate paths in $kubo_vol/config (Datastore.Spec subtree) AND
+  # rewrite Addresses.{API,Gateway} from 127.0.0.1 → 0.0.0.0. The original
+  # Fula Box config bound API to 127.0.0.1 inside the container; on this new
+  # server we run kubo in its own bridge network with `-p 127.0.0.1:5001:5001`,
+  # so the host-side mapping enforces localhost-only access externally — but
+  # inside the container, traffic arrives with a Docker-bridge source IP, so
+  # kubo MUST listen on 0.0.0.0 or it resets all incoming connections (this
+  # blocks ipfs-cluster from talking to kubo and breaks pinning entirely).
+  if [ -f "$kubo_vol/config" ]; then
+    python3 - "$kubo_vol/config" <<'PY'
+import json, sys
+config_path = sys.argv[1]
+with open(config_path) as f:
+    config = json.load(f)
+def walk(node):
+    if isinstance(node, dict):
+        if "path" in node and isinstance(node["path"], str) and node["path"].startswith("/"):
+            node["path"] = node["path"].rstrip("/").split("/")[-1]
+        for v in node.values():
+            walk(v)
+    elif isinstance(node, list):
+        for v in node:
+            walk(v)
+walk(config.get("Datastore", {}).get("Spec", {}))
+addrs = config.setdefault("Addresses", {})
+for key in ("API", "Gateway"):
+    val = addrs.get(key)
+    if isinstance(val, str):
+        addrs[key] = val.replace("/ip4/127.0.0.1/tcp/", "/ip4/0.0.0.0/tcp/")
+    elif isinstance(val, list):
+        addrs[key] = [v.replace("/ip4/127.0.0.1/tcp/", "/ip4/0.0.0.0/tcp/") if isinstance(v, str) else v for v in val]
+with open(config_path, "w") as f:
+    json.dump(config, f, indent=2)
+PY
+  fi
+
+  # Pass 2: translate paths in the bundle's standalone datastore_spec (SIMPLE
+  # form) and write to $kubo_vol/datastore_spec. We use the bundle's file
+  # (not config) as the source so the SIMPLE form is preserved verbatim — the
+  # only thing we change is absolute → relative paths.
   if [ -f "$BUNDLE_DIR/kubo/datastore_spec" ]; then
     local spec_in spec_out had_absolute
     spec_in=$(cat "$BUNDLE_DIR/kubo/datastore_spec")
     spec_out=$(python3 - "$spec_in" <<'PY'
 import json, sys
 spec = json.loads(sys.argv[1])
-had_abs = [False]
 def walk(node):
     if isinstance(node, dict):
         if "path" in node and isinstance(node["path"], str) and node["path"].startswith("/"):
-            had_abs[0] = True
-            # Take last path component as the relative form
             node["path"] = node["path"].rstrip("/").split("/")[-1]
         for v in node.values():
             walk(v)
@@ -767,39 +811,75 @@ def walk(node):
         for v in node:
             walk(v)
 walk(spec)
-sys.stderr.write("had_absolute=" + ("yes" if had_abs[0] else "no") + "\n")
 sys.stdout.write(json.dumps(spec, separators=(",", ":")))
 PY
 )
-    had_absolute=$(python3 - "$spec_in" <<'PY'
-import json, sys
-spec = json.loads(sys.argv[1])
-def has_abs(node):
-    if isinstance(node, dict):
-        if "path" in node and isinstance(node["path"], str) and node["path"].startswith("/"):
-            return True
-        return any(has_abs(v) for v in node.values())
-    if isinstance(node, list):
-        return any(has_abs(v) for v in node)
-    return False
-print("yes" if has_abs(spec) else "no")
-PY
-)
     echo "$spec_out" > "$kubo_vol/datastore_spec"
+
+    # Did the bundle have absolute paths? (For logging only — translation is
+    # idempotent so this is just informational.)
+    if grep -qE '"path"[[:space:]]*:[[:space:]]*"/' "$BUNDLE_DIR/kubo/datastore_spec"; then
+      had_absolute=yes
+    else
+      had_absolute=no
+    fi
     if [ "$had_absolute" = "yes" ]; then
-      log "  translated datastore_spec absolute paths → relative (so kubo finds data inside IPFS_PATH=/data/ipfs)"
-      log "  for this to work, the rsynced kubo data must be at: $kubo_vol/blocks/ and $kubo_vol/datastore/"
-      # Sanity check: do those dirs exist?
-      for d in blocks datastore; do
-        if [ -d "$kubo_vol/$d" ]; then
-          log "    [OK] $kubo_vol/$d present ($(du -sh "$kubo_vol/$d" 2>/dev/null | cut -f1))"
+      log "  translated kubo paths (absolute → relative) in BOTH config.Datastore.Spec and datastore_spec — kubo will read from IPFS_PATH=/data/ipfs"
+      log "  for this to work, kubo data must live at: $kubo_vol/blocks/ and $kubo_vol/datastore/"
+      local d_check
+      for d_check in blocks datastore; do
+        if [ -d "$kubo_vol/$d_check" ] && [ -n "$(ls -A "$kubo_vol/$d_check" 2>/dev/null)" ]; then
+          log "    [OK] $kubo_vol/$d_check present ($(du -sh "$kubo_vol/$d_check" 2>/dev/null | cut -f1))"
         else
-          check_warn "$kubo_vol/$d missing — kubo will start with empty $d (use BLOCKS_RSYNC or place data here)"
+          check_warn "$kubo_vol/$d_check missing or empty — kubo will start with no $d_check data (use BLOCKS_RSYNC or place data here)"
         fi
       done
     else
-      log "  datastore_spec uses relative paths (default kubo layout); installed verbatim"
+      log "  kubo paths are already relative; datastore_spec installed verbatim, config Datastore.Spec untouched"
     fi
+  fi
+
+  # Ensure kubo repo skeleton is complete. migrate-zip.sh's --include-blocks
+  # path captures the `version` file inside the data tarballs; --no-blocks
+  # bundles don't — and without it kubo refuses to open the repo. Same for
+  # the blocks/ and datastore/ dirs referenced by datastore_spec.
+  if [ ! -f "$kubo_vol/version" ]; then
+    local kubo_repo_version
+    kubo_repo_version=$(docker run --rm --entrypoint sh ipfs/kubo:release -c \
+      'export IPFS_PATH=/tmp/v && ipfs init --empty-repo >/dev/null 2>&1 && cat /tmp/v/version' \
+      2>/dev/null | tr -d '[:space:]')
+    if ! [[ "$kubo_repo_version" =~ ^[0-9]+$ ]]; then
+      fatal "kubo repo missing 'version' file and could not detect from ipfs/kubo:release image — re-bundle with blocks or use --blocks-rsync"
+    fi
+    echo "$kubo_repo_version" > "$kubo_vol/version"
+    log "  wrote kubo repo version $kubo_repo_version (derived from ipfs/kubo:release image)"
+  fi
+  local d_init
+  for d_init in blocks datastore; do
+    [ -d "$kubo_vol/$d_init" ] || { mkdir -p "$kubo_vol/$d_init"; log "  created $kubo_vol/$d_init (was missing)"; }
+  done
+
+  # Normalize ownership and mode. Kubo image runs as user 'ipfs' (UID 1000)
+  # and can't read root-owned files. Tar/rsync paths preserve old-server UIDs
+  # (usually 1000 already); cp paths above run as root and produce root-owned
+  # files. Force consistent ownership so the container can read its own repo
+  # regardless of which restore path populated the volume.
+  chown -R 1000:1000 "$kubo_vol"
+  chmod 0700 "$kubo_vol/keystore" 2>/dev/null || true
+  chmod 0600 "$kubo_vol"/keystore/* 2>/dev/null || true
+  chmod 0600 "$kubo_vol/config" 2>/dev/null || true
+
+  # Sanity-check the result so any future regression surfaces with a clear
+  # message instead of a kubo crash loop on first start.
+  local kubo_missing=()
+  [ -f "$kubo_vol/config" ]         || kubo_missing+=("config")
+  [ -f "$kubo_vol/datastore_spec" ] || kubo_missing+=("datastore_spec")
+  [ -d "$kubo_vol/keystore" ]       || kubo_missing+=("keystore/")
+  [ -f "$kubo_vol/version" ]        || kubo_missing+=("version")
+  [ -d "$kubo_vol/blocks" ]         || kubo_missing+=("blocks/")
+  [ -d "$kubo_vol/datastore" ]      || kubo_missing+=("datastore/")
+  if [ ${#kubo_missing[@]} -gt 0 ]; then
+    fatal "kubo volume incomplete after restore: missing ${kubo_missing[*]}"
   fi
 
   # Cluster data — same single-leading-dir layout
@@ -810,6 +890,19 @@ PY
     log "cluster data.tgz missing — placing identity + service.json only"
     [ -f "$BUNDLE_DIR/cluster/identity.json" ] && cp "$BUNDLE_DIR/cluster/identity.json" "$cluster_vol/"
     [ -f "$BUNDLE_DIR/cluster/service.json" ]  && cp "$BUNDLE_DIR/cluster/service.json"  "$cluster_vol/"
+  fi
+
+  # Same ownership/mode normalization as kubo — ipfs-cluster also runs as
+  # UID 1000 inside the container and can't read root-owned files.
+  chown -R 1000:1000 "$cluster_vol"
+  chmod 0600 "$cluster_vol/identity.json" 2>/dev/null || true
+  chmod 0600 "$cluster_vol/service.json"  2>/dev/null || true
+
+  local cluster_missing=()
+  [ -f "$cluster_vol/identity.json" ] || cluster_missing+=("identity.json")
+  [ -f "$cluster_vol/service.json" ]  || cluster_missing+=("service.json")
+  if [ ${#cluster_missing[@]} -gt 0 ]; then
+    fatal "cluster volume incomplete after restore: missing ${cluster_missing[*]}"
   fi
 
   log "volumes populated"
@@ -894,7 +987,7 @@ phase_docker_infra_start() {
   if [ -f "$BUNDLE_DIR/cluster/identity.json" ]; then
     local expected_cl actual_cl
     expected_cl=$(jq -r .id < "$BUNDLE_DIR/cluster/identity.json")
-    actual_cl=$(docker exec "$CLUSTER_CONTAINER" ipfs-cluster-ctl id --enc=json 2>/dev/null | jq -r .id)
+    actual_cl=$(docker exec "$CLUSTER_CONTAINER" ipfs-cluster-ctl --enc=json id 2>/dev/null | jq -r .id)
     if [ -n "$expected_cl" ] && [ "$actual_cl" != "$expected_cl" ]; then
       fatal "cluster peer ID mismatch (got $actual_cl, expected $expected_cl)"
     fi
@@ -2077,7 +2170,7 @@ _verify_ipfs() {
 _verify_cluster() {
   log "  --- ipfs-cluster ---"
   local actual_cl expected_cl
-  actual_cl=$(docker exec "$CLUSTER_CONTAINER" ipfs-cluster-ctl id --enc=json 2>/dev/null | jq -r .id 2>/dev/null || echo "")
+  actual_cl=$(docker exec "$CLUSTER_CONTAINER" ipfs-cluster-ctl --enc=json id 2>/dev/null | jq -r .id 2>/dev/null || echo "")
   if [ -z "$actual_cl" ]; then
     check_fail "could not read cluster peer ID"
     return

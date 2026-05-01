@@ -341,7 +341,11 @@ Either direction works — the data lands in the same place either way. Pull-sty
 
 ### Recipe C — defer DNS cutover, validate new server first (RECOMMENDED if you can afford the workflow)
 
-You want: new server fully running, but DNS still pointing at the old server, so you can validate end-to-end before the cutover.
+You want: new server fully running, but DNS still pointing at the old server, so you can validate end-to-end before the cutover. The old server keeps serving production traffic the entire time.
+
+> **Important: kubo peer-ID collision.** The new server uses the SAME kubo peer ID as the old server (we restored the identity from the bundle). With both running concurrently, libp2p sees two nodes claiming the same identity → DHT routing gets poisoned, bitswap fetches across the colliding identity become unreliable, and IPNS publishing from both nodes will produce conflicting records. The script auto-detects this and engages **parallel-run mode** to skip operations that depend on a clean network state. After you cut over and stop the old server's kubo+cluster, run `--finalize-cutover` to activate the deferred operations.
+
+#### C.1 — initial recovery (old server still running)
 
 ```bash
 sudo bash /opt/pinning-service/scripts/recover.sh \
@@ -354,15 +358,38 @@ sudo bash /opt/pinning-service/scripts/recover.sh \
     --kubo-data-host-path /mnt/ipfs-data    # if applicable
 ```
 
+What you'll see in `phase_docker_infra_start`:
+```
+[…]   checking DHT for peer-ID collision (parallel-run safety)...
+[…]   WARN: another node is currently announcing the same kubo peer ID on the DHT:
+        /dns4/1.pools.functionyard.fula.network/tcp/4001/p2p/12D3KooW...
+[…]   Auto-enabling parallel-run mode. Phase 10 (IPNS verify) will be skipped, and
+[…]   IPNS publish + DB backup crons will be staged in /var/lib/fula-recovery/deferred-cron/
+[…]   rather than installed to /etc/cron.d/...
+```
+
+This is normal and expected. Recovery continues — postgres restore, container starts, fula-api builds, nginx, etc. all run; only the network-dependent steps (IPNS verify, IPNS publishing crons) are deferred.
+
+If you want to be explicit instead of relying on auto-detection, add `--parallel-run` to the flags above.
+
 `--defer-dns` skips the DNS-cutover pause and the certbot issuance phase. The new server comes up using the certs restored from `/etc/letsencrypt` in the bundle, valid until their original expiry.
 
-**Validate via /etc/hosts on a laptop** — see Section 4 below.
+#### C.2 — validate via /etc/hosts on a laptop
 
-When you're satisfied:
+See Section 4 below.
+
+#### C.3 — cut over and finalize
+
+After validation, cut over DNS, then stop the old server's kubo+cluster (the rest of its services can stay up briefly for a clean handoff, but its kubo+cluster MUST be off so the peer-ID is truly only ours):
 
 ```bash
-# Update DNS records at your registrar.
-# Then on the new server:
+# On OLD server:
+sudo docker stop ipfs_host ipfs_cluster
+```
+
+Then on the NEW server, re-run with `--phase=certs` to issue / confirm certs now that DNS points here:
+
+```bash
 sudo bash /opt/pinning-service/scripts/recover.sh \
     --bundle /tmp2/fula-migration-<ts>.tgz \
     --backup-key <hex> \
@@ -371,7 +398,21 @@ sudo bash /opt/pinning-service/scripts/recover.sh \
     # NOTE: omit --defer-dns this time
 ```
 
-This re-runs only `phase_certs`, which now finds DNS pointing here and either confirms existing certs (if they're still valid) or issues fresh ones.
+Then activate the deferred network-dependent operations:
+
+```bash
+sudo bash /opt/pinning-service/scripts/recover.sh \
+    --finalize-cutover \
+    --bundle /tmp2/fula-migration-<ts>.tgz \
+    --backup-key <hex> \
+    --db-ipns ... --registry-ipns ... --ssl-email hi@fx.land
+```
+
+`--finalize-cutover` will:
+1. Re-check the DHT for the peer-ID collision. Refuses to proceed if the old node is still announcing (override with `FORCE_FINALIZE=true bash …` if you've confirmed the old kubo is genuinely off and DHT records are just lagging).
+2. Move staged crons from `/var/lib/fula-recovery/deferred-cron/` → `/etc/cron.d/`. Cron picks up the files automatically; the registry IPNS publish runs on the next 10-minute boundary, the DB backup runs at 03:00 UTC.
+3. Run `phase_verify_ipns_path` for real (now that bitswap can reliably fetch the manifest CID).
+4. Re-run `phase_post_verify` for a fresh end-state report.
 
 ### Recipe D — rsync'd blocks (very large datasets)
 
@@ -527,10 +568,17 @@ What this does:
 - **Database**: drops + restores from bundled `pinning-fresh.dump`; runs any new migrations idempotently
 - **Builds**: pinning-service Go binary (main_postgres.go), ipfs-server, pinning-webui, x402-skale, fula-ai-service, mainnet-rewards-server, mainnet-pool-server (from `/opt/mainnet` snapshot in bundle), libp2p-service
 - **Kubo data**: extracts `kubo/data-*.tgz` from bundle into `/mnt/ipfs-data/{blocks,datastore}/` if you used Option 1 (no `--no-blocks`); detects your already-rsynced data if you used Option 2
-- **`datastore_spec` translation**: rewrites absolute paths (`/uniondrive/ipfs_datastore/blocks` → `blocks`) so the new kubo finds data at `/data/ipfs/blocks` inside the container = `/mnt/ipfs-data/blocks` on host
+- **`datastore_spec` + `config` translation**: rewrites absolute paths (`/uniondrive/ipfs_datastore/blocks` → `blocks`) in BOTH the datastore_spec file AND the config's `Datastore.Spec` subtree so kubo finds data at `/data/ipfs/blocks` inside the container = `/mnt/ipfs-data/blocks` on host. Also rewrites `Addresses.API` from `127.0.0.1` to `0.0.0.0` inside the container so ipfs-cluster (running on host network) can reach kubo's API through the Docker port mapping.
+- **Ownership normalization**: forces all kubo + cluster volume contents to UID 1000 (the in-container `ipfs` user) regardless of which restore path populated them.
+- **Parallel-run mode auto-detection**: kubo asks the DHT for its own peer ID after starting; if any non-local addresses come back, it concludes the OLD server is still announcing the same identity, sets `PARALLEL_RUN_MODE=true`, skips `phase_verify_ipns_path`, and stages IPNS-publish + DB-backup crons in `/var/lib/fula-recovery/deferred-cron/` instead of installing them to `/etc/cron.d/`. After cutover you'll run `--finalize-cutover` to activate them — see step 11 below. Add `--parallel-run` to the flags above to force this mode without waiting for detection.
 - **`--defer-dns`**: skips the DNS-cutover pause and certbot phase. The new server comes up using the certs restored from `/etc/letsencrypt` in the bundle (still valid for weeks). You'll switch DNS in step 9.
 
-Watch the output for any FAIL lines. WARNs are usually fine; investigate FAILs.
+Watch the output for any FAIL lines. WARNs are usually fine; investigate FAILs. The parallel-run auto-detection log line is normal:
+```
+[…]   WARN: another node is currently announcing the same kubo peer ID on the DHT:
+        /dns4/1.pools.functionyard.fula.network/tcp/4001/p2p/12D3KooW...
+[…]   Auto-enabling parallel-run mode...
+```
 
 #### Step 8 — On NEW server: validate before DNS cutover
 
@@ -605,6 +653,36 @@ sudo bash /opt/pinning-service/scripts/recover.sh \
 This re-runs only `phase_certs`. For each domain whose DNS now points at the new server, certbot either confirms the existing cert (still valid from the bundle) or issues a new one. Domains where DNS hasn't propagated yet warn-skip — re-run after they propagate.
 
 After this, certbot's daily renew cron handles long-term renewal automatically.
+
+#### Step 10.5 — On OLD server: stop kubo+cluster, then on NEW server: finalize cutover
+
+The new server has been running with parallel-run mode (auto-detected in step 7). Two things are deferred until the OLD server's kubo peer ID stops announcing on the DHT:
+- IPNS publishing crons (registry republish + nightly DB backup) — staged in `/var/lib/fula-recovery/deferred-cron/`
+- `phase_verify_ipns_path` (the IPNS-only DR validation) — skipped
+
+Now that DNS is cut over, retire the OLD server's kubo identity:
+
+```bash
+# On OLD server:
+sudo docker stop ipfs_host ipfs_cluster
+# Other services (fula-api, nginx, etc.) on the OLD server can stay up briefly for a
+# clean handoff, but kubo+cluster MUST be off so the peer ID is exclusively ours.
+
+# On NEW server:
+sudo bash /opt/pinning-service/scripts/recover.sh \
+    --finalize-cutover \
+    --bundle /tmp2/fula-migration-<ts>.tgz \
+    --backup-key <hex> \
+    --db-ipns       k51qzi5uqu5dmguoei6kc4qdrnnawmvew4o8x5fzzg5346x4nii9qis3lpiub9 \
+    --registry-ipns k51qzi5uqu5dle8iqcdd8snk2xedugpt7kjh5bu3fip639pjoqrd2cwa5vu96q \
+    --ssl-email     hi@fx.land
+```
+
+This will:
+1. Re-check the DHT for the peer-ID collision. **If still active**, refuses to proceed (DHT records may still be propagating from the old node — wait 5-10 min and retry, or override with `FORCE_FINALIZE=true bash …` if you've confirmed the old kubo is truly off).
+2. Move staged crons from `/var/lib/fula-recovery/deferred-cron/` → `/etc/cron.d/`. Cron picks them up automatically.
+3. Run `phase_verify_ipns_path` for real (with a 5-minute fetch timeout, configurable via `IPNS_FETCH_TIMEOUT`). This validates the disaster-recovery path: fetches the encrypted manifest CID from IPNS, decrypts it, fetches the dump CID, decrypts and restores into a temporary database, schema-diffs vs. the fresh dump from phase 9, and reports row-count deltas.
+4. Re-run `phase_post_verify` for a fresh end-state report.
 
 #### Step 11 — On NEW server: full health verification
 
@@ -759,6 +837,29 @@ This now runs without `--defer-dns`. For each domain, it:
 4. If DNS still doesn't point here for any domain: warns and skips that one.
 
 The certbot daily-renew cron handles long-term renewal automatically from this point on.
+
+### 5.2.5 Stop the OLD server's kubo+cluster, then finalize the cutover (Recipe C only)
+
+If you used Recipe C (parallel-run validation), the new server has been running with deferred IPNS publishing crons and a skipped IPNS-verify phase to avoid fighting the old server over the shared kubo peer ID. Now is the time to retire the old kubo and activate those.
+
+```bash
+# On OLD server:
+sudo docker stop ipfs_host ipfs_cluster
+# (other services on the old server can stay up if you want a brief overlap, but kubo+cluster MUST stop)
+
+# On NEW server:
+sudo bash /opt/pinning-service/scripts/recover.sh \
+    --finalize-cutover \
+    --bundle /tmp2/fula-migration-<ts>.tgz \
+    --backup-key <hex> \
+    --db-ipns ... --registry-ipns ... --ssl-email hi@fx.land
+```
+
+This re-checks the DHT for the peer-ID collision (will refuse to proceed if still active — override with `FORCE_FINALIZE=true bash …` only if you've confirmed the old kubo is genuinely off and DHT records are still propagating), moves the staged crons into `/etc/cron.d/`, runs `phase_verify_ipns_path` for real, and produces a final post-verify report.
+
+After successful `--finalize-cutover`:
+- `tail /var/log/fula-registry-ipns.log` — should grow on every 10-minute boundary
+- `tail /var/log/fula-db-backup.log` — should grow at next 03:00 UTC
 
 ### 5.3 Final verification
 
@@ -925,6 +1026,8 @@ Visibility around the kubo blocks step shows expected duration, monitoring comma
 | `--mainnet-pool-repo URL` | No | Fallback if the bundle's `/opt/mainnet` snapshot is missing. Clones the URL into `/opt/mainnet`. |
 | `--prewarm-cluster` | No | After services start, walk `pins` table in Postgres and POST every "pinned" CID to ipfs-cluster's `/pins/<cid>` API. Useful only if cluster CRDT state was NOT preserved (otherwise no-op). |
 | `--skip-ipns-verify` | No | Skip `phase_verify_ipns_path` (the diagnostic that exercises the IPNS-only recovery path against a temp DB). Use if your test environment has no DHT connectivity. |
+| `--parallel-run` | No | Use when the OLD server is still running (Recipe C-style validation). The script normally auto-detects this in `phase_docker_infra_start` by checking the DHT for the bundled kubo peer ID; pass this flag to force the mode without waiting for detection. In parallel-run mode: (1) `phase_verify_ipns_path` is skipped (bitswap fetches across the colliding peer ID are unreliable), (2) the registry-IPNS and DB-backup crons are **staged** in `/var/lib/fula-recovery/deferred-cron/` instead of installed to `/etc/cron.d/`, so the new server doesn't fight the old server for IPNS publishing rights. All other phases run normally so you can validate the full deployment. After cutover, run `--finalize-cutover` to activate the staged items. |
+| `--finalize-cutover` | No | Run AFTER you've stopped kubo+cluster on the old server. Re-checks the DHT for collision (refuses to proceed if still active — override with `FORCE_FINALIZE=true`), moves staged crons from `/var/lib/fula-recovery/deferred-cron/` to `/etc/cron.d/`, and runs `phase_verify_ipns_path` for real. Use this with the same `--bundle`, `--backup-key`, `--db-ipns`, `--registry-ipns`, `--ssl-email` flags as the original recovery (no `--defer-dns` needed at this point). |
 | `--blocks-rsync HOST_PATH` | No | If you rsync'd `/home/root/ipfs_data` to the new server separately (e.g. because you used `--no-blocks` on the bundle), point this at the rsync destination. The kubo volume becomes a bind-mount to that path; no extraction from tarball. |
 | `--kubo-data-host-path PATH` | No | Bind the `ipfs_host_data` docker volume to a host path (typically an external drive mount like `/mnt/ipfs-data`). Path must exist and be writable BEFORE running. NFS/CIFS warnings (kubo locks don't work over them). |
 | `--cluster-data-host-path PATH` | No | Same as above but for `ipfs_cluster_data`. CRDT state is small (tens of MB), rarely worth externalizing. |
@@ -1109,6 +1212,20 @@ If empty or missing files, re-run phase 6: `--phase=docker_volumes`. Confirm the
 
 ### `phase_resolve_registry_cid` warns "registry IPNS resolve failed"
 DHT bootstrap is slow on a fresh node. Wait 5-10 minutes, then re-run: `--phase=resolve_registry_cid`. If it still fails after an hour, check `docker exec ipfs_host ipfs swarm peers | wc -l` — should be ≥ 10. If 0, kubo can't reach the public DHT (firewall on 4001? container running but `--network` wrong?).
+
+### `phase_verify_ipns_path` hangs at "manifest CID: …" forever
+You're almost certainly running with the OLD server still up. The new server has the same kubo peer ID as the old one (we restored the identity from the bundle), and libp2p can't tell them apart on the DHT — bitswap fetches across the colliding peer ID get routed to the wrong node and stall.
+
+The script (since the parallel-run fix) auto-detects this in `phase_docker_infra_start` and skips phase 10 with a clear log message. If you're seeing the hang, you're either (a) running an older version of `recover.sh` (pull latest), (b) the DHT findpeer probe didn't see the old node yet at the time of check (race), or (c) you're explicitly requesting verify with the old server up. To unstick:
+
+```bash
+# Ctrl-C the script, then:
+sudo touch /var/lib/fula-recovery/state/verify_ipns_path.done   # mark phase 10 done so re-run skips it
+# Re-run with --skip-ipns-verify (or --parallel-run, which auto-defers other things too):
+sudo bash recover.sh --bundle ... --backup-key ... --db-ipns ... --registry-ipns ... --ssl-email ... --defer-dns --parallel-run
+```
+
+After cutover (old kubo+cluster stopped), run `--finalize-cutover` to validate the IPNS path properly. The script also has a 5-minute hard timeout on the `ipfs cat` calls in phase 10 (configurable via `IPNS_FETCH_TIMEOUT`), so it can't hang indefinitely on newer versions.
 
 ### `phase_certs` says "DNS still points elsewhere"
 Expected if you used `--defer-dns` or you're running with DNS not yet cutover. Update DNS, wait for propagation, re-run `--phase=certs`. To force certbot anyway (NOT RECOMMENDED, will fail at validation): you'd need to run certbot manually with `--manual` or DNS-01 challenge.

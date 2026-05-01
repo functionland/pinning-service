@@ -51,6 +51,9 @@ SSL_EMAIL="hi@fx.land"
 MAINNET_POOL_REPO=""
 PREWARM_CLUSTER=false
 SKIP_IPNS_VERIFY=false
+PARALLEL_RUN_MODE=false        # set via --parallel-run OR auto-detected in phase 8 if peer-ID collision present
+FINALIZE_CUTOVER=false         # set via --finalize-cutover; activates deferred items after old server stops
+DEFERRED_CRON_DIR="/var/lib/fula-recovery/deferred-cron"
 BLOCKS_RSYNC=""
 KUBO_DATA_HOST_PATH=""
 CLUSTER_DATA_HOST_PATH=""
@@ -263,6 +266,8 @@ while [[ $# -gt 0 ]]; do
     --mainnet-pool-repo)   MAINNET_POOL_REPO="$2"; shift 2 ;;
     --prewarm-cluster)     PREWARM_CLUSTER=true; shift ;;
     --skip-ipns-verify)    SKIP_IPNS_VERIFY=true; shift ;;
+    --parallel-run)        PARALLEL_RUN_MODE=true; SKIP_IPNS_VERIFY=true; shift ;;
+    --finalize-cutover)    FINALIZE_CUTOVER=true; shift ;;
     --blocks-rsync)        BLOCKS_RSYNC="$2"; shift 2 ;;
     --kubo-data-host-path) KUBO_DATA_HOST_PATH="$2"; shift 2 ;;
     --cluster-data-host-path) CLUSTER_DATA_HOST_PATH="$2"; shift 2 ;;
@@ -974,6 +979,49 @@ phase_docker_infra_start() {
     log "  both IPNS keys present and matching"
   fi
 
+  # Detect peer-ID collision: another node currently announcing this peer ID
+  # on the public DHT. This is normal during a parallel-run validation window
+  # (old server still up, new server being verified). It's NOT normal in
+  # actual disaster recovery (old server gone). We detect it by asking the
+  # DHT for our own peer ID and checking whether the addresses returned
+  # include any we are NOT listening on locally — those would be the other
+  # node's announce addresses.
+  #
+  # When detected, we set PEER_ID_COLLISION_DETECTED=true so later phases
+  # know to skip operations that depend on a clean libp2p/DHT state (notably
+  # phase 10 IPNS verify, the cron-driven IPNS publishes, and any external
+  # bitswap fetches). This keeps the rest of the recovery progressing instead
+  # of hanging on bitswap timeouts.
+  if [ -n "$actual" ]; then
+    log "  checking DHT for peer-ID collision (parallel-run safety)..."
+    local local_addrs other_addrs found_addrs
+    local_addrs=$(docker exec "$IPFS_CONTAINER" ipfs id --format='<addrs>' 2>/dev/null | tr ',' '\n' | sort -u)
+    # findpeer asks the DHT "where is peer X?" — returns multiaddrs from
+    # whichever provider records are in the DHT.
+    found_addrs=$(timeout 30 docker exec "$IPFS_CONTAINER" ipfs routing findpeer "$actual" 2>/dev/null | sort -u || true)
+    if [ -n "$found_addrs" ]; then
+      other_addrs=$(comm -23 <(echo "$found_addrs") <(echo "$local_addrs") | grep -E '^/(dns|ip4|ip6)' || true)
+      if [ -n "$other_addrs" ]; then
+        PARALLEL_RUN_MODE=true
+        SKIP_IPNS_VERIFY=true
+        log "  WARN: another node is currently announcing the same kubo peer ID on the DHT:"
+        echo "$other_addrs" | sed 's/^/    /' | tee -a "$LOG_FILE"
+        log "  Auto-enabling parallel-run mode. Phase 10 (IPNS verify) will be skipped, and"
+        log "  IPNS publish + DB backup crons will be staged in $DEFERRED_CRON_DIR rather"
+        log "  than installed to /etc/cron.d/. Bitswap fetches across the colliding peer ID"
+        log "  are unreliable until the old node stops."
+        log "  When you've cut over and the old server's kubo is OFF, run:"
+        log "    sudo bash $0 --finalize-cutover --bundle <bundle> --backup-key \"\$KEY\" \\"
+        log "      --db-ipns <id> --registry-ipns <id> --ssl-email <email>"
+        log "  …to activate the staged crons and run phase 10 verification."
+      else
+        log "  no peer-ID collision (DHT returned only this node's addresses)"
+      fi
+    else
+      log "  DHT findpeer returned nothing yet (DHT bootstrap may still be in progress; collision check inconclusive)"
+    fi
+  fi
+
   # ipfs-cluster
   if ! docker ps --format '{{.Names}}' | grep -q "^${CLUSTER_CONTAINER}$"; then
     docker rm -f "$CLUSTER_CONTAINER" >/dev/null 2>&1 || true
@@ -1112,6 +1160,13 @@ If you intend to wipe and re-restore, re-run with --force-wipe."
 # ============================================================================
 phase_verify_ipns_path() {
   log_phase "10. verify_ipns_path — exercise IPNS-only recovery against production"
+  if $PARALLEL_RUN_MODE; then
+    log "  skipped: parallel-run mode active (kubo peer-ID collision with old server makes"
+    log "  bitswap fetches across the colliding identity unreliable). Re-run with"
+    log "  --finalize-cutover after old server's kubo is stopped to validate the IPNS path."
+    mark_phase_done verify_ipns_path
+    return
+  fi
   if $SKIP_IPNS_VERIFY; then
     log "  skipped per --skip-ipns-verify"
     mark_phase_done verify_ipns_path
@@ -1139,21 +1194,40 @@ phase_verify_ipns_path() {
   manifest_cid="${resolved#/ipfs/}"
   log "  manifest CID: $manifest_cid"
 
-  # Decrypt manifest
+  # Decrypt manifest. Wrap `ipfs cat` in a host-side `timeout` so a
+  # network-level fetch hang (CID not provided by any reachable peer) can't
+  # block the recovery script forever — phase 10 is diagnostic-only and must
+  # never gate progress to phase 11+.
   local mfile=/tmp/ipns-manifest.json
-  docker exec "$IPFS_CONTAINER" ipfs cat "$manifest_cid" 2>/dev/null | \
-    BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 \
-      -pass env:BACKUP_ENCRYPTION_KEY > "$mfile" 2>/dev/null \
-    || { log "  WARN: manifest decrypt failed — IPNS path broken or wrong --backup-key"; mark_phase_done verify_ipns_path; return; }
+  local ipns_fetch_timeout="${IPNS_FETCH_TIMEOUT:-300}"
+  if ! timeout "$ipns_fetch_timeout" docker exec "$IPFS_CONTAINER" ipfs cat "$manifest_cid" 2>/dev/null | \
+      BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 \
+        -pass env:BACKUP_ENCRYPTION_KEY > "$mfile" 2>/dev/null; then
+    log "  WARN: manifest fetch/decrypt failed (timeout=${ipns_fetch_timeout}s) — IPNS path verification skipped (production unaffected)"
+    rm -f "$mfile"
+    mark_phase_done verify_ipns_path
+    return
+  fi
+  if ! [ -s "$mfile" ]; then
+    log "  WARN: manifest empty after fetch — provider not advertising or wrong key; IPNS path verification skipped"
+    rm -f "$mfile"
+    mark_phase_done verify_ipns_path
+    return
+  fi
 
   local dump_cid
   dump_cid=$(jq -r .dump_cid < "$mfile" 2>/dev/null)
   [ -n "$dump_cid" ] && [ "$dump_cid" != "null" ] || { log "  WARN: dump_cid missing in manifest"; rm -f "$mfile"; mark_phase_done verify_ipns_path; return; }
 
-  log "  fetching + decrypting dump $dump_cid"
-  docker exec "$IPFS_CONTAINER" ipfs cat "$dump_cid" 2>/dev/null | \
-    BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 \
-      -pass env:BACKUP_ENCRYPTION_KEY > "$tmpdump"
+  log "  fetching + decrypting dump $dump_cid (timeout=${ipns_fetch_timeout}s)"
+  if ! timeout "$ipns_fetch_timeout" docker exec "$IPFS_CONTAINER" ipfs cat "$dump_cid" 2>/dev/null | \
+      BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 600000 \
+        -pass env:BACKUP_ENCRYPTION_KEY > "$tmpdump"; then
+    log "  WARN: dump fetch/decrypt failed (timeout=${ipns_fetch_timeout}s) — IPNS path verification skipped (production unaffected)"
+    rm -f "$mfile" "$tmpdump"
+    mark_phase_done verify_ipns_path
+    return
+  fi
 
   docker exec -i "$PG_CONTAINER" psql -U "$pg_user" -d postgres -c \
     "DROP DATABASE IF EXISTS $tmpdb; CREATE DATABASE $tmpdb OWNER \"$pg_user\";" >/dev/null
@@ -1346,11 +1420,21 @@ phase_install_fula_api() {
       "$img"
   fi
 
-  # Cron: republish registry CID every 10 minutes
-  cat > /etc/cron.d/fula-registry-ipns <<'EOF'
-*/10 * * * * root /opt/fula-api/publish-registry-ipns.sh >> /var/log/fula-registry-ipns.log 2>&1
-EOF
-  chmod 644 /etc/cron.d/fula-registry-ipns
+  # Cron: republish registry CID every 10 minutes. In parallel-run mode the
+  # old server is still publishing its view of the registry IPNS — having two
+  # nodes publish to the same IPNS key would cause readers to oscillate
+  # between the two records. Stage the cron file in $DEFERRED_CRON_DIR so
+  # --finalize-cutover can activate it after the old node stops.
+  local registry_cron_body='*/10 * * * * root /opt/fula-api/publish-registry-ipns.sh >> /var/log/fula-registry-ipns.log 2>&1'
+  if $PARALLEL_RUN_MODE; then
+    install -d -m 0755 "$DEFERRED_CRON_DIR"
+    echo "$registry_cron_body" > "$DEFERRED_CRON_DIR/fula-registry-ipns"
+    chmod 644 "$DEFERRED_CRON_DIR/fula-registry-ipns"
+    log "  parallel-run: staged registry-ipns cron in $DEFERRED_CRON_DIR (NOT installed to /etc/cron.d/ yet)"
+  else
+    echo "$registry_cron_body" > /etc/cron.d/fula-registry-ipns
+    chmod 644 /etc/cron.d/fula-registry-ipns
+  fi
 
   log "fula-api gateway up"
   mark_phase_done install_fula_api
@@ -1621,21 +1705,40 @@ PY
 # ============================================================================
 phase_apply_cron() {
   log_phase "22. apply_cron"
+
+  # In parallel-run mode, stage cron files in $DEFERRED_CRON_DIR instead of
+  # installing them. Reason: the db-backup cron publishes encrypted backups
+  # to fula-db-backup IPNS — having two nodes publishing to the same key
+  # creates conflicting IPNS records and corrupts the disaster-recovery path.
+  # The bundle's own cron.d files (if any) likely have similar concerns.
+  local cron_target
+  if $PARALLEL_RUN_MODE; then
+    install -d -m 0755 "$DEFERRED_CRON_DIR"
+    cron_target="$DEFERRED_CRON_DIR"
+  else
+    cron_target="/etc/cron.d"
+  fi
+
   if [ -d "$BUNDLE_DIR/cron/cron.d" ]; then
     for f in "$BUNDLE_DIR/cron/cron.d"/*; do
       [ -f "$f" ] || continue
-      cp "$f" "/etc/cron.d/$(basename "$f")"
-      chmod 644 "/etc/cron.d/$(basename "$f")"
+      cp "$f" "$cron_target/$(basename "$f")"
+      chmod 644 "$cron_target/$(basename "$f")"
     done
   fi
 
   # Belt and suspenders: ensure backup-db cron exists (per plan §postinstall)
-  cat > /etc/cron.d/fula-db-backup <<'EOF'
+  cat > "$cron_target/fula-db-backup" <<'EOF'
 0 3 * * * root . /root/.fula-backup-key && /opt/pinning-service/scripts/backup-db.sh >> /var/log/fula-db-backup.log 2>&1
 EOF
-  chmod 644 /etc/cron.d/fula-db-backup
+  chmod 644 "$cron_target/fula-db-backup"
 
-  log "  cron applied"
+  if $PARALLEL_RUN_MODE; then
+    log "  parallel-run: staged crons in $DEFERRED_CRON_DIR (NOT installed to /etc/cron.d/ yet)"
+    log "  Run with --finalize-cutover after old server's kubo+cluster are stopped to activate."
+  else
+    log "  cron applied"
+  fi
   mark_phase_done apply_cron
 }
 
@@ -2615,6 +2718,73 @@ run_phase() {
   rm -f "$STATE_DIR/${p}.done"
   "$fn"
 }
+
+if $FINALIZE_CUTOVER; then
+  log_phase "FINALIZE-CUTOVER — re-validate collision is gone, activate deferred crons, run IPNS verify"
+
+  # Sanity: kubo must be up locally
+  docker exec "$IPFS_CONTAINER" ipfs id >/dev/null 2>&1 \
+    || fatal "kubo container ($IPFS_CONTAINER) is not running — start it before --finalize-cutover"
+
+  # Re-check the DHT for collision. If the old server's kubo is truly off, we
+  # should see only our local addresses returned (or nothing at all if the DHT
+  # hasn't propagated our announce yet).
+  local actual local_addrs found_addrs other_addrs
+  actual=$(docker exec "$IPFS_CONTAINER" ipfs id --format='<id>' 2>/dev/null)
+  local_addrs=$(docker exec "$IPFS_CONTAINER" ipfs id --format='<addrs>' 2>/dev/null | tr ',' '\n' | sort -u)
+  log "  re-checking DHT for peer-ID collision..."
+  found_addrs=$(timeout 30 docker exec "$IPFS_CONTAINER" ipfs routing findpeer "$actual" 2>/dev/null | sort -u || true)
+  if [ -n "$found_addrs" ]; then
+    other_addrs=$(comm -23 <(echo "$found_addrs") <(echo "$local_addrs") | grep -E '^/(dns|ip4|ip6)' || true)
+    if [ -n "$other_addrs" ]; then
+      log "  WARN: collision still detected. Other addresses for peer ID $actual:"
+      echo "$other_addrs" | sed 's/^/    /' | tee -a "$LOG_FILE"
+      log "  The old server may not have stopped its kubo cleanly, or DHT records are still propagating."
+      log "  You can force activation anyway with FORCE_FINALIZE=true bash $0 --finalize-cutover ..."
+      [ "${FORCE_FINALIZE:-false}" = "true" ] || fatal "refusing to finalize while collision is still active (set FORCE_FINALIZE=true to override)"
+      log "  FORCE_FINALIZE=true — proceeding despite still-active collision"
+    else
+      log "  collision cleared — DHT returns only this node's addresses"
+    fi
+  else
+    log "  DHT findpeer empty — fresh routing state; assuming collision cleared"
+  fi
+
+  # Activate any staged crons
+  if [ -d "$DEFERRED_CRON_DIR" ] && [ -n "$(ls -A "$DEFERRED_CRON_DIR" 2>/dev/null)" ]; then
+    log "  activating staged crons from $DEFERRED_CRON_DIR → /etc/cron.d/"
+    for f in "$DEFERRED_CRON_DIR"/*; do
+      [ -f "$f" ] || continue
+      cp "$f" "/etc/cron.d/$(basename "$f")"
+      chmod 644 "/etc/cron.d/$(basename "$f")"
+      log "    activated: $(basename "$f")"
+    done
+    rm -rf "$DEFERRED_CRON_DIR"
+  else
+    log "  no staged crons to activate (already activated, or recovery wasn't run in parallel-run mode)"
+  fi
+
+  # Run phase 10 fresh (forcibly disable parallel-run gating)
+  PARALLEL_RUN_MODE=false
+  SKIP_IPNS_VERIFY=false
+  rm -f "$STATE_DIR/verify_ipns_path.done"
+  phase_verify_ipns_path
+
+  # Re-run post_verify for a fresh end-state report
+  rm -f "$STATE_DIR/post_verify.done"
+  phase_post_verify
+
+  if [ "$FAIL_COUNT" -gt 0 ]; then
+    print_summary "FINALIZE COMPLETED WITH FAILURES"
+    exit 2
+  elif [ "$WARN_COUNT" -gt 0 ]; then
+    print_summary "FINALIZE OK with warnings"
+    exit 0
+  else
+    print_summary "FINALIZE ALL GREEN"
+    exit 0
+  fi
+fi
 
 if [ -n "$SINGLE_PHASE" ]; then
   run_phase "$SINGLE_PHASE" true

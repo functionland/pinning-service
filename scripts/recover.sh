@@ -557,9 +557,25 @@ phase_apply_system_state() {
     fi
   fi
 
-  # sysctl + ulimits
+  # sysctl + ulimits.
+  #
+  # Files in /etc/sysctl.d/ are processed in alphabetical order, last write
+  # wins. If the operator runs hardening (e.g. /etc/sysctl.d/99-hardening.conf
+  # disabling IPv6, locking BPF, anti-spoof, etc.) BEFORE recovery, naively
+  # copying the bundle's sysctl files with their original names risks
+  # introducing a `99-something.conf` file from the OLD server that overrides
+  # the operator's hardening. Prefix every bundle file with `60-fula-bundle-`
+  # so they ALWAYS apply earlier in the alphabetical order than `99-*.conf`
+  # hardening files; if the operator has both, hardening wins last-write.
+  # This preserves the IPFS-tuning intent of the bundle (TCP buffers, fd
+  # limits, etc.) while letting hardening override security-sensitive knobs.
   if [ -d "$BUNDLE_DIR/sysctl/sysctl.d" ]; then
-    cp -r "$BUNDLE_DIR/sysctl/sysctl.d/." /etc/sysctl.d/ 2>/dev/null || true
+    local f base
+    for f in "$BUNDLE_DIR"/sysctl/sysctl.d/*.conf; do
+      [ -f "$f" ] || continue
+      base=$(basename "$f")
+      cp "$f" "/etc/sysctl.d/60-fula-bundle-${base}" 2>/dev/null || true
+    done
     sysctl --system >/dev/null 2>&1 || true
   fi
   if [ -d "$BUNDLE_DIR/sysctl/limits.d" ]; then
@@ -1751,9 +1767,26 @@ phase_apply_ufw() {
   # ----------------------------------------------------------------------------
   # Part A: inbound rules (what the world can reach on this server)
   # ----------------------------------------------------------------------------
+  # SSH (port 22) handling differs from the application ports:
+  #   - The application ports below MUST be reachable from the public internet
+  #     (HTTP/HTTPS for users, 4001 for IPFS swarm peers, 9096 for cluster
+  #     swarm peers). They're public services by design.
+  #   - SSH should NOT be widened if the operator has already restricted it to
+  #     specific source networks (LAN / WireGuard / bastion). Some hardening
+  #     setups (e.g. a `harden.sh` run before recovery) configure SSH as
+  #     "allow from <LAN-CIDR> only" — adding `ufw allow 22/tcp` here without
+  #     a source spec would silently widen SSH to the public internet, voiding
+  #     that restriction. Detect any pre-existing SSH allow rule (regardless
+  #     of source) and skip the broad add when one is present; only add the
+  #     fallback wide-open rule on a server with no SSH rule at all.
+  if ufw status 2>/dev/null | grep -E '^22(/tcp)?\b' | grep -q 'ALLOW'; then
+    log "  preserving existing SSH ufw rule(s) — not adding broad 'ufw allow 22/tcp'"
+    log "  (SSH access is governed by whatever rules were in place before phase_apply_ufw ran)"
+  else
+    ufw allow 22/tcp  comment 'recover.sh: SSH'                 || true
+  fi
   # Public services — accept from anywhere (internet + LAN). Replies use
   # conntrack so they're never blocked by Part B's outbound rules.
-  ufw allow 22/tcp    comment 'recover.sh: SSH'                 || true
   ufw allow 80/tcp    comment 'recover.sh: HTTP'                || true
   ufw allow 443/tcp   comment 'recover.sh: HTTPS'               || true
   ufw allow 4001/tcp  comment 'recover.sh: IPFS swarm'          || true

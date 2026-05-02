@@ -49,6 +49,9 @@ Before touching either server, gather:
       Bundle size will be roughly `kubo_blocks_size + 200MB` if you include blocks, or `~500MB` if you skip them and rsync separately.
 - [ ] **(Optional) External drive** — if pins exceed your main SSD, decide where to mount on the new server (typical: `/mnt/ipfs-data`). Format and mount BEFORE running recover.sh.
 - [ ] **DNS plan** — same hostnames (DNS A-record swap, recommended) or new hostnames (requires re-issuing OAuth client redirect URIs and TLS certs).
+- [ ] **(Optional) Server hardening** — if you plan to run a hardening script (custom `harden.sh`, ansible playbook, etc.) that locks down SSH to specific source networks (LAN-only, WireGuard-only, bastion-only) or writes restrictive sysctl files (e.g., `/etc/sysctl.d/99-hardening.conf`), run it **before** `recover.sh`. Two interactions to be aware of:
+    1. **SSH source restriction is preserved.** `phase_apply_ufw` detects pre-existing `ufw` allow rules for port 22 and skips adding the broad `ufw allow 22/tcp` (which would otherwise widen SSH to the public internet). Application ports (80, 443, 4001, 9096) are still opened to anywhere because they're public services by design.
+    2. **Sysctl files from the bundle get a `60-fula-bundle-` prefix on copy** so they apply alphabetically *before* any `99-*.conf` hardening file. This keeps the bundle's IPFS tuning (TCP buffers, fd limits) effective while letting hardening's security-sensitive knobs (IPv6 disable, BPF lockdown, anti-spoof, etc.) win the last-write contest.
 
 ---
 

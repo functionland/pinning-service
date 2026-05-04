@@ -8,6 +8,7 @@ export default function Admin() {
     { name: t.admin?.users || 'Users', href: '/admin/users' },
     { name: t.admin?.referrals || 'Referrals', href: '/admin/referrals' },
     { name: 'CID Policies', href: '/admin/cid-policies' },
+    { name: 'Fula', href: '/admin/fula' },
   ];
 
   return (

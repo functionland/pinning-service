@@ -13,6 +13,7 @@ import Admin from './pages/Admin';
 import AdminUsers from './pages/AdminUsers';
 import AdminReferrals from './pages/AdminReferrals';
 import AdminCidPolicies from './pages/AdminCidPolicies';
+import AdminFula from './pages/AdminFula';
 import GetKey from './pages/GetKey';
 import View from './pages/View';
 import Collab from './pages/Collab';
@@ -95,6 +96,7 @@ function App() {
               <Route path="users" element={<AdminUsers />} />
               <Route path="referrals" element={<AdminReferrals />} />
               <Route path="cid-policies" element={<AdminCidPolicies />} />
+              <Route path="fula" element={<AdminFula />} />
             </Route>
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

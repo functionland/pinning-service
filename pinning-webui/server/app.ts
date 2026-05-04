@@ -86,6 +86,17 @@ export interface AppConfig {
   systemKey?: string;  // For x402 gateway integration
   s3AdminJwt?: string;  // For internal S3 fetch (share links)
   s3InternalUrl?: string;  // Internal S3 endpoint (default: http://127.0.0.1:9000)
+  // Phase 3.2 admin trigger endpoints — see /api/admin/fula/*.
+  // `fulaCliInternalUrl` defaults to `s3InternalUrl` (same host:port,
+  // different path namespace). `mainnetRewardsUrl` is a separate
+  // service (port 5667 by default per package.json health script).
+  // `fulaUsersIndexInternalToken` MUST equal the master's
+  // FULA_USERS_INDEX_INTERNAL_TOKEN — the setup script writes that
+  // value to /etc/fula/.env and /opt/mainnet-rewards/.env, and the
+  // operator must replicate it into the pinning-webui .env too.
+  fulaCliInternalUrl?: string;
+  mainnetRewardsUrl?: string;
+  fulaUsersIndexInternalToken?: string;
   // Apple Sign-In configuration
   appleClientId?: string;
   appleTeamId?: string;
@@ -3299,6 +3310,114 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       res.status(500).json({ error: 'Failed to remove CID policy' });
     }
   });
+
+  // ============================================================
+  // Phase 3.2 — Fula publisher / chain-anchor admin triggers.
+  //
+  // These routes proxy operator-initiated requests to two
+  // master-side services so the runbook (deploy step 4 + step 6)
+  // doesn't require waiting up to 5 min for the periodic publisher
+  // tick OR up to 12h for the chain-anchor cron.
+  //
+  //   POST /api/admin/fula/publish-now   →  fula-cli /_internal/publish-now
+  //   POST /api/admin/fula/anchor-now    →  mainnet-rewards /admin/users-index-anchor/trigger
+  //
+  // Auth: pinning-webui session cookie (`requireAdmin`). The
+  // outbound call carries `Authorization: Bearer <FULA_USERS_INDEX_INTERNAL_TOKEN>`,
+  // sourced from `config.fulaUsersIndexInternalToken`.
+  //
+  // The token is identical across the master operator's three .env
+  // files (fula-cli + mainnet-rewards + pinning-webui). The
+  // setup-users-index-publisher.sh script writes it to the first
+  // two; the operator must replicate it into pinning-webui's .env
+  // for these admin routes to work. If the token isn't configured
+  // here, both routes return 503 (fail-closed parity with the
+  // upstream services). Both routes pass through the upstream's
+  // status code + body so the UI can render the same shape
+  // (200 with structured outcome / 401 mismatch / 409 in-flight /
+  // 503 disabled / 500 internal).
+
+  app.post(
+    '/api/admin/fula/publish-now',
+    requireAdmin,
+    async (_req: Request, res: Response) => {
+      const token = config.fulaUsersIndexInternalToken;
+      if (!token) {
+        return res.status(503).json({
+          error:
+            'fula publisher admin trigger unavailable (FULA_USERS_INDEX_INTERNAL_TOKEN not set in pinning-webui env)',
+        });
+      }
+      const baseUrl = config.fulaCliInternalUrl || 'http://127.0.0.1:9000';
+      try {
+        const upstream = await httpPost(
+          `${baseUrl}/_internal/publish-now`,
+          {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          '',
+        );
+        // Pass through upstream status + body. The body is a JSON
+        // string when fula-cli succeeds (PublishNowResponse) or a
+        // plain text error string when it fails. Try to parse JSON;
+        // if that fails wrap the raw text into an `{error}` object.
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(upstream.data);
+        } catch {
+          parsed = { error: upstream.data || 'unknown upstream response' };
+        }
+        return res.status(upstream.status).json(parsed);
+      } catch (e) {
+        console.error('[webui] /api/admin/fula/publish-now upstream call failed:', e);
+        return res.status(502).json({
+          error: `failed to reach fula-cli /_internal/publish-now: ${
+            (e as Error).message
+          }`,
+        });
+      }
+    },
+  );
+
+  app.post(
+    '/api/admin/fula/anchor-now',
+    requireAdmin,
+    async (_req: Request, res: Response) => {
+      const token = config.fulaUsersIndexInternalToken;
+      if (!token) {
+        return res.status(503).json({
+          error:
+            'fula anchor admin trigger unavailable (FULA_USERS_INDEX_INTERNAL_TOKEN not set in pinning-webui env)',
+        });
+      }
+      const baseUrl = config.mainnetRewardsUrl || 'http://127.0.0.1:5667';
+      try {
+        const upstream = await httpPost(
+          `${baseUrl}/admin/users-index-anchor/trigger`,
+          {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          '',
+        );
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(upstream.data);
+        } catch {
+          parsed = { error: upstream.data || 'unknown upstream response' };
+        }
+        return res.status(upstream.status).json(parsed);
+      } catch (e) {
+        console.error('[webui] /api/admin/fula/anchor-now upstream call failed:', e);
+        return res.status(502).json({
+          error: `failed to reach mainnet-rewards /admin/users-index-anchor/trigger: ${
+            (e as Error).message
+          }`,
+        });
+      }
+    },
+  );
 
   // ============ API v1 Endpoints (Bearer Token Auth for External Apps) ============
   // These endpoints use API key (JWT) authentication instead of browser sessions

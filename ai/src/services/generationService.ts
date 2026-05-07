@@ -116,7 +116,7 @@ async function executeJob(jobId: string, userToken: string, signal: AbortSignal)
       content: a.content || a.parsedContent || '',
     }));
 
-    const files = await generateWebsite(job.prompt, assets, signal);
+    const files = await generateWebsite(job.prompt, assets, signal, tmpDir);
 
     if (signal.aborted) {
       throw new Error('Generation timed out');

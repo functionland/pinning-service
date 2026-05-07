@@ -50,7 +50,7 @@ const generateRequestSchema = z.object({
         content: z.string().max(100_000, 'Asset content max 100KB').optional(),
       })
     )
-    .max(100, 'Max 100 assets allowed')
+    .max(10, 'Max 10 assets allowed')
     .default([]),
 });
 

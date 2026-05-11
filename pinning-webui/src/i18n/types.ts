@@ -303,6 +303,8 @@ export interface Translations {
     codeColumn?: string;
     linkColumn?: string;
     actionsColumn?: string;
+    referredColumn?: string;
+    allCodes?: string;
     noLabel?: string;
     defaultBadge?: string;
     inheritedBadge?: string;
@@ -353,6 +355,7 @@ export interface Translations {
     viewDetails: string;
     hideDetails: string;
     referredBy: string;
+    viaCode?: string;
     email: string;
     joinedAt: string;
     referredAt: string;

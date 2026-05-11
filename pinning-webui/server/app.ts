@@ -2247,7 +2247,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Connect/link a wallet (with signature verification)
   app.post('/api/wallets/connect', requireAuth, async (req: Request, res: Response) => {
     try {
-      const { address, chainId, signature, message, encryptedAddress } = req.body;
+      const { address, chainId, signature, message } = req.body;
 
       if (!address || !chainId || !signature || !message) {
         return res.status(400).json({ error: 'address, chainId, signature, and message are required' });
@@ -2417,6 +2417,20 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       `, [userId]);
       const levelStats = levelStatsResult.rows;
 
+      // Per-code direct-referral counts (Level 1 only, grouped by referral_code)
+      const perCodeCountsResult = await query<{ code: string; total_referred: string }>(`
+        SELECT rc.code, COUNT(r.id)::text AS total_referred
+        FROM referral_codes rc
+        LEFT JOIN referrals r
+          ON r.referrer_id = rc.user_id AND r.referral_code = rc.code
+        WHERE rc.user_id = $1
+        GROUP BY rc.code
+      `, [userId]);
+      const perCodeCounts = new Map<string, number>();
+      for (const row of perCodeCountsResult.rows) {
+        perCodeCounts.set(row.code, parseInt(row.total_referred, 10));
+      }
+
       // Build stats object with level breakdown
       const stats = {
         level1: { count: 0, credits: 0 },
@@ -2448,6 +2462,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           inheritedName: c.inheritedName,
           isDefault: c.isDefault,
           createdAt: c.createdAt,
+          totalReferred: perCodeCounts.get(c.code) ?? 0,
         })),
         // Legacy: single default code for backward compatibility
         code: defaultCode.code,
@@ -2604,6 +2619,27 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
 
+      // Optional per-code filter — only applied when the target is the current user
+      // (filtering deeper levels by the requester's code is meaningless: child users have their own codes).
+      const codeParamRaw = typeof req.query.code === 'string' ? req.query.code : '';
+      let codeFilter: string | null = null;
+      if (codeParamRaw) {
+        if (!/^[A-Z0-9]{4,16}$/.test(codeParamRaw)) {
+          return res.status(400).json({ error: 'Invalid code format' });
+        }
+        if (targetUserId === currentUserId) {
+          const ownsCode = await query(
+            'SELECT 1 FROM referral_codes WHERE user_id = $1 AND code = $2',
+            [currentUserId, codeParamRaw]
+          );
+          if (ownsCode.rows.length === 0) {
+            return res.status(403).json({ error: 'Code does not belong to user' });
+          }
+          codeFilter = codeParamRaw;
+        }
+        // For nested expansions (targetUserId !== currentUserId), silently ignore.
+      }
+
       // Verify the target is in the current user's referral chain (up to 3 levels)
       const isInChainResult = await query(`
         WITH RECURSIVE referral_chain AS (
@@ -2624,6 +2660,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(403).json({ error: 'Access denied' });
       }
 
+      const codeSql = codeFilter ? ' AND r.referral_code = $4' : '';
+      const dataParams: (string | number)[] = codeFilter
+        ? [targetUserId, limit, offset, codeFilter]
+        : [targetUserId, limit, offset];
+
       const referredResult = await query<{
         referred_id: string;
         joined_at: string;
@@ -2642,13 +2683,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         FROM referrals r
         JOIN webui_users wu ON r.referred_id = wu.user_id
         LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
-        WHERE r.referrer_id = $1
+        WHERE r.referrer_id = $1${codeSql}
         ORDER BY r.referred_at DESC
         LIMIT $2 OFFSET $3
-      `, [targetUserId, limit, offset]);
+      `, dataParams);
       const referred = referredResult.rows;
 
-      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_id = $1', [targetUserId]);
+      const countSql = codeFilter
+        ? 'SELECT COUNT(*)::text as total FROM referrals WHERE referrer_id = $1 AND referral_code = $2'
+        : 'SELECT COUNT(*)::text as total FROM referrals WHERE referrer_id = $1';
+      const countParams: string[] = codeFilter ? [targetUserId, codeFilter] : [targetUserId];
+      const countResult = await query<{ total: string }>(countSql, countParams);
       const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       res.json({
@@ -2944,7 +2989,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           COUNT(r.id)::text as totalReferred,
           COALESCE(SUM(uc.total_deposited_fula), 0)::text as totalCreditsFromReferrals
         FROM referral_codes rc
-        LEFT JOIN referrals r ON rc.user_id = r.referrer_id
+        LEFT JOIN referrals r ON rc.user_id = r.referrer_id AND rc.code = r.referral_code
         LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
         GROUP BY rc.user_id, rc.code, rc.created_at
         ${includeZero ? '' : 'HAVING COUNT(r.id) > 0'}
@@ -2959,13 +3004,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         totalCreditsFromReferrals: parseFloat(r.totalcreditsfromreferrals),
       }));
 
-      // Get total count
+      // Get total count of (user_id, code) rows matching the same per-code filter as the data query
       const countResult = await query<{ total: string }>(`
         SELECT COUNT(*)::text as total FROM (
-          SELECT rc.user_id
+          SELECT rc.user_id, rc.code
           FROM referral_codes rc
-          LEFT JOIN referrals r ON rc.user_id = r.referrer_id
-          GROUP BY rc.user_id
+          LEFT JOIN referrals r ON rc.user_id = r.referrer_id AND rc.code = r.referral_code
+          GROUP BY rc.user_id, rc.code
           ${includeZero ? '' : 'HAVING COUNT(r.id) > 0'}
         ) subq
       `);
@@ -3046,6 +3091,28 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
       const offset = (page - 1) * limit;
 
+      // Optional per-code filter — validates the code belongs to the target user
+      const codeParamRaw = typeof req.query.code === 'string' ? req.query.code : '';
+      let codeFilter: string | null = null;
+      if (codeParamRaw) {
+        if (!/^[A-Z0-9]{4,16}$/.test(codeParamRaw)) {
+          return res.status(400).json({ error: 'Invalid code format' });
+        }
+        const ownsCode = await query(
+          'SELECT 1 FROM referral_codes WHERE user_id = $1 AND code = $2',
+          [targetUserId, codeParamRaw]
+        );
+        if (ownsCode.rows.length === 0) {
+          return res.status(404).json({ error: 'Code not found for this user' });
+        }
+        codeFilter = codeParamRaw;
+      }
+
+      const codeSql = codeFilter ? ' AND r.referral_code = $4' : '';
+      const dataParams: (string | number)[] = codeFilter
+        ? [targetUserId, limit, offset, codeFilter]
+        : [targetUserId, limit, offset];
+
       const referredResult = await query<{
         referred_id: string;
         joined_at: string;
@@ -3066,13 +3133,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         FROM referrals r
         JOIN webui_users wu ON r.referred_id = wu.user_id
         LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
-        WHERE r.referrer_id = $1
+        WHERE r.referrer_id = $1${codeSql}
         ORDER BY r.referred_at DESC
         LIMIT $2 OFFSET $3
-      `, [targetUserId, limit, offset]);
+      `, dataParams);
       const referred = referredResult.rows;
 
-      const countResult = await query<{ total: string }>('SELECT COUNT(*)::text as total FROM referrals WHERE referrer_id = $1', [targetUserId]);
+      const countSql = codeFilter
+        ? 'SELECT COUNT(*)::text as total FROM referrals WHERE referrer_id = $1 AND referral_code = $2'
+        : 'SELECT COUNT(*)::text as total FROM referrals WHERE referrer_id = $1';
+      const countParams: string[] = codeFilter ? [targetUserId, codeFilter] : [targetUserId];
+      const countResult = await query<{ total: string }>(countSql, countParams);
       const total = parseInt(countResult.rows[0]?.total || '0', 10);
 
       res.json({
@@ -3494,7 +3565,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // POST /api/v1/wallets/link - Link wallet with signature verification
   app.post('/api/v1/wallets/link', requireApiAuth, async (req: Request, res: Response) => {
     try {
-      const { address, chainId, signature, message, encryptedAddress } = req.body;
+      const { address, chainId, signature, message } = req.body;
 
       if (!address || !chainId || !signature || !message) {
         return res.status(400).json({ error: 'address, chainId, signature, and message are required' });

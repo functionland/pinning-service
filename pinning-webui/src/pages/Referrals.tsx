@@ -15,6 +15,7 @@ interface ReferralCode {
   inheritedName: string | null;
   isDefault: boolean;
   createdAt: string;
+  totalReferred: number;
 }
 
 interface ReferralInfo {
@@ -35,6 +36,7 @@ export default function Referrals() {
   const [info, setInfo] = useState<ReferralInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [selectedCode, setSelectedCode] = useState<string | null>(null);
 
   // Modal states
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -213,13 +215,22 @@ export default function Referrals() {
                 <tr className="border-b border-gray-200">
                   <th className="text-left py-2 px-2 font-medium text-gray-600">{t.referrals?.labelColumn || 'Label'}</th>
                   <th className="text-left py-2 px-2 font-medium text-gray-600">{t.referrals?.codeColumn || 'Code'}</th>
+                  <th className="text-right py-2 px-2 font-medium text-gray-600">{t.referrals?.referredColumn || 'Referred'}</th>
                   <th className="text-left py-2 px-2 font-medium text-gray-600 hidden md:table-cell">{t.referrals?.linkColumn || 'Link'}</th>
                   <th className="text-right py-2 px-2 font-medium text-gray-600">{t.referrals?.actionsColumn || 'Actions'}</th>
                 </tr>
               </thead>
               <tbody>
-                {info.codes.map((codeItem) => (
-                  <tr key={codeItem.code} className="border-b border-gray-100 hover:bg-gray-50">
+                {info.codes.map((codeItem) => {
+                  const isSelected = selectedCode === codeItem.code;
+                  return (
+                  <tr
+                    key={codeItem.code}
+                    onClick={() => setSelectedCode(prev => prev === codeItem.code ? null : codeItem.code)}
+                    className={`border-b border-gray-100 cursor-pointer transition-colors ${
+                      isSelected ? 'bg-primary-50 hover:bg-primary-100' : 'hover:bg-gray-50'
+                    }`}
+                  >
                     {/* Label */}
                     <td className="py-3 px-2">
                       <div className="flex items-center gap-2">
@@ -244,29 +255,34 @@ export default function Referrals() {
                     <td className="py-3 px-2">
                       <code className="font-mono text-primary-600 font-semibold">{codeItem.code}</code>
                     </td>
+                    {/* Referred count */}
+                    <td className="py-3 px-2 text-right font-medium text-primary-600">
+                      {codeItem.totalReferred ?? 0}
+                    </td>
                     {/* Link (hidden on mobile) */}
-                    <td className="py-3 px-2 hidden md:table-cell">
+                    <td className="py-3 px-2 hidden md:table-cell" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-2">
                         <input
                           type="text"
                           readOnly
                           value={getReferralLink(codeItem.code)}
                           className="flex-1 text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 text-gray-600"
+                          onClick={(e) => e.stopPropagation()}
                         />
                       </div>
                     </td>
                     {/* Actions */}
-                    <td className="py-3 px-2">
+                    <td className="py-3 px-2" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center justify-end gap-1">
                         <button
-                          onClick={() => copyToClipboard(getReferralLink(codeItem.code), codeItem.code)}
+                          onClick={(e) => { e.stopPropagation(); copyToClipboard(getReferralLink(codeItem.code), codeItem.code); }}
                           className="text-xs px-2 py-1 rounded bg-primary-50 text-primary-600 hover:bg-primary-100 transition-colors"
                           title={t.referrals?.copyLink || 'Copy Link'}
                         >
                           {copiedCode === codeItem.code ? (t.referrals?.copied || 'Copied!') : (t.referrals?.copy || 'Copy')}
                         </button>
                         <button
-                          onClick={() => openEditModal(codeItem)}
+                          onClick={(e) => { e.stopPropagation(); openEditModal(codeItem); }}
                           className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors"
                           title={t.referrals?.editLabel || 'Edit Label'}
                         >
@@ -274,7 +290,7 @@ export default function Referrals() {
                         </button>
                         {!codeItem.isDefault && (
                           <button
-                            onClick={() => handleDeleteCode(codeItem.code)}
+                            onClick={(e) => { e.stopPropagation(); handleDeleteCode(codeItem.code); }}
                             className="text-xs px-2 py-1 rounded bg-red-50 text-red-600 hover:bg-red-100 transition-colors"
                             title={t.referrals?.delete || 'Delete'}
                           >
@@ -284,7 +300,8 @@ export default function Referrals() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -384,6 +401,36 @@ export default function Referrals() {
           </div>
         </div>
 
+        {/* Per-code filter chips */}
+        {info && info.codes.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <button
+              onClick={() => setSelectedCode(null)}
+              className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                selectedCode === null
+                  ? 'bg-primary-600 text-white border-primary-600'
+                  : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+              }`}
+            >
+              {t.referrals?.allCodes || 'All codes'} ({info.codes.reduce((sum, c) => sum + (c.totalReferred ?? 0), 0)})
+            </button>
+            {info.codes.map((c) => (
+              <button
+                key={c.code}
+                onClick={() => setSelectedCode(c.code)}
+                className={`text-xs px-2.5 py-1 rounded-full border font-mono transition-colors ${
+                  selectedCode === c.code
+                    ? 'bg-primary-600 text-white border-primary-600'
+                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                }`}
+                title={c.displayName || c.code}
+              >
+                {c.code} ({c.totalReferred ?? 0})
+              </button>
+            ))}
+          </div>
+        )}
+
         {user?.userId ? (
           <div className="overflow-x-auto">
             <ReferralTree
@@ -392,6 +439,7 @@ export default function Referrals() {
               maxLevel={3}
               isAdmin={false}
               highlightUserId={highlightUserId}
+              code={selectedCode ?? undefined}
             />
           </div>
         ) : (

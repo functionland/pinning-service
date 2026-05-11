@@ -57,11 +57,11 @@ export default function AdminReferrals() {
     return `${hash.slice(0, 8)}...${hash.slice(-4)}`;
   };
 
-  const handleSelectReferrer = (userId: string) => {
-    if (selectedReferrer === userId) {
+  const handleSelectReferrer = (key: string) => {
+    if (selectedReferrer === key) {
       setSelectedReferrer(null);
     } else {
-      setSelectedReferrer(userId);
+      setSelectedReferrer(key);
     }
   };
 
@@ -136,14 +136,16 @@ export default function AdminReferrals() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {referrers.items.map((referrer) => (
+                  {referrers.items.map((referrer) => {
+                    const rowKey = `${referrer.userId}:${referrer.code}`;
+                    return (
                     <>
                       <tr
-                        key={referrer.userId}
+                        key={rowKey}
                         className={`hover:bg-gray-50 cursor-pointer ${
-                          selectedReferrer === referrer.userId ? 'bg-primary-50' : ''
+                          selectedReferrer === rowKey ? 'bg-primary-50' : ''
                         }`}
-                        onClick={() => handleSelectReferrer(referrer.userId)}
+                        onClick={() => handleSelectReferrer(rowKey)}
                       >
                         <td className="px-4 py-3 text-sm text-gray-900 font-mono" title={referrer.userId}>
                           {truncateHash(referrer.userId)}
@@ -160,10 +162,10 @@ export default function AdminReferrals() {
                             className="text-primary-600 hover:text-primary-800 text-sm font-medium"
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleSelectReferrer(referrer.userId);
+                              handleSelectReferrer(rowKey);
                             }}
                           >
-                            {selectedReferrer === referrer.userId
+                            {selectedReferrer === rowKey
                               ? (t.adminReferrals?.hideDetails || 'Hide')
                               : (t.adminReferrals?.viewDetails || 'View Details')}
                           </button>
@@ -171,12 +173,15 @@ export default function AdminReferrals() {
                       </tr>
 
                       {/* Expanded Row - Referral Tree */}
-                      {selectedReferrer === referrer.userId && (
+                      {selectedReferrer === rowKey && (
                         <tr>
                           <td colSpan={5} className="px-4 py-4 bg-gray-50">
                             <div className="space-y-3">
                               <h3 className="font-medium text-gray-900">
                                 {t.adminReferrals?.referredBy || 'Users referred by'} <span className="font-mono text-sm">{truncateHash(referrer.userId)}</span>
+                                <span className="text-sm font-normal text-gray-500 ml-1">
+                                  {t.adminReferrals?.viaCode || 'via code'} <code className="font-mono text-sm text-primary-600">{referrer.code}</code>
+                                </span>
                                 <span className="text-sm font-normal text-gray-500 ml-2">
                                   ({t.referrals?.expandHint || 'Click arrow to expand referral chain'})
                                 </span>
@@ -186,13 +191,15 @@ export default function AdminReferrals() {
                                 level={1}
                                 maxLevel={3}
                                 isAdmin={true}
+                                code={referrer.code}
                               />
                             </div>
                           </td>
                         </tr>
                       )}
                     </>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

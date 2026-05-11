@@ -25,6 +25,7 @@ interface ReferralTreeProps {
   maxLevel?: number;
   isAdmin?: boolean;
   highlightUserId?: string; // userId hash to highlight (from email search)
+  code?: string; // Optional per-code filter — only applied at the top level
 }
 
 // Display a truncated userId hash: first 8 + ... + last 4
@@ -39,6 +40,7 @@ export default function ReferralTree({
   maxLevel = 3,
   isAdmin = false,
   highlightUserId,
+  code,
 }: ReferralTreeProps) {
   const { t } = useLanguage();
   const [data, setData] = useState<ReferredResponse | null>(null);
@@ -47,13 +49,20 @@ export default function ReferralTree({
   const [page, setPage] = useState(1);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
+  // Reset to page 1 when the code filter changes
+  useEffect(() => {
+    setPage(1);
+  }, [code]);
+
   const fetchReferrals = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const endpoint = isAdmin
-        ? `/api/admin/referrals/chain/${encodeURIComponent(userId)}?page=${page}&limit=20`
-        : `/api/referral/chain/${encodeURIComponent(userId)}?page=${page}&limit=20`;
+      const base = isAdmin
+        ? `/api/admin/referrals/chain/${encodeURIComponent(userId)}`
+        : `/api/referral/chain/${encodeURIComponent(userId)}`;
+      const codeQs = code ? `&code=${encodeURIComponent(code)}` : '';
+      const endpoint = `${base}?page=${page}&limit=20${codeQs}`;
 
       const res = await fetch(endpoint, { credentials: 'include' });
       if (!res.ok) {
@@ -69,7 +78,7 @@ export default function ReferralTree({
     } finally {
       setLoading(false);
     }
-  }, [userId, page, isAdmin]);
+  }, [userId, page, isAdmin, code]);
 
   useEffect(() => {
     fetchReferrals();

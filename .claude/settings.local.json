@@ -36,7 +36,41 @@
       "Bash(sed -i 's/\\\\r$//' deploy.sh)",
       "Bash(bash -n deploy.sh)",
       "Bash(echo \"EXIT:$?\")",
-      "PowerShell(Get-Item \"E:\\\\GitHub\\\\pinning-service\" -ErrorAction Stop | Select-Object FullName, @{Name='Exists';Expression={$_.Exists}})"
+      "PowerShell(Get-Item \"E:\\\\GitHub\\\\pinning-service\" -ErrorAction Stop | Select-Object FullName, @{Name='Exists';Expression={$_.Exists}})",
+      "PowerShell(Get-ChildItem -Path E:\\\\GitHub\\\\pinning-service -Force | Where-Object { $_.Name -ne '.git' -and $_.Name -ne '.history' } | Select-Object Mode,Name)",
+      "PowerShell(Get-ChildItem -Path E:\\\\GitHub\\\\pinning-service -Force | Where-Object { $_.Name -notin @\\('.git','.history','.dependabot','node_modules'\\) } | Select-Object Mode,Name | Format-Table -AutoSize)",
+      "PowerShell(head *)",
+      "Bash(dart --version)",
+      "Bash(/mnt/e/flutter/flutter/bin/cache/dart-sdk/bin/dart analyze *)",
+      "Bash(/mnt/e/flutter/flutter/bin/cache/dart-sdk/bin/dart.exe analyze *)",
+      "PowerShell(go build *)",
+      "PowerShell(go vet *)",
+      "PowerShell([System.IO.Directory]::GetDirectories\\(\"E:\\\\GitHub\\\\pinning-service\\\\pinning-webui\"\\) | Select-Object -First 20)",
+      "PowerShell(node --check E:\\\\GitHub\\\\pinning-service\\\\ipfs-server\\\\viewWrapper.js; if \\($?\\) { \"OK\" })",
+      "PowerShell($lines = Get-Content E:\\\\GitHub\\\\pinning-service\\\\ipfs-server\\\\viewWrapper.js -Encoding UTF8; for \\($i = 163; $i -le 165; $i++\\) { $line = $lines[$i]; \"Line $\\($i+1\\): \" + \\($line.ToCharArray\\(\\) | ForEach-Object { '{0:X4}' -f [int]$_ }\\) -join ' ' })",
+      "PowerShell($path = 'E:\\\\GitHub\\\\pinning-service\\\\ipfs-server\\\\viewWrapper.js'; $text = [System.IO.File]::ReadAllText\\($path\\); $u2028 = [char]0x2028; $u2029 = [char]0x2029; $newText = $text.Replace\\(\"/$u2028/g\", '/ /g'\\).Replace\\(\"/$u2029/g\", '/ /g'\\); [System.IO.File]::WriteAllText\\($path, $newText\\); \"replacements done\")",
+      "PowerShell($lines = Get-Content E:\\\\GitHub\\\\pinning-service\\\\ipfs-server\\\\viewWrapper.js -Encoding UTF8; for \\($i = 163; $i -le 165; $i++\\) { $line = $lines[$i]; \"Line $\\($i+1\\): \" + \\(\\($line.ToCharArray\\(\\) | ForEach-Object { '{0:X4}' -f [int]$_ }\\) -join ' '\\) })",
+      "PowerShell($path = 'E:\\\\GitHub\\\\pinning-service\\\\ipfs-server\\\\viewWrapper.js'; $bytes = [System.IO.File]::ReadAllBytes\\($path\\); $text = [System.Text.Encoding]::UTF8.GetString\\($bytes\\); $u2028 = [char]0x2028; $u2029 = [char]0x2029; $before2028 = \\($text -split ''\\).Count; $newText = $text -replace \"$u2028\", ' '; $newText = $newText -replace \"$u2029\", ' '; $changed = \\($text -ne $newText\\); \"Changed: $changed\"; [System.IO.File]::WriteAllBytes\\($path, [System.Text.Encoding]::UTF8.GetBytes\\($newText\\)\\))",
+      "PowerShell($path = 'E:\\\\GitHub\\\\pinning-service\\\\ipfs-server\\\\viewWrapper.js'; $text = [System.IO.File]::ReadAllText\\($path, [System.Text.Encoding]::UTF8\\); $u2028 = [char]0x2028; $u2029 = [char]0x2029; $hasU2028 = $text.Contains\\($u2028\\); $hasU2029 = $text.Contains\\($u2029\\); \"Has U+2028: $hasU2028; Has U+2029: $hasU2029\"; $newText = $text.Replace\\([string]$u2028, ' '\\).Replace\\([string]$u2029, ' '\\); $changed = \\($text -ne $newText\\); \"Changed: $changed\"; if \\($changed\\) { [System.IO.File]::WriteAllText\\($path, $newText, \\(New-Object System.Text.UTF8Encoding $false\\)\\); \"Written\" })",
+      "PowerShell(node --check E:\\\\GitHub\\\\pinning-service\\\\ipfs-server\\\\viewWrapper.js; if \\($?\\) { \"viewWrapper OK\" } else { \"viewWrapper FAIL\" })",
+      "PowerShell(node --check E:\\\\GitHub\\\\pinning-service\\\\ipfs-server\\\\server.js; if \\($?\\) { \"server OK\" } else { \"server FAIL\" })",
+      "PowerShell(git *)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Get-ChildItem \"E:\\\\GitHub\\\\pinning-service\" -Directory | ForEach-Object { $_.Name } ; Write-Output \"---FILES---\"; Get-ChildItem \"E:\\\\GitHub\\\\pinning-service\" -File | ForEach-Object { $_.Name })",
+      "PowerShell(Get-Command *)",
+      "PowerShell(wsl -- bash -c \"command -v shellcheck >/dev/null 2>&1 && echo 'shellcheck available' || echo 'shellcheck missing'\")",
+      "PowerShell(wsl -- bash -n /mnt/e/GitHub/pinning-service/scripts/recover.sh; Write-Output \"recover.sh exit: $LASTEXITCODE\"; wsl -- bash -n /mnt/e/GitHub/pinning-service/scripts/migrate-zip.sh; Write-Output \"migrate-zip.sh exit: $LASTEXITCODE\")",
+      "PowerShell(wsl -- bash -n /mnt/e/GitHub/pinning-service/scripts/recover.sh; Write-Output \"exit: $LASTEXITCODE\")",
+      "PowerShell(wsl -- bash -n /mnt/e/GitHub/pinning-service/scripts/recover.sh; Write-Output \"recover: $LASTEXITCODE\")",
+      "PowerShell(wsl -- bash -n /mnt/e/GitHub/pinning-service/scripts/migrate-zip.sh; Write-Output \"exit: $LASTEXITCODE\")",
+      "PowerShell(wsl -- bash -n /mnt/e/GitHub/pinning-service/scripts/recover.sh; Write-Output \"recover: $LASTEXITCODE\"; wsl -- bash -n /mnt/e/GitHub/pinning-service/scripts/migrate-zip.sh; Write-Output \"migrate-zip: $LASTEXITCODE\")",
+      "Bash(bash -n /e/GitHub/pinning-service/scripts/recover.sh)",
+      "Bash(bash -n \"E:\\\\GitHub\\\\pinning-service\\\\scripts\\\\recover.sh\")",
+      "PowerShell(wsl -- bash -n /mnt/e/GitHub/pinning-service/scripts/recover.sh; if \\($LASTEXITCODE -eq 0\\) { Write-Output \"syntax OK\" } else { Write-Output \"syntax errors detected\" })",
+      "PowerShell(wsl -- bash -n /mnt/e/GitHub/pinning-service/scripts/recover.sh; if \\($LASTEXITCODE -eq 0\\) { Write-Output \"syntax OK\" })",
+      "PowerShell(\\(Get-Content \"E:\\\\GitHub\\\\pinning-service\\\\MIGRATION_README.md\" | Measure-Object -Line\\).Lines)",
+      "Bash(Get-ChildItem -Path \"E:\\\\GitHub\\\\pinning-service\" -Recurse -Depth 2 -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object FullName)"
     ]
   }
 }

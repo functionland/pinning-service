@@ -93,6 +93,10 @@ collect_config_fresh() {
     read -p "Enter generation cost in FULA [1000]: " GENERATION_COST_FULA
     GENERATION_COST_FULA=${GENERATION_COST_FULA:-1000}
 
+    # Generation cost when click-tracking is enabled
+    read -p "Enter generation cost in FULA with tracking enabled [1500]: " GENERATION_COST_FULA_WITH_TRACKING
+    GENERATION_COST_FULA_WITH_TRACKING=${GENERATION_COST_FULA_WITH_TRACKING:-1500}
+
     # Free generations per user
     read -p "Enter free generations per user [1]: " FREE_GENERATIONS_PER_USER
     FREE_GENERATIONS_PER_USER=${FREE_GENERATIONS_PER_USER:-1}
@@ -169,7 +173,8 @@ collect_config_fresh() {
     print_info "Configuration summary:"
     echo "  Install Dir:     $INSTALL_DIR"
     echo "  Claude API Key:  ****"
-    echo "  Cost:            $GENERATION_COST_FULA FULA"
+    echo "  Cost:            $GENERATION_COST_FULA FULA (tracking off)"
+    echo "  Cost w/Track:    $GENERATION_COST_FULA_WITH_TRACKING FULA (tracking on)"
     echo "  Free Gens/User:  $FREE_GENERATIONS_PER_USER"
     echo "  Pinning WebUI:   http://127.0.0.1:3001"
     echo "  PostgreSQL:      $POSTGRES_HOST:$POSTGRES_PORT/$POSTGRES_DB"
@@ -209,7 +214,8 @@ collect_config_update() {
     print_info "Current configuration:"
     echo "  Claude API Key:  ****"
     echo "  Model:           ${CLAUDE_MODEL:-claude-opus-4-6}"
-    echo "  Cost:            ${GENERATION_COST_FULA:-1000} FULA"
+    echo "  Cost:            ${GENERATION_COST_FULA:-1000} FULA (tracking off)"
+    echo "  Cost w/Track:    ${GENERATION_COST_FULA_WITH_TRACKING:-1500} FULA (tracking on)"
     echo "  Port:            ${PORT:-3002}"
     echo "  IPFS Gateway:    ${IPFS_GATEWAY_URL:-not set}"
     echo ""
@@ -222,6 +228,9 @@ collect_config_update() {
 
         read -p "Generation cost in FULA [${GENERATION_COST_FULA:-1000}]: " NEW_COST
         GENERATION_COST_FULA=${NEW_COST:-${GENERATION_COST_FULA:-1000}}
+
+        read -p "Generation cost in FULA with tracking [${GENERATION_COST_FULA_WITH_TRACKING:-1500}]: " NEW_COST_TRACK
+        GENERATION_COST_FULA_WITH_TRACKING=${NEW_COST_TRACK:-${GENERATION_COST_FULA_WITH_TRACKING:-1500}}
 
         read -p "IPFS gateway URL [${IPFS_GATEWAY_URL}]: " NEW_GATEWAY
         IPFS_GATEWAY_URL=${NEW_GATEWAY:-$IPFS_GATEWAY_URL}
@@ -289,6 +298,7 @@ CLAUDE_MODEL=${CLAUDE_MODEL:-claude-opus-4-6}
 
 # Generation
 GENERATION_COST_FULA=${GENERATION_COST_FULA:-1000}
+GENERATION_COST_FULA_WITH_TRACKING=${GENERATION_COST_FULA_WITH_TRACKING:-1500}
 FREE_GENERATIONS_PER_USER=${FREE_GENERATIONS_PER_USER:-1}
 MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS:-3}
 JOB_TIMEOUT_MS=${JOB_TIMEOUT_MS:-300000}

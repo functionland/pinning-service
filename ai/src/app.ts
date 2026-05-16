@@ -13,6 +13,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { healthRoutes } from './routes/health.js';
 import { generateRoutes } from './routes/generate.js';
+import { pricingRoutes } from './routes/pricing.js';
 
 interface Env {
   Variables: {
@@ -137,6 +138,12 @@ app.get('/', (c) => {
     status: 'running',
   });
 });
+
+// Pricing (public, no auth). Safe to mount alongside generateRoutes on the
+// same prefix because generateRoutes' JWT middleware is scoped to that
+// router and the paths don't overlap (/pricing vs /generate, /status/:id,
+// /generations).
+app.route('/api/v1', pricingRoutes);
 
 // Generation API routes
 app.route('/api/v1', generateRoutes);

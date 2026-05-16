@@ -52,6 +52,10 @@ const generateRequestSchema = z.object({
     )
     .max(10, 'Max 10 assets allowed')
     .default([]),
+  // Opt-in: when true, the IPFS publish step injects the fxfiles-analytics
+  // <script> into the generated index.html before pinning. Default off so a
+  // missing field from older clients behaves as if tracking is disabled.
+  enable_tracking: z.boolean().default(false),
 });
 
 // ============================================
@@ -91,6 +95,13 @@ generateRoutes.post('/generate', async (c) => {
   // Generate job ID
   const jobId = uuidv4();
 
+  // Pricing — depends on whether the request opts into click-tracking.
+  // Computed once and used for deduction, refund, response.required, and
+  // the persisted creditsCharged so the audit row matches what was taken.
+  const effectiveCost = body.enable_tracking
+    ? config.generationCostFulaWithTracking
+    : config.generationCostFula;
+
   // Free tier check: skip credit deduction if user has unused free generations
   const freeCompletedCount = await countFreeCompletedGenerations(userId);
   const isFreeGeneration = freeCompletedCount < config.freeGenerationsPerUser;
@@ -101,14 +112,14 @@ generateRoutes.post('/generate', async (c) => {
 
   // Deduct credits atomically — skip for free generations
   if (!isFreeGeneration) {
-    const deduction = await deductCredits(userId, jobId, config.generationCostFula);
+    const deduction = await deductCredits(userId, jobId, effectiveCost);
     if (!deduction.success) {
       if (deduction.insufficientBalance) {
         return c.json(
           {
             error: 'Insufficient credits',
             code: 'INSUFFICIENT_CREDITS',
-            required: config.generationCostFula,
+            required: effectiveCost,
             balance: deduction.newBalance ?? 0,
           },
           402
@@ -125,7 +136,7 @@ generateRoutes.post('/generate', async (c) => {
     }
   }
 
-  const creditsCharged = isFreeGeneration ? 0 : config.generationCostFula;
+  const creditsCharged = isFreeGeneration ? 0 : effectiveCost;
 
   // Create DB record + queue job — if anything fails, refund credits
   try {
@@ -134,7 +145,8 @@ generateRoutes.post('/generate', async (c) => {
       userId,
       body.prompt,
       body.assets,
-      creditsCharged
+      creditsCharged,
+      body.enable_tracking
     );
 
     // Queue the job (pass user token for S3 uploads)
@@ -144,10 +156,10 @@ generateRoutes.post('/generate', async (c) => {
     if (!isFreeGeneration) {
       console.error(`[generate] Job ${jobId} setup failed, refunding credits:`, error);
       try {
-        await refundCredits(userId, jobId, config.generationCostFula);
+        await refundCredits(userId, jobId, effectiveCost);
       } catch (refundError) {
         // Log loudly — this means credits are lost and need manual recovery
-        console.error(`[generate] CRITICAL: Refund failed for job ${jobId}, user ${userId.slice(0, 8)}..., amount ${config.generationCostFula}:`, refundError);
+        console.error(`[generate] CRITICAL: Refund failed for job ${jobId}, user ${userId.slice(0, 8)}..., amount ${effectiveCost}:`, refundError);
       }
     } else {
       console.error(`[generate] Job ${jobId} setup failed (free generation):`, error);

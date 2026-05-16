@@ -44,7 +44,8 @@ async function main() {
   Health:   http://localhost:${info.port}/health
 
   Model:    ${config.claudeModel}
-  Cost:     ${config.generationCostFula} FULA/generation
+  Cost:     ${config.generationCostFula} FULA/generation (tracking off)
+            ${config.generationCostFulaWithTracking} FULA/generation (tracking on)
   Max Jobs: ${config.maxConcurrentJobs} concurrent
   Timeout:  ${config.jobTimeoutMs / 1000}s
 

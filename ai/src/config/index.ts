@@ -27,7 +27,12 @@ const configSchema = z.object({
   claudeModel: z.string().default('claude-opus-4-6'),
 
   // Generation
-  generationCostFula: z.coerce.number().default(1000),
+  generationCostFula: z.coerce.number().int().nonnegative().default(1000),
+  // Surcharged price when the request opts into click-tracking
+  // (`enable_tracking: true`). Set higher than `generationCostFula` to
+  // reflect the cost of the analytics infrastructure that serves the
+  // injected ping script.
+  generationCostFulaWithTracking: z.coerce.number().int().nonnegative().default(1500),
   freeGenerationsPerUser: z.coerce.number().default(1),
   maxConcurrentJobs: z.coerce.number().default(3),
   jobTimeoutMs: z.coerce.number().default(300000),
@@ -40,6 +45,11 @@ const configSchema = z.object({
   // S3 Gateway (fula-api)
   s3GatewayUrl: z.string().default('http://127.0.0.1:9000'),
   s3BucketName: z.string().default('ai-websites'),
+
+  // Click-tracking analytics endpoint (fxfiles-analytics). Used only when
+  // the generate request opts in via `enableTracking: true` — the injected
+  // <script> POSTs pageview pings here.
+  analyticsEndpointUrl: z.string().default('https://analytics.cloud.fx.land'),
 
   // Pinning Service Integration
   pinningWebuiUrl: z.string().default('http://127.0.0.1:3001'),
@@ -69,6 +79,7 @@ function loadConfig(): Config {
     claudeApiKey: process.env.CLAUDE_API_KEY,
     claudeModel: process.env.CLAUDE_MODEL,
     generationCostFula: process.env.GENERATION_COST_FULA,
+    generationCostFulaWithTracking: process.env.GENERATION_COST_FULA_WITH_TRACKING,
     freeGenerationsPerUser: process.env.FREE_GENERATIONS_PER_USER,
     maxConcurrentJobs: process.env.MAX_CONCURRENT_JOBS,
     jobTimeoutMs: process.env.JOB_TIMEOUT_MS,
@@ -77,6 +88,7 @@ function loadConfig(): Config {
     ipfsGatewayUrl: process.env.IPFS_GATEWAY_URL,
     s3GatewayUrl: process.env.S3_GATEWAY_URL,
     s3BucketName: process.env.S3_BUCKET_NAME,
+    analyticsEndpointUrl: process.env.ANALYTICS_ENDPOINT_URL,
     pinningWebuiUrl: process.env.PINNING_WEBUI_URL,
     pinningSystemKey: process.env.PINNING_SYSTEM_KEY,
     jwtSecret: process.env.JWT_SECRET,
@@ -112,6 +124,7 @@ export function logConfig(): void {
   console.log(`  claudeApiKey: ${config.claudeApiKey ? '****' : '(not set)'}`);
   console.log(`  claudeModel: ${config.claudeModel}`);
   console.log(`  generationCostFula: ${config.generationCostFula}`);
+  console.log(`  generationCostFulaWithTracking: ${config.generationCostFulaWithTracking}`);
   console.log(`  freeGenerationsPerUser: ${config.freeGenerationsPerUser}`);
   console.log(`  maxConcurrentJobs: ${config.maxConcurrentJobs}`);
   console.log(`  jobTimeoutMs: ${config.jobTimeoutMs}`);
@@ -120,6 +133,7 @@ export function logConfig(): void {
   console.log(`  ipfsGatewayUrl: ${config.ipfsGatewayUrl}`);
   console.log(`  s3GatewayUrl: ${config.s3GatewayUrl}`);
   console.log(`  s3BucketName: ${config.s3BucketName}`);
+  console.log(`  analyticsEndpointUrl: ${config.analyticsEndpointUrl}`);
   console.log(`  pinningWebuiUrl: ${config.pinningWebuiUrl}`);
   console.log(`  pinningSystemKey: ${config.pinningSystemKey ? '****' : '(not set)'}`);
   console.log(`  jwtSecret: ${config.jwtSecret ? '****' : '(not set)'}`);

@@ -184,6 +184,62 @@ function rewriteHtml(html: string, cidMap: Record<string, string>): string {
 }
 
 /**
+ * Build the fxfiles-analytics injection snippet. The injected script
+ * self-discovers the IPFS CID from `window.location` (handles
+ * subdomain-style `{cid}.ipfs.<gateway>` and path-style
+ * `<gateway>/ipfs/{cid}/`) and POSTs a pageview ping. No cookies, no
+ * localStorage, no PII collection. Content-Type is `text/plain` so the
+ * request is CORS-safelisted and survives `sendBeacon` / `no-cors fetch`.
+ */
+function buildAnalyticsScript(endpoint: string): string {
+  // Trim a trailing slash so `${endpoint}/api/v1/track` doesn't double up.
+  const base = endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint;
+  return `<script>
+(function () {
+  var ENDPOINT = ${JSON.stringify(base + '/api/v1/track')};
+  try {
+    var cid = '';
+    var parts = location.hostname.split('.');
+    if (parts.length >= 3 && parts[1] === 'ipfs') {
+      cid = parts[0];
+    } else {
+      var m = location.pathname.match(/^\\/ipfs\\/([^\\/]+)/);
+      if (m) cid = m[1];
+    }
+    if (!/^(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[ykz][a-z0-9]{40,80})$/.test(cid)) return;
+    var data = JSON.stringify({
+      cid: cid,
+      event: 'pageview',
+      ref: (document.referrer || '').slice(0, 200)
+    });
+    var blob = new Blob([data], { type: 'text/plain' });
+    if (navigator.sendBeacon && navigator.sendBeacon(ENDPOINT, blob)) return;
+    fetch(ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: data,
+      keepalive: true,
+      mode: 'no-cors'
+    }).catch(function () {});
+  } catch (e) {}
+})();
+</script>`;
+}
+
+/**
+ * Insert the analytics snippet just before `</body>`, or append it to the
+ * end of the document if the closing tag is missing. Case-insensitive match
+ * on the closing tag.
+ */
+function injectAnalyticsScript(html: string, snippet: string): string {
+  const closingBodyRe = /<\/body\s*>/i;
+  if (closingBodyRe.test(html)) {
+    return html.replace(closingBodyRe, `${snippet}\n$&`);
+  }
+  return html + '\n' + snippet + '\n';
+}
+
+/**
  * Publish website files via S3 gateway with URL rewriting.
  *
  * 1. Upload non-HTML assets to S3 → collect CID map
@@ -193,10 +249,15 @@ function rewriteHtml(html: string, cidMap: Record<string, string>): string {
  * All files go through S3 for proper cluster replication and pinning.
  * No direct IPFS API calls are made.
  */
+export interface PublishOptions {
+  enableTracking?: boolean;
+}
+
 export async function publishWebsite(
   files: Array<{ path: string; content: string }>,
   jobId: string,
-  userToken: string
+  userToken: string,
+  options: PublishOptions = {}
 ): Promise<PublishResult> {
   console.log(`[ipfs] Publishing ${files.length} files via S3 gateway with URL rewriting...`);
 
@@ -236,7 +297,16 @@ export async function publishWebsite(
     }
 
     // Step 2: Rewrite index.html with absolute gateway URLs
-    const rewrittenHtml = rewriteHtml(indexFile.content, cidMap);
+    let rewrittenHtml = rewriteHtml(indexFile.content, cidMap);
+
+    // Step 2.5 (optional): Inject the fxfiles-analytics ping script. The
+    // user opted in via `enableTracking` at generate time; the script
+    // self-discovers the CID from window.location at runtime.
+    if (options.enableTracking) {
+      const snippet = buildAnalyticsScript(config.analyticsEndpointUrl);
+      rewrittenHtml = injectAnalyticsScript(rewrittenHtml, snippet);
+      console.log('[ipfs] Click-tracking script injected into index.html');
+    }
 
     // Step 3: Upload rewritten index.html
     console.log('[ipfs] Uploading rewritten index.html...');

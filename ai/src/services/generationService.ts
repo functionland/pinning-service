@@ -159,7 +159,12 @@ async function executeJob(jobId: string, userToken: string, signal: AbortSignal)
     await updateGenerationStatus(jobId, 'publishing', 'Publishing website to IPFS...');
     console.log(`[generation] Job ${jobId}: publishing ${files.length} files to IPFS`);
 
-    const { cid, gatewayUrl } = await publishWebsite(files, jobId, userToken);
+    const { cid, gatewayUrl } = await publishWebsite(
+      files,
+      jobId,
+      userToken,
+      { enableTracking: job.enable_tracking === true }
+    );
 
     // Phase 3: Complete
     await completeGeneration(jobId, cid, gatewayUrl);

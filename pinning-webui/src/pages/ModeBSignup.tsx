@@ -21,7 +21,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 interface AppleSignInResponse {
@@ -82,6 +82,15 @@ declare global {
 export default function ModeBSignup() {
   const { loginWithModeB } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  // `platform` (google/apple): if set, locks the OAuth choice to match
+  // what the user picked in the FxFiles app. Without this, a user who
+  // chose Google in-app could click Apple here and end up with a
+  // separate effective_user_id (provider is part of the Mode B
+  // signing-input + KEK derivation).
+  const platformParam = searchParams.get('platform')?.toLowerCase();
+  const showGoogle = !platformParam || platformParam === 'google';
+  const showApple = !platformParam || platformParam === 'apple';
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -122,6 +131,8 @@ export default function ModeBSignup() {
 
   useEffect(() => {
     if (!password || busy) return;
+    // Skip Google init entirely when the FxFiles app pinned ?platform=apple.
+    if (!showGoogle) return;
     const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
     if (!clientId) return;
     let cancelled = false;
@@ -154,7 +165,7 @@ export default function ModeBSignup() {
     return () => {
       cancelled = true;
     };
-  }, [password, busy, handleGoogleCredential]);
+  }, [password, busy, showGoogle, handleGoogleCredential]);
 
   const handleAppleSignIn = useCallback(async () => {
     if (!password) {
@@ -253,8 +264,8 @@ export default function ModeBSignup() {
           )}
 
           <div className="flex flex-col items-center gap-3">
-            {/* Google */}
-            {password ? (
+            {/* Google — hidden when ?platform=apple pins the choice. */}
+            {showGoogle && (password ? (
               <div id="mode-b-google-button"></div>
             ) : (
               <button
@@ -263,19 +274,21 @@ export default function ModeBSignup() {
               >
                 Continue with Google
               </button>
-            )}
+            ))}
 
-            {/* Apple */}
-            <button
-              onClick={handleAppleSignIn}
-              disabled={!password || busy}
-              className="flex items-center justify-center gap-3 w-[280px] h-[44px] bg-black text-white rounded-md hover:bg-gray-800 transition-colors font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09l.01-.01zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z" />
-              </svg>
-              Continue with Apple
-            </button>
+            {/* Apple — hidden when ?platform=google pins the choice. */}
+            {showApple && (
+              <button
+                onClick={handleAppleSignIn}
+                disabled={!password || busy}
+                className="flex items-center justify-center gap-3 w-[280px] h-[44px] bg-black text-white rounded-md hover:bg-gray-800 transition-colors font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09l.01-.01zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z" />
+                </svg>
+                Continue with Apple
+              </button>
+            )}
           </div>
 
           <div className="mt-6 pt-4 border-t border-gray-100 text-center">

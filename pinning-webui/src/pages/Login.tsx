@@ -127,6 +127,18 @@ export default function Login() {
   const returnTo = searchParams.get('returnTo');
   const redirectParam = searchParams.get('redirect');
   const platformParam = searchParams.get('platform')?.toLowerCase(); // 'google', 'apple', or null (show both)
+  // `mode` (A/B/C): when set, render ONLY the matching vault mode card
+  // and hide the other two. Sent by the FxFiles app so a user who
+  // picked Mode B in-app can't accidentally click Mode A on the web
+  // (which would create a separate vault under the same OAuth identity).
+  const modeParam = searchParams.get('mode')?.toLowerCase();
+  const showModeA = !modeParam || modeParam === 'a';
+  const showModeB = !modeParam || modeParam === 'b';
+  const showModeC = !modeParam || modeParam === 'c';
+  // Preserve the platform pin when navigating into Mode B's dedicated
+  // page so the inner OAuth buttons filter correctly. Mode C has no
+  // OAuth so this is a no-op for that branch.
+  const subpathQuery = platformParam ? `?platform=${platformParam}` : '';
 
   // Capture referral code and redirect from URL and store in localStorage (keep first code only)
   useEffect(() => {
@@ -429,8 +441,9 @@ export default function Login() {
           </p>
 
           {/* Mode B — Maximum security (Recommended) */}
+          {showModeB && (
           <Link
-            to="/login/mode-b"
+            to={`/login/mode-b${subpathQuery}`}
             className="block rounded-xl border border-gray-200 hover:border-green-500 hover:shadow-md transition-all p-4 group"
           >
             <div className="flex items-start gap-3">
@@ -451,8 +464,10 @@ export default function Login() {
               </div>
             </div>
           </Link>
+          )}
 
           {/* Mode A — Standard (inline Google + Apple buttons) */}
+          {showModeA && (
           <div className="rounded-xl border border-gray-200 p-4">
             <div className="flex items-start gap-3 mb-3">
               <div className="flex-shrink-0 text-2xl">🔑</div>
@@ -485,8 +500,10 @@ export default function Login() {
               )}
             </div>
           </div>
+          )}
 
           {/* Mode C — Passphrase only (Advanced) */}
+          {showModeC && (
           <Link
             to="/login/mode-c"
             className="block rounded-xl border border-gray-200 hover:border-purple-500 hover:shadow-md transition-all p-4 group"
@@ -509,10 +526,21 @@ export default function Login() {
               </div>
             </div>
           </Link>
+          )}
 
-          <p className="text-[11px] text-gray-500 text-center italic pt-2">
-            Each mode is a separate vault. You can't switch later without re-uploading your files.
-          </p>
+          {/* When the app pinned a specific mode (e.g. modeParam='b'),
+              tell the user why the other two are missing — they can
+              still pick a different mode from inside the FxFiles app. */}
+          {modeParam ? (
+            <p className="text-[11px] text-gray-500 text-center italic pt-2">
+              Only your selected vault mode is shown here. To switch modes,
+              go back to the FxFiles app.
+            </p>
+          ) : (
+            <p className="text-[11px] text-gray-500 text-center italic pt-2">
+              Each mode is a separate vault. You can't switch later without re-uploading your files.
+            </p>
+          )}
 
           <div className="mt-4 pt-4 border-t border-gray-100">
             <p className="text-xs text-gray-500 text-center">

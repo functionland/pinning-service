@@ -14,6 +14,11 @@ export default function GetKey() {
 
   const redirectUrl = searchParams.get('redirect');
   const platformParam = searchParams.get('platform');
+  // `mode` (A/B/C) — passed by the FxFiles app to lock the web sign-in
+  // UI to whichever vault mode the user picked in-app. Forwarded
+  // through the /login bounce so /login can render only the matching
+  // mode card.
+  const modeParam = searchParams.get('mode');
 
   useEffect(() => {
     // Wait for auth to finish loading
@@ -46,9 +51,15 @@ export default function GetKey() {
       if (platformParam) {
         currentUrl += `&platform=${encodeURIComponent(platformParam)}`;
       }
+      if (modeParam) {
+        currentUrl += `&mode=${encodeURIComponent(modeParam)}`;
+      }
       let loginUrl = `/login?returnTo=${encodeURIComponent(currentUrl)}`;
       if (platformParam) {
         loginUrl += `&platform=${encodeURIComponent(platformParam)}`;
+      }
+      if (modeParam) {
+        loginUrl += `&mode=${encodeURIComponent(modeParam)}`;
       }
       navigate(loginUrl, { replace: true });
       return;
@@ -97,7 +108,7 @@ export default function GetKey() {
     };
 
     fetchKeyAndRedirect();
-  }, [user, loading, redirectUrl, platformParam, navigate]);
+  }, [user, loading, redirectUrl, platformParam, modeParam, navigate]);
 
   // Show loading state
   if (loading || processing) {

@@ -598,6 +598,28 @@ export function httpDelete(url: string, headers: Record<string, string>): Promis
 // Create Express app
 export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean }) {
   const dbOps = createDbOps(config.jwtSecret);
+
+  /**
+   * Return the user's active stored API key — mirrors `/api/keys/active`.
+   *
+   * Used by every auth endpoint (`/auth/google`, `/auth/apple`,
+   * `/auth/register-mode-{b,c}`) so the JWT returned to native clients
+   * matches what the dashboard's API Key page shows and stays stable
+   * across sign-ins. Minting a fresh JWT per call (via
+   * `generateJwtApiKey` alone) is wrong here — it produces a token the
+   * `api_keys` table doesn't know about, so the user's portal-visible
+   * key and their in-app token diverge.
+   *
+   * First-time signup: no `api_keys` rows exist → create one (which
+   * also persists it). Subsequent sign-ins: return the first stored key.
+   */
+  async function getOrCreateActiveApiKey(userId: string): Promise<string> {
+    const keys = await dbOps.getApiKeys(userId);
+    if (keys && keys.length > 0) {
+      return keys[0].key_id;
+    }
+    return dbOps.createApiKey(userId);
+  }
   const googleClient = new OAuth2Client(config.googleClientId);
 
   // Audit F-A1 / F-A3 redesign — in-memory challenge store for the
@@ -878,11 +900,12 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         provider: 'google',
       };
 
-      // Also mint a JWT so native clients (FxFiles mobile Mode A) can
-      // finish sign-in in-app without bouncing through a browser
-      // /get-key dance. The pinning-webui SPA ignores this field and
-      // continues to authenticate via session cookie — additive change.
-      const jwtToken = generateJwtApiKey(userId, config.jwtSecret);
+      // Return the user's ACTIVE stored API key — the same JWT
+      // `/api/keys/active` returns and what shows in the portal. First
+      // sign-in creates+stores one; subsequent sign-ins return the
+      // existing row so the in-app token and the portal-visible token
+      // stay in sync and remain stable across sign-out / sign-in cycles.
+      const jwtToken = await getOrCreateActiveApiKey(userId);
 
       res.json({
         success: true,
@@ -958,10 +981,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         provider: 'apple',
       };
 
-      // Mint a JWT so native FxFiles mobile Mode A can finish sign-in
-      // in-app without bouncing through the browser /get-key dance.
-      // Additive — the pinning-webui SPA still uses session cookies.
-      const jwtToken = generateJwtApiKey(userId, config.jwtSecret);
+      // Return the user's ACTIVE stored API key (same logic as
+      // /auth/google above). Matches what /api/keys/active and the
+      // portal's API Key page show, stable across sign-ins.
+      const jwtToken = await getOrCreateActiveApiKey(userId);
 
       res.json({
         success: true,
@@ -1178,7 +1201,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       );
       await txClient.query('COMMIT');
 
-      const jwtToken = generateJwtApiKey(effectiveUserIdHex, config.jwtSecret);
+      // Return the user's ACTIVE stored API key — same logic as
+      // /auth/google + /api/keys/active. Minting a fresh JWT here
+      // produces a token that doesn't match what the portal shows
+      // and changes on every sign-in. The Mode B JWT is signed with
+      // `sub=effectiveUserIdHex`, which is the webui_users.user_id
+      // for this Mode B user, so the api_keys lookup keys on the
+      // same value as Mode A.
+      const jwtToken = await getOrCreateActiveApiKey(effectiveUserIdHex);
       // Audit fix #4: actually check for a Mode A user (`webui_users`
       // keyed by SHA-256(lowercase(email))). The previous logic
       // counted other `seed_users` rows for the same oauth_sub, which
@@ -1291,7 +1321,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       );
       await txClient.query('COMMIT');
 
-      const jwtToken = generateJwtApiKey(effectiveUserIdHex, config.jwtSecret);
+      // Return the user's ACTIVE stored API key — same pattern as
+      // /auth/google, /auth/apple, /auth/register-mode-b. Stable
+      // across sign-ins, matches what the portal shows.
+      const jwtToken = await getOrCreateActiveApiKey(effectiveUserIdHex);
       // Mirror the register-mode-b session-cookie issuance so Mode C
       // users land in the existing AuthContext / `/auth/me` flow. Mode C
       // has no OAuth identity, so we synthesize the email and name from

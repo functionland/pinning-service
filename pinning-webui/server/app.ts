@@ -978,6 +978,28 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'oauth_token required' });
       }
 
+      // Audit finding #1: consume a single-use, server-issued challenge.
+      // Without this, an attacker could replay a captured registration
+      // body to mint perpetually-valid JWTs (DT-1 — no exp claim).
+      // Match the existing /auth/sign-in pattern: consume first, then
+      // compare bytes constant-time, then verify the signature.
+      const entry = challengeStore.takeIfValid(effectiveUserIdHex, 'register-mode-b');
+      if (!entry) {
+        return res.status(401).json({
+          error: 'Challenge missing, expired, or for a different purpose',
+          code: 'CHALLENGE_INVALID',
+        });
+      }
+      if (
+        entry.challenge.length !== challenge.length ||
+        !crypto.timingSafeEqual(entry.challenge, challenge)
+      ) {
+        return res.status(401).json({
+          error: 'Challenge mismatch',
+          code: 'CHALLENGE_INVALID',
+        });
+      }
+
       // Verify proof-of-seed-knowledge BEFORE touching the database.
       // Domain-separated transcript prevents cross-purpose / cross-user
       // signature replay (Codex advisor 2026-05-18).
@@ -998,6 +1020,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // anything the client supplied — so a client cannot forge an
       // OAuth binding to another user.
       let oauthSub: string;
+      // Capture the OAuth-verified email so we can detect an existing
+      // Mode A account for the same identity (audit fix #4). Email is
+      // NOT persisted to seed_users / webui_users — used only for the
+      // server-side `has_mode_a` check on this request.
+      let oauthEmail: string | undefined;
       if (provider === 'google') {
         const ticket = await googleClient.verifyIdToken({
           idToken: oauthToken,
@@ -1008,6 +1035,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           return res.status(401).json({ error: 'Invalid OAuth token' });
         }
         oauthSub = payload.sub;
+        oauthEmail = payload.email ?? undefined;
       } else {
         // Apple
         if (!config.appleClientId) {
@@ -1022,6 +1050,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           return res.status(401).json({ error: 'Invalid OAuth token' });
         }
         oauthSub = applePayload.sub;
+        // Apple returns email only on first sign-in; absent later → cannot
+        // detect Mode A in that branch. Acceptable false-negative.
+        oauthEmail = typeof applePayload.email === 'string' ? applePayload.email : undefined;
       }
 
       // Transactional INSERT: seed_users + webui_users together.
@@ -1040,19 +1071,33 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // namespace from any pre-existing Mode A account for the same
       // OAuth identity — fresh credit balance, fresh wallet bindings
       // (consistent with the maintainer's "treat as different users"
-      // decision, 2026-05-18). No email is stored — the OAuth binding
-      // lives only in `seed_users.oauth_sub`, which keeps Mode B users'
-      // `webui_users` rows free of PII.
+      // decision, 2026-05-18).
+      //
+      // Audit fix #5: store the encrypted `effective_user_id_hex` in
+      // `encrypted_email` instead of NULL. Email is treated as an
+      // opaque user-id across the system; storing the canonical id
+      // gives downstream code (admin tools, backup, future joins) a
+      // non-null value that decrypts to a known opaque token, rather
+      // than NULL which several call sites currently don't guard.
+      // Mode A's OAuth binding still lives in seed_users.oauth_sub.
+      const encryptedSyntheticEmailB =
+        encryptApiKey(effectiveUserIdHex) ?? effectiveUserIdHex;
       await txClient.query(
         `INSERT INTO webui_users (user_id, encrypted_email, name, picture, last_login_at)
-         VALUES ($1, NULL, '', '', NOW())
+         VALUES ($1, $2, '', '', NOW())
          ON CONFLICT (user_id) DO UPDATE SET last_login_at = NOW()`,
-        [effectiveUserIdHex]
+        [effectiveUserIdHex, encryptedSyntheticEmailB]
       );
       await txClient.query('COMMIT');
 
       const jwtToken = generateJwtApiKey(effectiveUserIdHex, config.jwtSecret);
-      const hasModeA = await checkModeAExistsForOauthSub(oauthSub).catch(() => false);
+      // Audit fix #4: actually check for a Mode A user (`webui_users`
+      // keyed by SHA-256(lowercase(email))). The previous logic
+      // counted other `seed_users` rows for the same oauth_sub, which
+      // detects "another seed-based vault" — NOT "a Mode A account".
+      const hasModeA = oauthEmail
+        ? await checkModeAExistsForEmail(oauthEmail).catch(() => false)
+        : false;
       return res.json({
         success: true,
         jwt: jwtToken,
@@ -1090,6 +1135,26 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const challenge = decodeChallenge(body.challenge_b64);
       const signature = decodeSignature(body.signature_b64);
 
+      // Audit finding #1: consume a single-use, server-issued challenge
+      // before doing any state-changing work. See the matching
+      // register-mode-b block above for rationale.
+      const entry = challengeStore.takeIfValid(effectiveUserIdHex, 'register-mode-c');
+      if (!entry) {
+        return res.status(401).json({
+          error: 'Challenge missing, expired, or for a different purpose',
+          code: 'CHALLENGE_INVALID',
+        });
+      }
+      if (
+        entry.challenge.length !== challenge.length ||
+        !crypto.timingSafeEqual(entry.challenge, challenge)
+      ) {
+        return res.status(401).json({
+          error: 'Challenge mismatch',
+          code: 'CHALLENGE_INVALID',
+        });
+      }
+
       const transcript = buildSignedTranscript(
         'register-mode-c',
         effectiveUserIdHex,
@@ -1111,11 +1176,16 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         oauthSub: null,
         provider: null,
       });
+      // Audit fix #5: store the encrypted `effective_user_id_hex` in
+      // `encrypted_email` (matching the Mode B path above) so the
+      // column is non-null for all seed-auth users.
+      const encryptedSyntheticEmailC =
+        encryptApiKey(effectiveUserIdHex) ?? effectiveUserIdHex;
       await txClient.query(
         `INSERT INTO webui_users (user_id, encrypted_email, name, picture, last_login_at)
-         VALUES ($1, NULL, '', '', NOW())
+         VALUES ($1, $2, '', '', NOW())
          ON CONFLICT (user_id) DO UPDATE SET last_login_at = NOW()`,
-        [effectiveUserIdHex]
+        [effectiveUserIdHex, encryptedSyntheticEmailC]
       );
       await txClient.query('COMMIT');
 
@@ -1152,19 +1222,44 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const body = req.body ?? {};
       const effectiveUserIdHex = validateEffectiveUserIdHex(body.effective_user_id_hex);
 
-      // 404 on unknown user — see Gemini advisor 2026-05-18 (the
-      // effective_user_id is already published via the gateway's
-      // global CBOR for Mode B users; hiding existence at the issuer
-      // adds no security and confuses the UX).
-      const user = await getSeedUser({ query }, effectiveUserIdHex);
-      if (!user) {
-        return res.status(404).json({
-          error: 'No account for this effective_user_id',
-          code: 'USER_NOT_FOUND',
+      // Audit finding #1: register-mode-{b,c} previously accepted
+      // client-generated challenges with no single-use tracking, allowing
+      // body-capture-and-replay to mint perpetually-valid JWTs (DT-1 says
+      // JWTs intentionally have no exp). Fix: extend /auth/challenge to
+      // issue purpose-tagged nonces for register flows too. `purpose`
+      // defaults to `sign-in` for back-compat with the original API.
+      const purposeRaw = typeof body.purpose === 'string' ? body.purpose : 'sign-in';
+      if (
+        purposeRaw !== 'sign-in' &&
+        purposeRaw !== 'register-mode-b' &&
+        purposeRaw !== 'register-mode-c'
+      ) {
+        return res.status(400).json({
+          error: "purpose must be one of: 'sign-in', 'register-mode-b', 'register-mode-c'",
+          code: 'VALIDATION_ERROR',
         });
       }
+      const purpose = purposeRaw as 'sign-in' | 'register-mode-b' | 'register-mode-c';
 
-      const challenge = issueChallenge(challengeStore, effectiveUserIdHex, 'sign-in');
+      // Sign-in MUST target an existing user — otherwise the caller
+      // would happily collect a nonce for a non-existent uid and
+      // confuse itself. Register flows are creating the user; existence
+      // is not required (and would be a chicken-and-egg block).
+      if (purpose === 'sign-in') {
+        // 404 on unknown user — see Gemini advisor 2026-05-18 (the
+        // effective_user_id is already published via the gateway's
+        // global CBOR for Mode B users; hiding existence at the issuer
+        // adds no security and confuses the UX).
+        const user = await getSeedUser({ query }, effectiveUserIdHex);
+        if (!user) {
+          return res.status(404).json({
+            error: 'No account for this effective_user_id',
+            code: 'USER_NOT_FOUND',
+          });
+        }
+      }
+
+      const challenge = issueChallenge(challengeStore, effectiveUserIdHex, purpose);
       return res.json({
         challenge_b64: challenge.toString('base64'),
       });
@@ -1250,27 +1345,29 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
-  // Helper used by register-mode-b to set the `has_mode_a` response flag.
-  // True when an OAuth-only (Mode A) account already exists for the same
-  // `oauth_sub` — so the client can warn the user that their new Mode B
-  // vault is separate from their existing one (Gemini advisor 2026-05-18).
-  async function checkModeAExistsForOauthSub(oauthSub: string): Promise<boolean> {
-    // Mode A accounts are keyed by `SHA-256(lowercase(email))`, not by
-    // `oauth_sub`. We can't directly query "does an oauth_sub already
-    // have a Mode A account" without decrypting emails. Best-effort
-    // proxy: another `seed_users` row with the same `oauth_sub` but
-    // not the current effective_user_id. If you later add an
-    // `oauth_sub_hash` column to `webui_users`, swap this in.
+  // Audit fix #4 (2026-05-18) — actually check for a Mode A account.
+  // Mode A users live in `webui_users` keyed by `SHA-256(lowercase(email))`
+  // (64 hex chars). Mode B/C users live in `webui_users` keyed by
+  // `effective_user_id_hex` (32 hex chars). The two PK spaces never
+  // collide, so an exact-match on the email-derived id is unambiguous.
+  //
+  // Used by register-mode-b to set the `has_mode_a` response flag so
+  // the FxFiles UI can warn a user about creating a fresh-and-separate
+  // Mode B vault when their OAuth identity already has a Mode A
+  // account (Gemini advisor 2026-05-18).
+  async function checkModeAExistsForEmail(email: string): Promise<boolean> {
     try {
-      const result = await query<{ count: string }>(
-        `SELECT COUNT(*) as count FROM seed_users WHERE oauth_sub = $1`,
-        [oauthSub]
+      const userId = emailToUserId(email);
+      const result = await query<{ exists: boolean }>(
+        `SELECT EXISTS(SELECT 1 FROM webui_users WHERE user_id = $1) AS exists`,
+        [userId]
       );
-      return parseInt(result.rows[0]?.count || '0', 10) > 1;
+      return result.rows[0]?.exists === true;
     } catch {
       return false;
     }
   }
+
 
   app.post('/auth/logout', (req: Request, res: Response) => {
     req.session.destroy((err) => {

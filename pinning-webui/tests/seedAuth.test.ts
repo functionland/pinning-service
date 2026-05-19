@@ -64,6 +64,20 @@ function freshEffectiveUserId(): string {
   return crypto.randomBytes(16).toString('hex');
 }
 
+/** Fetch a server-issued challenge for a register flow (audit fix #1). */
+async function obtainRegisterChallenge(
+  app: Express,
+  effectiveUserIdHex: string,
+  mode: 'b' | 'c',
+): Promise<Buffer> {
+  const res = await request(app).post('/auth/challenge').send({
+    effective_user_id_hex: effectiveUserIdHex,
+    purpose: `register-mode-${mode}`,
+  });
+  expect(res.status).toBe(200);
+  return Buffer.from(res.body.challenge_b64, 'base64');
+}
+
 // ---------- DB cleanup ----------
 
 async function clearSeedTables(): Promise<void> {
@@ -98,7 +112,7 @@ describe.runIf(pgAvailable)('Seed-auth endpoints', () => {
     it('happy path: registers a Mode C user and returns a JWT', async () => {
       const { publicKeyRaw, privateKey } = freshKeypair();
       const effectiveUserIdHex = freshEffectiveUserId();
-      const challenge = crypto.randomBytes(32);
+      const challenge = await obtainRegisterChallenge(app, effectiveUserIdHex, 'c');
       const signature = signTranscript(
         privateKey,
         'register-mode-c',
@@ -135,7 +149,7 @@ describe.runIf(pgAvailable)('Seed-auth endpoints', () => {
       const effectiveUserIdHex = freshEffectiveUserId();
 
       for (const expectedCreated of [true, false]) {
-        const challenge = crypto.randomBytes(32);
+        const challenge = await obtainRegisterChallenge(app, effectiveUserIdHex, 'c');
         const signature = signTranscript(
           privateKey,
           'register-mode-c',
@@ -158,7 +172,7 @@ describe.runIf(pgAvailable)('Seed-auth endpoints', () => {
     it('squatting: different key for same effective_user_id → 409', async () => {
       const effectiveUserIdHex = freshEffectiveUserId();
       const alice = freshKeypair();
-      const aliceChallenge = crypto.randomBytes(32);
+      const aliceChallenge = await obtainRegisterChallenge(app, effectiveUserIdHex, 'c');
       const aliceSig = signTranscript(
         alice.privateKey,
         'register-mode-c',
@@ -177,7 +191,7 @@ describe.runIf(pgAvailable)('Seed-auth endpoints', () => {
 
       // Different keypair, same effective_user_id → squatting.
       const bob = freshKeypair();
-      const bobChallenge = crypto.randomBytes(32);
+      const bobChallenge = await obtainRegisterChallenge(app, effectiveUserIdHex, 'c');
       const bobSig = signTranscript(
         bob.privateKey,
         'register-mode-c',
@@ -199,7 +213,7 @@ describe.runIf(pgAvailable)('Seed-auth endpoints', () => {
     it('bad signature: 401 SIGNATURE_INVALID', async () => {
       const { publicKeyRaw, privateKey } = freshKeypair();
       const effectiveUserIdHex = freshEffectiveUserId();
-      const challenge = crypto.randomBytes(32);
+      const challenge = await obtainRegisterChallenge(app, effectiveUserIdHex, 'c');
       // Sign a DIFFERENT transcript than what the server reconstructs.
       const wrongSignature = crypto.sign(
         null,
@@ -223,7 +237,7 @@ describe.runIf(pgAvailable)('Seed-auth endpoints', () => {
       // Register normally.
       const { publicKeyRaw, privateKey } = freshKeypair();
       const effectiveUserIdHex = freshEffectiveUserId();
-      const regChallenge = crypto.randomBytes(32);
+      const regChallenge = await obtainRegisterChallenge(app, effectiveUserIdHex, 'c');
       const regSignature = signTranscript(
         privateKey,
         'register-mode-c',
@@ -283,6 +297,86 @@ describe.runIf(pgAvailable)('Seed-auth endpoints', () => {
       }
     });
 
+    it('AUDIT-1 replay: re-submitting a captured register-mode-c body fails with 401', async () => {
+      // Audit finding #1: registration endpoints accepted client-supplied
+      // challenges with no single-use tracking. After the fix the server
+      // must consume the challenge via the same /auth/challenge → register
+      // round-trip that /auth/sign-in already uses.
+      const { publicKeyRaw, privateKey } = freshKeypair();
+      const effectiveUserIdHex = freshEffectiveUserId();
+
+      // Fetch a server-issued challenge for register-mode-c.
+      const chRes = await request(app)
+        .post('/auth/challenge')
+        .send({
+          effective_user_id_hex: effectiveUserIdHex,
+          purpose: 'register-mode-c',
+        });
+      expect(chRes.status).toBe(200);
+      const challenge = Buffer.from(chRes.body.challenge_b64, 'base64');
+      expect(challenge.length).toBe(32);
+
+      const signature = signTranscript(
+        privateKey,
+        'register-mode-c',
+        effectiveUserIdHex,
+        challenge
+      );
+
+      const body = {
+        effective_user_id_hex: effectiveUserIdHex,
+        public_key_b64: publicKeyRaw.toString('base64'),
+        challenge_b64: challenge.toString('base64'),
+        signature_b64: signature.toString('base64'),
+      };
+
+      // First submission succeeds.
+      const first = await request(app).post('/auth/register-mode-c').send(body);
+      expect(first.status).toBe(200);
+
+      // Capture-and-replay: identical body, sent a second time.
+      // After the fix the server has consumed the nonce and must reject.
+      const replay = await request(app).post('/auth/register-mode-c').send(body);
+      expect(replay.status).toBe(401);
+      expect(replay.body.code).toBe('CHALLENGE_INVALID');
+    });
+
+    it('AUDIT-5 webui_users.encrypted_email is non-null for Mode C users', async () => {
+      // Audit finding #5: Mode B/C webui_users rows used to be
+      // inserted with `encrypted_email = NULL`. Downstream code paths
+      // that read this column without null-guards could misbehave.
+      // Fix: store the encrypted effective_user_id_hex (treated as
+      // an opaque user-id, since "email is essentially userid all
+      // over the system").
+      const { publicKeyRaw, privateKey } = freshKeypair();
+      const effectiveUserIdHex = freshEffectiveUserId();
+      const challenge = await obtainRegisterChallenge(app, effectiveUserIdHex, 'c');
+      const signature = signTranscript(
+        privateKey,
+        'register-mode-c',
+        effectiveUserIdHex,
+        challenge
+      );
+      const res = await request(app).post('/auth/register-mode-c').send({
+        effective_user_id_hex: effectiveUserIdHex,
+        public_key_b64: publicKeyRaw.toString('base64'),
+        challenge_b64: challenge.toString('base64'),
+        signature_b64: signature.toString('base64'),
+      });
+      expect(res.status).toBe(200);
+
+      // Verify the encrypted_email column is non-null on the row.
+      const row = await query<{ encrypted_email: string | null }>(
+        `SELECT encrypted_email FROM webui_users WHERE user_id = $1`,
+        [effectiveUserIdHex]
+      );
+      expect(row.rows.length).toBe(1);
+      expect(row.rows[0].encrypted_email).not.toBeNull();
+      expect(typeof row.rows[0].encrypted_email).toBe('string');
+      // Non-empty (encrypted form of a 32-char hex string).
+      expect((row.rows[0].encrypted_email ?? '').length).toBeGreaterThan(0);
+    });
+
     it('bad public_key length: 400 VALIDATION_ERROR', async () => {
       const effectiveUserIdHex = freshEffectiveUserId();
       const res = await request(app).post('/auth/register-mode-c').send({
@@ -312,7 +406,7 @@ describe.runIf(pgAvailable)('Seed-auth endpoints', () => {
     it('returns 200 with a base64 32-byte challenge for a known user', async () => {
       const { publicKeyRaw, privateKey } = freshKeypair();
       const effectiveUserIdHex = freshEffectiveUserId();
-      const challenge = crypto.randomBytes(32);
+      const challenge = await obtainRegisterChallenge(app, effectiveUserIdHex, 'c');
       const signature = signTranscript(
         privateKey,
         'register-mode-c',
@@ -347,7 +441,7 @@ describe.runIf(pgAvailable)('Seed-auth endpoints', () => {
     }> {
       const { publicKeyRaw, privateKey } = freshKeypair();
       const effectiveUserIdHex = freshEffectiveUserId();
-      const regChallenge = crypto.randomBytes(32);
+      const regChallenge = await obtainRegisterChallenge(app, effectiveUserIdHex, 'c');
       const regSig = signTranscript(
         privateKey,
         'register-mode-c',
@@ -457,7 +551,7 @@ describe.runIf(pgAvailable)('Seed-auth endpoints', () => {
     it('no prior challenge issued → 401', async () => {
       const { publicKeyRaw, privateKey } = freshKeypair();
       const effectiveUserIdHex = freshEffectiveUserId();
-      const regChallenge = crypto.randomBytes(32);
+      const regChallenge = await obtainRegisterChallenge(app, effectiveUserIdHex, 'c');
       const regSig = signTranscript(
         privateKey,
         'register-mode-c',

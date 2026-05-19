@@ -35,3 +35,6 @@ ipfs-pinning
 ai/package-lock.json
 .claude/settings.local.json
 /.claude
+pinning-webui/package-lock.json
+pinning-webui/dist
+pinning-webui/node_modules

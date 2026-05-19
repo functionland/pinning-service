@@ -19,8 +19,13 @@ const KEY_LENGTH_BITS = 256;
 const NONCE_LENGTH = 12;
 const TAG_LENGTH = 16;
 
-// Authentication provider type
-export type AuthProvider = 'google' | 'apple';
+// Authentication provider type. 'seed' = Mode C (passphrase-only); the
+// Mode A KEK derivation in `deriveEncryptionKey` does NOT support it —
+// Mode C users derive their KEK from the seed via
+// `services/seedAuthCrypto.ts::deriveModeCKek`, not from
+// `{provider}:{userId}:{email}`. Call sites that decrypt files must
+// either branch on this case or pass-through with a clear UX message.
+export type AuthProvider = 'google' | 'apple' | 'seed';
 
 /**
  * Derives an encryption key from user credentials using Argon2id (memory-hard KDF)
@@ -46,6 +51,18 @@ export async function deriveEncryptionKey(
   userId: string,
   userEmail: string
 ): Promise<CryptoKey> {
+  if (provider === 'seed') {
+    // Mode C vaults derive their master KEK from the user's seed via
+    // `services/seedAuthCrypto.ts::deriveModeCKek` — NOT from the
+    // OAuth-style `{provider}:{userId}:{email}` input. Callers that
+    // reach this branch are file-decryption sites which haven't been
+    // taught to ask the user for their seed; surface a clear error
+    // rather than silently producing an unusable key.
+    throw new Error(
+      'Mode C (passphrase-only) vault decryption is not yet wired into ' +
+        'this page. Use the FxFiles app on mobile/desktop for now.',
+    );
+  }
   const encoder = new TextEncoder();
 
   // Combined input format: "{provider}:{userId}:{email}" - matches FxFiles

@@ -3,6 +3,8 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { LanguageProvider } from './context/LanguageContext';
 import Login from './pages/Login';
+import ModeBSignup from './pages/ModeBSignup';
+import ModeCSignup from './pages/ModeCSignup';
 import Dashboard from './pages/Dashboard';
 import ApiKeys from './pages/ApiKeys';
 import Pins from './pages/Pins';
@@ -75,6 +77,8 @@ function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/login/mode-b" element={<ModeBSignup />} />
+          <Route path="/login/mode-c" element={<ModeCSignup />} />
           <Route path="/get-key" element={<GetKey />} />
           <Route path="/view/:shareId" element={<View />} />
           <Route path="/collab/:groupId" element={<Collab />} />

@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useState, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import LanguageSelector from '../components/LanguageSelector';
@@ -414,33 +414,107 @@ export default function Login() {
           </div>
         )}
 
-        {/* Login card */}
-        <div className="bg-white rounded-2xl shadow-lg p-8">
-          <h2 className="text-xl font-semibold text-gray-900 mb-6 text-center">
-            {t.login.signIn}
+        {/* Mode chooser — three vault security tiers, mirroring the
+            FxFiles ModeChoiceScreen layout. Mode A signs in inline via
+            Google / Apple (no extra screen — it's just two buttons).
+            Mode B (OAuth + password) and Mode C (passphrase-only with
+            24-word recovery) navigate to dedicated /login/mode-{b,c}
+            pages because they each have a multi-step flow. */}
+        <div className="bg-white rounded-2xl shadow-lg p-6 space-y-3">
+          <h2 className="text-xl font-semibold text-gray-900 mb-1 text-center">
+            Choose how to secure your vault
           </h2>
+          <p className="text-sm text-gray-500 text-center mb-4">
+            Your files are end-to-end encrypted on every option.
+          </p>
 
-          <div className="flex flex-col items-center gap-4">
-            {/* Google Sign-In Button - show if no platform param or platform=google */}
-            {(!platformParam || platformParam === 'google') && (
-              <div id="google-signin-button"></div>
-            )}
+          {/* Mode B — Maximum security (Recommended) */}
+          <Link
+            to="/login/mode-b"
+            className="block rounded-xl border border-gray-200 hover:border-green-500 hover:shadow-md transition-all p-4 group"
+          >
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0 text-2xl">🛡️</div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <h3 className="text-base font-semibold text-gray-900">Maximum security</h3>
+                  <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded bg-green-100 text-green-700">
+                    Recommended
+                  </span>
+                </div>
+                <p className="text-xs text-gray-600 mb-2">
+                  Google/Apple <strong>plus</strong> a password. A leak of your Google or Apple account alone does NOT expose your files.
+                </p>
+                <p className="text-xs text-primary-600 group-hover:underline">
+                  Continue with password →
+                </p>
+              </div>
+            </div>
+          </Link>
 
-            {/* Apple Sign-In Button - show if no platform param or platform=apple */}
-            {(!platformParam || platformParam === 'apple') && (
-              <button
-                onClick={handleAppleSignIn}
-                className="flex items-center justify-center gap-3 w-[280px] h-[44px] bg-black text-white rounded-md hover:bg-gray-800 transition-colors font-medium text-sm"
-              >
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09l.01-.01zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/>
-                </svg>
-                Sign in with Apple
-              </button>
-            )}
+          {/* Mode A — Standard (inline Google + Apple buttons) */}
+          <div className="rounded-xl border border-gray-200 p-4">
+            <div className="flex items-start gap-3 mb-3">
+              <div className="flex-shrink-0 text-2xl">🔑</div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <h3 className="text-base font-semibold text-gray-900">Standard security</h3>
+                  <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded bg-blue-100 text-blue-700">
+                    Easiest
+                  </span>
+                </div>
+                <p className="text-xs text-gray-600">
+                  Sign in with Google or Apple. Your encryption is tied to your account.
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-col items-center gap-3 pt-1">
+              {(!platformParam || platformParam === 'google') && (
+                <div id="google-signin-button"></div>
+              )}
+              {(!platformParam || platformParam === 'apple') && (
+                <button
+                  onClick={handleAppleSignIn}
+                  className="flex items-center justify-center gap-3 w-[280px] h-[44px] bg-black text-white rounded-md hover:bg-gray-800 transition-colors font-medium text-sm"
+                >
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09l.01-.01zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/>
+                  </svg>
+                  Sign in with Apple
+                </button>
+              )}
+            </div>
           </div>
 
-          <div className="mt-6 pt-6 border-t border-gray-100">
+          {/* Mode C — Passphrase only (Advanced) */}
+          <Link
+            to="/login/mode-c"
+            className="block rounded-xl border border-gray-200 hover:border-purple-500 hover:shadow-md transition-all p-4 group"
+          >
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0 text-2xl">🔐</div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <h3 className="text-base font-semibold text-gray-900">Passphrase only</h3>
+                  <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded bg-purple-100 text-purple-700">
+                    Advanced
+                  </span>
+                </div>
+                <p className="text-xs text-gray-600 mb-2">
+                  No Google or Apple required — a 24-word recovery phrase secures your vault. Lose it = lose your data.
+                </p>
+                <p className="text-xs text-primary-600 group-hover:underline">
+                  Create or restore a passphrase vault →
+                </p>
+              </div>
+            </div>
+          </Link>
+
+          <p className="text-[11px] text-gray-500 text-center italic pt-2">
+            Each mode is a separate vault. You can't switch later without re-uploading your files.
+          </p>
+
+          <div className="mt-4 pt-4 border-t border-gray-100">
             <p className="text-xs text-gray-500 text-center">
               {t.login.terms}
             </p>

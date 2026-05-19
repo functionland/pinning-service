@@ -69,12 +69,15 @@ import { getClient } from './database/postgres.js';
 
 // Session user type
 export interface SessionUser {
-  id: string; // User ID (Google sub claim or Apple sub)
-  userId: string; // SHA-256(email) — used for all DB lookups
-  email: string; // Ephemeral, from OAuth — NOT stored in DB, only in session memory
+  id: string; // OAuth sub for Mode A/B; effective_user_id_hex for Mode C
+  userId: string; // Mode A: SHA-256(email); Mode B/C: effective_user_id_hex
+  email: string; // Mode A/B: from OAuth; Mode C: <uid>@seed.fxfiles.local synthetic
   name: string;
   picture: string;
-  provider: 'google' | 'apple'; // Authentication provider
+  // 'seed' = Mode C (passphrase-only, no OAuth identity bound). Mode B
+  // users keep `'google'` / `'apple'` so existing UI conditioning on
+  // the provider field continues to work for them.
+  provider: 'google' | 'apple' | 'seed';
 }
 
 // Extend express session
@@ -1023,8 +1026,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // Capture the OAuth-verified email so we can detect an existing
       // Mode A account for the same identity (audit fix #4). Email is
       // NOT persisted to seed_users / webui_users — used only for the
-      // server-side `has_mode_a` check on this request.
+      // server-side `has_mode_a` check on this request and for the
+      // session.user echo so AuthContext sees a populated profile.
       let oauthEmail: string | undefined;
+      // Display name and picture URL from the OAuth verifier. Echoed
+      // into req.session.user so the dashboard / profile pages can
+      // show a friendly identifier for the Mode B user. NOT persisted.
+      let oauthName: string | undefined;
+      let oauthPicture: string | undefined;
       if (provider === 'google') {
         const ticket = await googleClient.verifyIdToken({
           idToken: oauthToken,
@@ -1036,6 +1045,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         }
         oauthSub = payload.sub;
         oauthEmail = payload.email ?? undefined;
+        oauthName = typeof payload.name === 'string' ? payload.name : undefined;
+        oauthPicture = typeof payload.picture === 'string' ? payload.picture : undefined;
       } else {
         // Apple
         if (!config.appleClientId) {
@@ -1053,6 +1064,21 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         // Apple returns email only on first sign-in; absent later → cannot
         // detect Mode A in that branch. Acceptable false-negative.
         oauthEmail = typeof applePayload.email === 'string' ? applePayload.email : undefined;
+        // Apple supplies the display name only on first sign-in, via the
+        // client-supplied user object — accept it if present, otherwise
+        // leave name empty.
+        const appleUser = typeof body.user === 'object' && body.user !== null
+          ? body.user as { name?: { firstName?: string; lastName?: string }; email?: string }
+          : undefined;
+        if (appleUser?.name) {
+          const fn = appleUser.name.firstName ?? '';
+          const ln = appleUser.name.lastName ?? '';
+          const composed = `${fn} ${ln}`.trim();
+          oauthName = composed.length > 0 ? composed : undefined;
+        }
+        if (!oauthEmail && typeof appleUser?.email === 'string') {
+          oauthEmail = appleUser.email;
+        }
       }
 
       // Transactional INSERT: seed_users + webui_users together.
@@ -1098,9 +1124,23 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const hasModeA = oauthEmail
         ? await checkModeAExistsForEmail(oauthEmail).catch(() => false)
         : false;
+      // Also issue a session cookie alongside the JWT so the existing
+      // AuthContext / `/auth/me` flow on pinning-webui sees Mode B users
+      // as signed in without needing a JWT-bearer refactor of every API
+      // route. The JWT is still returned for SDK callers (FxFiles) that
+      // don't carry the session cookie.
+      req.session.user = {
+        id: oauthSub,
+        userId: effectiveUserIdHex,
+        email: oauthEmail ?? `${effectiveUserIdHex}@seed.fxfiles.local`,
+        name: oauthName ?? '',
+        picture: oauthPicture ?? '',
+        provider,
+      };
       return res.json({
         success: true,
         jwt: jwtToken,
+        user: req.session.user,
         effective_user_id_hex: effectiveUserIdHex,
         mode: 'B',
         created,
@@ -1190,9 +1230,22 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       await txClient.query('COMMIT');
 
       const jwtToken = generateJwtApiKey(effectiveUserIdHex, config.jwtSecret);
+      // Mirror the register-mode-b session-cookie issuance so Mode C
+      // users land in the existing AuthContext / `/auth/me` flow. Mode C
+      // has no OAuth identity, so we synthesize the email and name from
+      // the effective_user_id (matches FxFiles auth_service.dart pattern).
+      req.session.user = {
+        id: effectiveUserIdHex,
+        userId: effectiveUserIdHex,
+        email: `${effectiveUserIdHex}@seed.fxfiles.local`,
+        name: 'Passphrase Vault',
+        picture: '',
+        provider: 'seed',
+      };
       return res.json({
         success: true,
         jwt: jwtToken,
+        user: req.session.user,
         effective_user_id_hex: effectiveUserIdHex,
         mode: 'C',
         created,

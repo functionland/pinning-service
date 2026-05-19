@@ -16,6 +16,10 @@ const __dirname = path.dirname(__filename);
 const config: AppConfig = {
   port: parseInt(process.env.WEBUI_PORT || '3001'),
   googleClientId: process.env.GOOGLE_CLIENT_ID || '',
+  googleAdditionalAudiences: (process.env.GOOGLE_ADDITIONAL_AUDIENCES || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
   sessionSecret: process.env.SESSION_SECRET || 'change-this-in-production-' + uuidv4(),
   jwtSecret: process.env.JWT_SECRET || process.env.SESSION_SECRET || 'change-this-jwt-secret-in-production',
   nodeEnv: process.env.NODE_ENV || 'development',
@@ -33,6 +37,10 @@ const config: AppConfig = {
   fulaUsersIndexInternalToken: process.env.FULA_USERS_INDEX_INTERNAL_TOKEN,
   // Apple Sign-In configuration
   appleClientId: process.env.APPLE_CLIENT_ID,
+  appleAdditionalAudiences: (process.env.APPLE_ADDITIONAL_AUDIENCES || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
   appleTeamId: process.env.APPLE_TEAM_ID,
   appleKeyId: process.env.APPLE_KEY_ID,
   applePrivateKey: process.env.APPLE_PRIVATE_KEY_PATH

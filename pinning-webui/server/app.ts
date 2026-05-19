@@ -100,6 +100,14 @@ declare global {
 export interface AppConfig {
   port: number;
   googleClientId: string;
+  // Additional Google OAuth client IDs accepted on the /auth/register-mode-b
+  // path. Mode B clients send their own ID token (e.g. FxFiles ships its
+  // own Google Web client ID as serverClientId), so the `aud` claim on
+  // that token is NOT the pinning-webui's googleClientId. Operators add
+  // the FxFiles client ID (and any other downstream Mode B clients)
+  // here. Mode A (`/auth/google`) is unaffected — it's webui-only.
+  // Comma-separated env: GOOGLE_ADDITIONAL_AUDIENCES.
+  googleAdditionalAudiences?: string[];
   sessionSecret: string;
   jwtSecret: string;
   nodeEnv: string;
@@ -120,6 +128,10 @@ export interface AppConfig {
   fulaUsersIndexInternalToken?: string;
   // Apple Sign-In configuration
   appleClientId?: string;
+  // Same idea as googleAdditionalAudiences but for Apple. FxFiles ships
+  // its own Apple Services ID (bundle/web client) as the `aud` it asks
+  // Apple to sign tokens for. Comma-separated env: APPLE_ADDITIONAL_AUDIENCES.
+  appleAdditionalAudiences?: string[];
   appleTeamId?: string;
   appleKeyId?: string;
   applePrivateKey?: string;
@@ -1035,9 +1047,20 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       let oauthName: string | undefined;
       let oauthPicture: string | undefined;
       if (provider === 'google') {
+        // Accept tokens issued for the pinning-webui's own Google
+        // client ID AND any additional client IDs configured via
+        // GOOGLE_ADDITIONAL_AUDIENCES — FxFiles (and other Mode B
+        // clients) ship their own Google Web client ID as
+        // `serverClientId`, so the `aud` claim on their token is
+        // theirs, not ours. google-auth-library accepts a string or
+        // string[] for the `audience` parameter and checks any match.
+        const acceptedGoogleAudiences = [
+          config.googleClientId,
+          ...(config.googleAdditionalAudiences ?? []),
+        ].filter(Boolean);
         const ticket = await googleClient.verifyIdToken({
           idToken: oauthToken,
-          audience: config.googleClientId,
+          audience: acceptedGoogleAudiences,
         });
         const payload = ticket.getPayload();
         if (!payload?.sub) {
@@ -1053,8 +1076,15 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           return res.status(500).json({ error: 'Apple Sign-In not configured' });
         }
         const AppleSignIn = await import('apple-signin-auth');
+        // Same multi-audience trick as Google above — apple-signin-auth
+        // accepts string | string[] for `audience` and validates any
+        // match.
+        const acceptedAppleAudiences = [
+          config.appleClientId,
+          ...(config.appleAdditionalAudiences ?? []),
+        ].filter(Boolean);
         const applePayload = await AppleSignIn.default.verifyIdToken(oauthToken, {
-          audience: config.appleClientId,
+          audience: acceptedAppleAudiences,
           ignoreExpiration: false,
         });
         if (!applePayload?.sub) {

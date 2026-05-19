@@ -91,6 +91,12 @@ export default function ModeBSignup() {
   const platformParam = searchParams.get('platform')?.toLowerCase();
   const showGoogle = !platformParam || platformParam === 'google';
   const showApple = !platformParam || platformParam === 'apple';
+  // `returnTo` — set when the /get-key → /login bounce forwarded us
+  // here. After a successful registration we must navigate back to
+  // /get-key (not /) so it can fetch the API key and trigger the
+  // fxfiles://auth-callback handoff that returns the JWT to the app.
+  const returnTo = searchParams.get('returnTo');
+  const successDestination = returnTo && returnTo.startsWith('/') ? returnTo : '/';
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -118,7 +124,7 @@ export default function ModeBSignup() {
         if (result.hasModeA) {
           setHasModeAWarning(true);
         } else {
-          navigate('/', { replace: true });
+          navigate(successDestination, { replace: true });
         }
       } catch (e) {
         const err = e as Error & { code?: string };
@@ -126,7 +132,7 @@ export default function ModeBSignup() {
         setError(humanizeError(err));
       }
     },
-    [loginWithModeB, navigate, password],
+    [loginWithModeB, navigate, password, successDestination],
   );
 
   useEffect(() => {
@@ -211,7 +217,7 @@ export default function ModeBSignup() {
       }
       setError(humanizeError(err));
     }
-  }, [loginWithModeB, navigate, password]);
+  }, [loginWithModeB, navigate, password, successDestination]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary-50 to-gray-100 flex flex-col items-center justify-center p-4">
@@ -327,7 +333,7 @@ export default function ModeBSignup() {
             <button
               onClick={() => {
                 setHasModeAWarning(false);
-                navigate('/', { replace: true });
+                navigate(successDestination, { replace: true });
               }}
               className="w-full px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-md text-sm font-medium"
             >

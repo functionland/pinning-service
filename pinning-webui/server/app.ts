@@ -841,9 +841,19 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Missing credential' });
       }
 
+      // Accept tokens issued for the pinning-webui's own Google client
+      // ID AND any additional client IDs in GOOGLE_ADDITIONAL_AUDIENCES.
+      // The FxFiles app ships its own Google Web client ID as
+      // `serverClientId`, so the `aud` claim on tokens it forwards here
+      // is theirs, not ours. Same multi-audience trick we use on
+      // /auth/register-mode-b — google-auth-library accepts string[].
+      const acceptedGoogleAudiences = [
+        config.googleClientId,
+        ...(config.googleAdditionalAudiences ?? []),
+      ].filter(Boolean);
       const ticket = await googleClient.verifyIdToken({
         idToken: credential,
-        audience: config.googleClientId,
+        audience: acceptedGoogleAudiences,
       });
 
       const payload = ticket.getPayload();
@@ -868,8 +878,15 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         provider: 'google',
       };
 
+      // Also mint a JWT so native clients (FxFiles mobile Mode A) can
+      // finish sign-in in-app without bouncing through a browser
+      // /get-key dance. The pinning-webui SPA ignores this field and
+      // continues to authenticate via session cookie — additive change.
+      const jwtToken = generateJwtApiKey(userId, config.jwtSecret);
+
       res.json({
         success: true,
+        jwt: jwtToken,
         user: req.session.user,
         isNew: user.isNew,
       });
@@ -895,9 +912,18 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // Dynamically import apple-signin-auth (ESM module)
       const AppleSignIn = await import('apple-signin-auth');
 
+      // Accept tokens issued for the pinning-webui's own Apple client
+      // ID AND any additional Services IDs in APPLE_ADDITIONAL_AUDIENCES.
+      // FxFiles ships its own Apple bundle ID; tokens it forwards here
+      // carry that `aud`. apple-signin-auth's `audience` parameter
+      // is passed through to jsonwebtoken which accepts string[].
+      const acceptedAppleAudiences = [
+        config.appleClientId,
+        ...(config.appleAdditionalAudiences ?? []),
+      ].filter(Boolean);
       // Verify the identity token with Apple
       const applePayload = await AppleSignIn.default.verifyIdToken(identityToken, {
-        audience: config.appleClientId,
+        audience: acceptedAppleAudiences,
         ignoreExpiration: false,
       });
 
@@ -932,8 +958,14 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         provider: 'apple',
       };
 
+      // Mint a JWT so native FxFiles mobile Mode A can finish sign-in
+      // in-app without bouncing through the browser /get-key dance.
+      // Additive — the pinning-webui SPA still uses session cookies.
+      const jwtToken = generateJwtApiKey(userId, config.jwtSecret);
+
       res.json({
         success: true,
+        jwt: jwtToken,
         user: req.session.user,
         isNew: user.isNew,
       });

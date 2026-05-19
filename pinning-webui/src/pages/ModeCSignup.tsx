@@ -22,8 +22,20 @@
 
 import { generateMnemonic, validateMnemonic } from 'bip39';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+
+/**
+ * Resolve the post-signin navigation target. When the /get-key → /login
+ * bounce forwarded a `returnTo` URL param, return there so /get-key can
+ * fetch the API key and trigger the fxfiles://auth-callback handoff.
+ * Otherwise land on the dashboard.
+ */
+function useSuccessDestination(): string {
+  const [searchParams] = useSearchParams();
+  const returnTo = searchParams.get('returnTo');
+  return returnTo && returnTo.startsWith('/') ? returnTo : '/';
+}
 
 type Subflow = 'choose' | 'create' | 'restore';
 
@@ -117,6 +129,7 @@ type CreateStep = 'display' | 'verify' | 'register';
 function CreateFlow({ onBack }: { onBack: () => void }) {
   const { loginWithModeC } = useAuth();
   const navigate = useNavigate();
+  const successDestination = useSuccessDestination();
 
   // 256 bits of entropy → 24-word English BIP39 mnemonic.
   // Generated once on mount; never regenerated within this CreateFlow
@@ -150,7 +163,7 @@ function CreateFlow({ onBack }: { onBack: () => void }) {
     setRegisterError(null);
     try {
       await loginWithModeC(mnemonic);
-      navigate('/', { replace: true });
+      navigate(successDestination, { replace: true });
     } catch (e) {
       const err = e as Error & { code?: string };
       setRegistering(false);
@@ -317,6 +330,7 @@ function CreateFlow({ onBack }: { onBack: () => void }) {
 function RestorePanel({ onBack }: { onBack: () => void }) {
   const { loginWithModeC } = useAuth();
   const navigate = useNavigate();
+  const successDestination = useSuccessDestination();
   const [mnemonic, setMnemonic] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -342,7 +356,7 @@ function RestorePanel({ onBack }: { onBack: () => void }) {
     setError(null);
     try {
       await loginWithModeC(phrase);
-      navigate('/', { replace: true });
+      navigate(successDestination, { replace: true });
     } catch (e) {
       const err = e as Error & { code?: string };
       setBusy(false);

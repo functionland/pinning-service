@@ -135,10 +135,18 @@ export default function Login() {
   const showModeA = !modeParam || modeParam === 'a';
   const showModeB = !modeParam || modeParam === 'b';
   const showModeC = !modeParam || modeParam === 'c';
-  // Preserve the platform pin when navigating into Mode B's dedicated
-  // page so the inner OAuth buttons filter correctly. Mode C has no
-  // OAuth so this is a no-op for that branch.
-  const subpathQuery = platformParam ? `?platform=${platformParam}` : '';
+  // Preserve the platform pin AND any `returnTo` (e.g. the /get-key →
+  // /login bounce sets `returnTo=<encoded /get-key URL>` so that after
+  // the Mode B/C sign-in the user is taken back to /get-key to fetch
+  // the API key and trigger the fxfiles://auth-callback handoff).
+  // Without forwarding returnTo, ModeBSignup defaults to `/` and the
+  // FxFiles app never receives its JWT.
+  const subpathQuery = (() => {
+    const params: string[] = [];
+    if (platformParam) params.push(`platform=${encodeURIComponent(platformParam)}`);
+    if (returnTo) params.push(`returnTo=${encodeURIComponent(returnTo)}`);
+    return params.length > 0 ? `?${params.join('&')}` : '';
+  })();
 
   // Capture referral code and redirect from URL and store in localStorage (keep first code only)
   useEffect(() => {
@@ -505,7 +513,7 @@ export default function Login() {
           {/* Mode C — Passphrase only (Advanced) */}
           {showModeC && (
           <Link
-            to="/login/mode-c"
+            to={`/login/mode-c${subpathQuery}`}
             className="block rounded-xl border border-gray-200 hover:border-purple-500 hover:shadow-md transition-all p-4 group"
           >
             <div className="flex items-start gap-3">

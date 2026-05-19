@@ -48,6 +48,24 @@ import {
   encryptApiKey,
 } from './database/postgres.js';
 import { getEnabledChains, processTransfer } from './services/blockScanner.js';
+import {
+  buildSignedTranscript,
+  type ChallengeStore,
+  createInMemoryChallengeStore,
+  decodeChallenge,
+  decodePublicKey,
+  decodeSignature,
+  getSeedUser,
+  insertOrAssertSeedUser,
+  issueChallenge,
+  PublicKeyMismatchError,
+  touchSeedUserLastUsed,
+  validateEffectiveUserIdHex,
+  validateProvider,
+  ValidationError,
+  verifyEd25519,
+} from './services/seedAuth.js';
+import { getClient } from './database/postgres.js';
 
 // Session user type
 export interface SessionUser {
@@ -361,6 +379,36 @@ export async function initializeDatabase(): Promise<void> {
   } catch (error) {
     console.error('[webui] Index creation error:', error);
   }
+
+  // Audit F-A1 / F-A3 redesign — `seed_users` public-key registry.
+  //
+  // Stores `(effective_user_id, mode, public_key, oauth_sub, provider)`
+  // for clients authenticating via seed-derived Ed25519 keys
+  // (Mode B = OAuth + seed; Mode C = seed only). Used by the
+  // `/auth/register-mode-*` and `/auth/sign-in` endpoints in
+  // server/services/seedAuth.ts. See:
+  //  - https://github.com/functionland/fula-api/commit/7fa2f32
+  //  - https://github.com/functionland/fula-api/issues/14
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS seed_users (
+        effective_user_id VARCHAR(32) PRIMARY KEY,
+        mode CHAR(1) NOT NULL CHECK (mode IN ('B','C')),
+        public_key BYTEA NOT NULL,
+        oauth_sub VARCHAR(255),
+        provider VARCHAR(16),
+        registered_at TIMESTAMPTZ DEFAULT NOW(),
+        last_used_at TIMESTAMPTZ
+      )
+    `);
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_seed_users_oauth_sub
+        ON seed_users(oauth_sub) WHERE oauth_sub IS NOT NULL
+    `).catch(ignoreMigrationError);
+    console.log('[webui] seed_users table ready');
+  } catch (error) {
+    console.error('[webui] Failed to create seed_users table:', error);
+  }
 }
 
 // Seed chain_sync_state with supported chains (if empty)
@@ -536,6 +584,22 @@ export function httpDelete(url: string, headers: Record<string, string>): Promis
 export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean }) {
   const dbOps = createDbOps(config.jwtSecret);
   const googleClient = new OAuth2Client(config.googleClientId);
+
+  // Audit F-A1 / F-A3 redesign — in-memory challenge store for the
+  // seed-auth flow. Single-process server (BIND_HOST=127.0.0.1); if
+  // ever scaled horizontally, swap for Redis.
+  const challengeStore: ChallengeStore = createInMemoryChallengeStore();
+  // Periodically sweep expired challenge entries to bound memory under
+  // a sustained spam load. Lazy expiry on lookup keeps correctness, the
+  // sweep keeps map size honest.
+  const challengeSweepHandle = setInterval(() => {
+    const removed = challengeStore.clearExpired();
+    if (removed > 0) {
+      console.log(`[webui] seed-auth challenge sweep: removed ${removed} expired`);
+    }
+  }, 60_000);
+  // Don't keep the process alive just for the sweeper.
+  challengeSweepHandle.unref?.();
 
   const app = express();
 
@@ -863,6 +927,350 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       res.status(401).json({ error: 'Authentication failed' });
     }
   });
+
+  // ============================================================
+  // Seed-derived authentication (audit F-A1 / F-A3 redesign).
+  //
+  // Mode B (OAuth + seed) and Mode C (seed-only) clients authenticate
+  // by proving they hold the Ed25519 private key derived from their
+  // seed. The seed never leaves the client. See
+  // server/services/seedAuth.ts and
+  // https://github.com/functionland/fula-api/issues/14.
+  //
+  // Endpoints:
+  //   POST /auth/register-mode-b   — first sign-up (Google/Apple + seed)
+  //   POST /auth/register-mode-c   — first sign-up (seed only)
+  //   POST /auth/challenge         — issue a nonce for an existing user
+  //   POST /auth/sign-in           — verify signed nonce, mint JWT
+  //
+  // The minted JWTs use `sub = effective_user_id_hex` (32 hex chars).
+  // The fula-cli gateway treats `sub` opaquely, so no gateway change
+  // is needed. Because Mode B/C `sub` values are seed-derived
+  // (128-bit hashes of high-entropy input), the gateway's published
+  // users-index CBOR becomes non-enumerable for these users —
+  // closing audit F-A3 naturally without a separate dual-publish.
+  //
+  // Tighter rate limit on the four seed-auth endpoints than the
+  // generic /api/auth/ limiter — registration spam could fill the
+  // challenge map + seed_users table.
+  const seedAuthLimiter = options?.skipRateLimit
+    ? (_req: Request, _res: Response, next: NextFunction) => next()
+    : rateLimit({
+        windowMs: 60 * 60 * 1000,
+        max: 30,
+        standardHeaders: true,
+        legacyHeaders: false,
+        message: { error: 'Too many seed-auth attempts, please try again later' },
+      });
+
+  app.post('/auth/register-mode-b', seedAuthLimiter, async (req: Request, res: Response) => {
+    let txClient = null as Awaited<ReturnType<typeof getClient>> | null;
+    try {
+      const body = req.body ?? {};
+      const provider = validateProvider(body.provider);
+      const effectiveUserIdHex = validateEffectiveUserIdHex(body.effective_user_id_hex);
+      const publicKey = decodePublicKey(body.public_key_b64);
+      const challenge = decodeChallenge(body.challenge_b64);
+      const signature = decodeSignature(body.signature_b64);
+
+      const oauthToken = typeof body.oauth_token === 'string' ? body.oauth_token : '';
+      if (!oauthToken) {
+        return res.status(400).json({ error: 'oauth_token required' });
+      }
+
+      // Verify proof-of-seed-knowledge BEFORE touching the database.
+      // Domain-separated transcript prevents cross-purpose / cross-user
+      // signature replay (Codex advisor 2026-05-18).
+      const transcript = buildSignedTranscript(
+        'register-mode-b',
+        effectiveUserIdHex,
+        challenge
+      );
+      if (!verifyEd25519(publicKey, transcript, signature)) {
+        return res.status(401).json({
+          error: 'Invalid signature',
+          code: 'SIGNATURE_INVALID',
+        });
+      }
+
+      // Verify OAuth identity via the existing provider clients. The
+      // OAuth `sub` we store is whatever the verifier returned — NOT
+      // anything the client supplied — so a client cannot forge an
+      // OAuth binding to another user.
+      let oauthSub: string;
+      if (provider === 'google') {
+        const ticket = await googleClient.verifyIdToken({
+          idToken: oauthToken,
+          audience: config.googleClientId,
+        });
+        const payload = ticket.getPayload();
+        if (!payload?.sub) {
+          return res.status(401).json({ error: 'Invalid OAuth token' });
+        }
+        oauthSub = payload.sub;
+      } else {
+        // Apple
+        if (!config.appleClientId) {
+          return res.status(500).json({ error: 'Apple Sign-In not configured' });
+        }
+        const AppleSignIn = await import('apple-signin-auth');
+        const applePayload = await AppleSignIn.default.verifyIdToken(oauthToken, {
+          audience: config.appleClientId,
+          ignoreExpiration: false,
+        });
+        if (!applePayload?.sub) {
+          return res.status(401).json({ error: 'Invalid OAuth token' });
+        }
+        oauthSub = applePayload.sub;
+      }
+
+      // Transactional INSERT: seed_users + webui_users together.
+      // Squatting check is inside insertOrAssertSeedUser.
+      txClient = await getClient();
+      await txClient.query('BEGIN');
+      const { created } = await insertOrAssertSeedUser(txClient, {
+        effectiveUserIdHex,
+        mode: 'B',
+        publicKey,
+        oauthSub,
+        provider,
+      });
+      // Auto-create a corresponding `webui_users` row so credits /
+      // wallets / pins queries can find the user. Mode B is a SEPARATE
+      // namespace from any pre-existing Mode A account for the same
+      // OAuth identity — fresh credit balance, fresh wallet bindings
+      // (consistent with the maintainer's "treat as different users"
+      // decision, 2026-05-18). No email is stored — the OAuth binding
+      // lives only in `seed_users.oauth_sub`, which keeps Mode B users'
+      // `webui_users` rows free of PII.
+      await txClient.query(
+        `INSERT INTO webui_users (user_id, encrypted_email, name, picture, last_login_at)
+         VALUES ($1, NULL, '', '', NOW())
+         ON CONFLICT (user_id) DO UPDATE SET last_login_at = NOW()`,
+        [effectiveUserIdHex]
+      );
+      await txClient.query('COMMIT');
+
+      const jwtToken = generateJwtApiKey(effectiveUserIdHex, config.jwtSecret);
+      const hasModeA = await checkModeAExistsForOauthSub(oauthSub).catch(() => false);
+      return res.json({
+        success: true,
+        jwt: jwtToken,
+        effective_user_id_hex: effectiveUserIdHex,
+        mode: 'B',
+        created,
+        has_mode_a: hasModeA,
+      });
+    } catch (err) {
+      if (txClient) {
+        try { await txClient.query('ROLLBACK'); } catch { /* ignore */ }
+      }
+      if (err instanceof ValidationError) {
+        return res.status(400).json({ error: err.message, code: 'VALIDATION_ERROR' });
+      }
+      if (err instanceof PublicKeyMismatchError) {
+        return res.status(409).json({
+          error: err.message,
+          code: 'PUBLIC_KEY_MISMATCH',
+        });
+      }
+      console.error('[webui] register-mode-b error:', err);
+      return res.status(500).json({ error: 'Registration failed' });
+    } finally {
+      txClient?.release();
+    }
+  });
+
+  app.post('/auth/register-mode-c', seedAuthLimiter, async (req: Request, res: Response) => {
+    let txClient = null as Awaited<ReturnType<typeof getClient>> | null;
+    try {
+      const body = req.body ?? {};
+      const effectiveUserIdHex = validateEffectiveUserIdHex(body.effective_user_id_hex);
+      const publicKey = decodePublicKey(body.public_key_b64);
+      const challenge = decodeChallenge(body.challenge_b64);
+      const signature = decodeSignature(body.signature_b64);
+
+      const transcript = buildSignedTranscript(
+        'register-mode-c',
+        effectiveUserIdHex,
+        challenge
+      );
+      if (!verifyEd25519(publicKey, transcript, signature)) {
+        return res.status(401).json({
+          error: 'Invalid signature',
+          code: 'SIGNATURE_INVALID',
+        });
+      }
+
+      txClient = await getClient();
+      await txClient.query('BEGIN');
+      const { created } = await insertOrAssertSeedUser(txClient, {
+        effectiveUserIdHex,
+        mode: 'C',
+        publicKey,
+        oauthSub: null,
+        provider: null,
+      });
+      await txClient.query(
+        `INSERT INTO webui_users (user_id, encrypted_email, name, picture, last_login_at)
+         VALUES ($1, NULL, '', '', NOW())
+         ON CONFLICT (user_id) DO UPDATE SET last_login_at = NOW()`,
+        [effectiveUserIdHex]
+      );
+      await txClient.query('COMMIT');
+
+      const jwtToken = generateJwtApiKey(effectiveUserIdHex, config.jwtSecret);
+      return res.json({
+        success: true,
+        jwt: jwtToken,
+        effective_user_id_hex: effectiveUserIdHex,
+        mode: 'C',
+        created,
+      });
+    } catch (err) {
+      if (txClient) {
+        try { await txClient.query('ROLLBACK'); } catch { /* ignore */ }
+      }
+      if (err instanceof ValidationError) {
+        return res.status(400).json({ error: err.message, code: 'VALIDATION_ERROR' });
+      }
+      if (err instanceof PublicKeyMismatchError) {
+        return res.status(409).json({
+          error: err.message,
+          code: 'PUBLIC_KEY_MISMATCH',
+        });
+      }
+      console.error('[webui] register-mode-c error:', err);
+      return res.status(500).json({ error: 'Registration failed' });
+    } finally {
+      txClient?.release();
+    }
+  });
+
+  app.post('/auth/challenge', seedAuthLimiter, async (req: Request, res: Response) => {
+    try {
+      const body = req.body ?? {};
+      const effectiveUserIdHex = validateEffectiveUserIdHex(body.effective_user_id_hex);
+
+      // 404 on unknown user — see Gemini advisor 2026-05-18 (the
+      // effective_user_id is already published via the gateway's
+      // global CBOR for Mode B users; hiding existence at the issuer
+      // adds no security and confuses the UX).
+      const user = await getSeedUser({ query }, effectiveUserIdHex);
+      if (!user) {
+        return res.status(404).json({
+          error: 'No account for this effective_user_id',
+          code: 'USER_NOT_FOUND',
+        });
+      }
+
+      const challenge = issueChallenge(challengeStore, effectiveUserIdHex, 'sign-in');
+      return res.json({
+        challenge_b64: challenge.toString('base64'),
+      });
+    } catch (err) {
+      if (err instanceof ValidationError) {
+        return res.status(400).json({ error: err.message, code: 'VALIDATION_ERROR' });
+      }
+      console.error('[webui] /auth/challenge error:', err);
+      return res.status(500).json({ error: 'Challenge issuance failed' });
+    }
+  });
+
+  app.post('/auth/sign-in', seedAuthLimiter, async (req: Request, res: Response) => {
+    try {
+      const body = req.body ?? {};
+      const effectiveUserIdHex = validateEffectiveUserIdHex(body.effective_user_id_hex);
+      const challenge = decodeChallenge(body.challenge_b64);
+      const signature = decodeSignature(body.signature_b64);
+
+      // 1. Single-use challenge lookup (consumed on take).
+      const entry = challengeStore.takeIfValid(effectiveUserIdHex, 'sign-in');
+      if (!entry) {
+        return res.status(401).json({
+          error: 'Challenge missing, expired, or for a different purpose',
+          code: 'CHALLENGE_INVALID',
+        });
+      }
+      // The client's `challenge_b64` MUST match the stored bytes —
+      // defends against a confused-deputy attack where the client
+      // signs something other than what we issued.
+      if (entry.challenge.length !== challenge.length ||
+          !crypto.timingSafeEqual(entry.challenge, challenge)) {
+        return res.status(401).json({
+          error: 'Challenge mismatch',
+          code: 'CHALLENGE_INVALID',
+        });
+      }
+
+      // 2. Look up the stored public key for this user.
+      const user = await getSeedUser({ query }, effectiveUserIdHex);
+      if (!user) {
+        return res.status(404).json({
+          error: 'No account for this effective_user_id',
+          code: 'USER_NOT_FOUND',
+        });
+      }
+
+      // 3. Verify the signed transcript with the stored public key.
+      const transcript = buildSignedTranscript(
+        'sign-in',
+        effectiveUserIdHex,
+        challenge
+      );
+      if (!verifyEd25519(user.public_key, transcript, signature)) {
+        return res.status(401).json({
+          error: 'Invalid signature',
+          code: 'SIGNATURE_INVALID',
+        });
+      }
+
+      // 4. Mint a fresh JWT and refresh last_used_at.
+      const jwtToken = generateJwtApiKey(effectiveUserIdHex, config.jwtSecret);
+      await touchSeedUserLastUsed({ query }, effectiveUserIdHex);
+      // Also refresh webui_users.last_login_at so the rest of the app
+      // sees this as an active user.
+      await query(
+        `UPDATE webui_users SET last_login_at = NOW() WHERE user_id = $1`,
+        [effectiveUserIdHex]
+      ).catch(() => { /* best-effort */ });
+
+      return res.json({
+        success: true,
+        jwt: jwtToken,
+        effective_user_id_hex: effectiveUserIdHex,
+        mode: user.mode,
+      });
+    } catch (err) {
+      if (err instanceof ValidationError) {
+        return res.status(400).json({ error: err.message, code: 'VALIDATION_ERROR' });
+      }
+      console.error('[webui] /auth/sign-in error:', err);
+      return res.status(500).json({ error: 'Sign-in failed' });
+    }
+  });
+
+  // Helper used by register-mode-b to set the `has_mode_a` response flag.
+  // True when an OAuth-only (Mode A) account already exists for the same
+  // `oauth_sub` — so the client can warn the user that their new Mode B
+  // vault is separate from their existing one (Gemini advisor 2026-05-18).
+  async function checkModeAExistsForOauthSub(oauthSub: string): Promise<boolean> {
+    // Mode A accounts are keyed by `SHA-256(lowercase(email))`, not by
+    // `oauth_sub`. We can't directly query "does an oauth_sub already
+    // have a Mode A account" without decrypting emails. Best-effort
+    // proxy: another `seed_users` row with the same `oauth_sub` but
+    // not the current effective_user_id. If you later add an
+    // `oauth_sub_hash` column to `webui_users`, swap this in.
+    try {
+      const result = await query<{ count: string }>(
+        `SELECT COUNT(*) as count FROM seed_users WHERE oauth_sub = $1`,
+        [oauthSub]
+      );
+      return parseInt(result.rows[0]?.count || '0', 10) > 1;
+    } catch {
+      return false;
+    }
+  }
 
   app.post('/auth/logout', (req: Request, res: Response) => {
     req.session.destroy((err) => {

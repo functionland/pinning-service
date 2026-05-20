@@ -745,7 +745,7 @@ echo "  scp $OUT_DIR/${NAME}.tgz $OUT_DIR/${NAME}.tgz.sha256 root@<new-server>:/
 echo
 echo "On the new server:"
 echo "  cd /tmp2 && sha256sum -c ${NAME}.tgz.sha256"
-echo "  bash /opt/pinning-service/scripts/recover.sh \\"
+echo "  bash /opt/pinning-service/scripts/migration/recover.sh \\"
 echo "      --bundle /tmp2/${NAME}.tgz \\"
 echo "      --backup-key <64-char hex> \\"
 echo "      --db-ipns       k51qzi5uqu5dmguoei6kc4qdrnnawmvew4o8x5fzzg5346x4nii9qis3lpiub9 \\"

@@ -439,5 +439,5 @@ fi
 echo "  Backups (one-time setup):"
 echo "    1. Generate IPNS key:  docker exec ipfs_host ipfs key gen fula-db-backup"
 echo "    2. Set BACKUP_ENCRYPTION_KEY:  openssl rand -hex 32"
-echo "    3. Add cron job:  0 3 * * * BACKUP_ENCRYPTION_KEY=<hex> $SCRIPT_DIR/scripts/backup-db.sh >> /var/log/fula-db-backup.log 2>&1"
+echo "    3. Add cron job:  0 3 * * * BACKUP_ENCRYPTION_KEY=<hex> $SCRIPT_DIR/scripts/migration/backup-db.sh >> /var/log/fula-db-backup.log 2>&1"
 echo ""

@@ -5,9 +5,9 @@
 # Optionally restores the fula-api registry CID from its separate IPNS key.
 #
 # Usage:
-#   ./scripts/restore-from-backup.sh                    # Interactive restore
-#   ./scripts/restore-from-backup.sh --manifest-cid <CID>  # Restore specific backup
-#   ./scripts/restore-from-backup.sh --list             # List backup history from IPNS chain
+#   ./scripts/migration/restore-from-backup.sh                    # Interactive restore
+#   ./scripts/migration/restore-from-backup.sh --manifest-cid <CID>  # Restore specific backup
+#   ./scripts/migration/restore-from-backup.sh --list             # List backup history from IPNS chain
 #
 # Required environment:
 #   BACKUP_ENCRYPTION_KEY  — Must match the key used during backup

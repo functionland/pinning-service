@@ -36,6 +36,17 @@
 #                                     # home devices to prevent lateral pivot if the server
 #                                     # is compromised. This flag is auto-skipped when the
 #                                     # default gateway is a public IP (cloud VPS, etc.).
+#     [--standby-bootstrap]           # configure this server as a WARM-STANDBY of the
+#                                     # primary the bundle came from. Restores all
+#                                     # artifacts but NEVER starts kubo/cluster/fula-*
+#                                     # services. Postgres runs in hot-standby mode
+#                                     # streaming WAL from primary. Requires --primary-host
+#                                     # to identify the primary. Run setup-primary-for-
+#                                     # replication.sh on primary first. After bootstrap:
+#                                     # authorize the printed SSH key on primary, then
+#                                     # `echo sync-enabled > /var/lib/fula-standby/MODE`.
+#     [--primary-host HOST]           # required with --standby-bootstrap. The hostname or
+#                                     # IP of the live primary server to sync from.
 
 set -euo pipefail
 
@@ -60,6 +71,11 @@ CLUSTER_DATA_HOST_PATH=""
 DEFER_DNS=false
 FORCE_WIPE=false
 NO_LAN_ISOLATION=false
+STANDBY_BOOTSTRAP=false        # set via --standby-bootstrap; configures this host as a warm-standby
+                               # of the primary the bundle came from. Kubo/cluster/fula-* are never
+                               # started; postgres runs in hot-standby mode replaying primary's WAL.
+PRIMARY_HOST_FOR_STANDBY=""    # set via --primary-host when --standby-bootstrap is used
+STANDBY_STATE_BASE="/var/lib/fula-standby"
 
 WORK_DIR="/var/lib/fula-recovery"
 BUNDLE_DIR="$WORK_DIR/bundle"
@@ -274,7 +290,9 @@ while [[ $# -gt 0 ]]; do
     --defer-dns)           DEFER_DNS=true; shift ;;
     --force-wipe)          FORCE_WIPE=true; shift ;;
     --no-lan-isolation)    NO_LAN_ISOLATION=true; shift ;;
-    -h|--help)             sed -n '2,32p' "$0"; exit 0 ;;
+    --standby-bootstrap)   STANDBY_BOOTSTRAP=true; shift ;;
+    --primary-host)        PRIMARY_HOST_FOR_STANDBY="$2"; shift 2 ;;
+    -h|--help)             sed -n '2,49p' "$0"; exit 0 ;;
     *) fatal "Unknown flag: $1" ;;
   esac
 done
@@ -313,6 +331,17 @@ phase_preflight() {
   [ -n "$BUNDLE_TGZ" ]              || fatal "--bundle required"
   [ -f "$BUNDLE_TGZ" ]              || fatal "bundle not found: $BUNDLE_TGZ"
   [ -n "$BACKUP_ENCRYPTION_KEY" ]   || fatal "--backup-key required"
+
+  # --standby-bootstrap is mutually exclusive with the cutover-related modes.
+  # Standby bootstrap is for a permanent warm-replica; parallel-run and
+  # finalize-cutover are for short DR validation windows.
+  if $STANDBY_BOOTSTRAP; then
+    $PARALLEL_RUN_MODE && fatal "--standby-bootstrap cannot be combined with --parallel-run"
+    $FINALIZE_CUTOVER  && fatal "--standby-bootstrap cannot be combined with --finalize-cutover"
+    $PREWARM_CLUSTER   && fatal "--standby-bootstrap cannot be combined with --prewarm-cluster"
+    [ -n "$PRIMARY_HOST_FOR_STANDBY" ] || fatal "--standby-bootstrap requires --primary-host <hostname-or-ip>"
+    log "standby-bootstrap mode: this host will be a warm replica of $PRIMARY_HOST_FOR_STANDBY"
+  fi
 
   # Tolerate whitespace + CRLF (paste-from-clipboard / file-with-newlines) and
   # accept either case for hex chars. openssl is case-insensitive on hex
@@ -956,6 +985,91 @@ phase_docker_infra_start() {
   pg_user="${pg_user:-pinning_user}"
   [ -n "$pg_password" ] || fatal "POSTGRES_PASSWORD not set in $PINNING_HOME/.env"
 
+  # ----------------------------------------------------------------------------
+  # STANDBY-BOOTSTRAP MODE: never start kubo or cluster (they'd collide with
+  # primary's peer IDs). Postgres is started below (it's needed for pg_basebackup
+  # in phase 9). Identity verification for kubo + cluster is done OFFLINE by
+  # reading their on-disk config / identity.json files against the bundle's
+  # id.json / identity.json — no daemon ever runs.
+  # ----------------------------------------------------------------------------
+  if $STANDBY_BOOTSTRAP; then
+    log "  standby mode: starting postgres only; kubo + cluster stay stopped"
+
+    # Set up the WAL archive bind-mount BEFORE creating the postgres container.
+    # The host-side cron (standby-sync-postgres-wal.sh) pulls WAL into here;
+    # postgres reads from /var/lib/pg-archive inside the container.
+    install -d -m 0755 /var/lib/fula-pg-wal-archive
+    # postgres:15 image uses uid 999 by convention
+    chown 999:999 /var/lib/fula-pg-wal-archive 2>/dev/null || true
+
+    # Recreate postgres container if it exists without our bind mount.
+    local needs_recreate=false
+    if docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
+      if ! docker inspect "$PG_CONTAINER" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' \
+           | grep -q '^/var/lib/fula-pg-wal-archive$'; then
+        log "  recreating postgres container to add WAL-archive bind mount"
+        docker stop -t 30 "$PG_CONTAINER" >/dev/null 2>&1 || true
+        docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
+        needs_recreate=true
+      fi
+    else
+      needs_recreate=true
+    fi
+    if $needs_recreate; then
+      docker run -d --name "$PG_CONTAINER" --restart unless-stopped \
+        -p 127.0.0.1:5432:5432 \
+        -e POSTGRES_USER="$pg_user" -e POSTGRES_PASSWORD="$pg_password" \
+        -e POSTGRES_DB=pinning_service \
+        -v postgres-pinning-data:/var/lib/postgresql/data \
+        -v /var/lib/fula-pg-wal-archive:/var/lib/pg-archive:ro \
+        postgres:15
+    fi
+    wait_for "postgres ready" 60 docker exec "$PG_CONTAINER" pg_isready -U "$pg_user" -d postgres
+
+    # Verify kubo identity files on disk (no daemon start).
+    local kubo_vol expected_kubo_peer on_disk_peer
+    kubo_vol=$(docker volume inspect ipfs_host_data --format '{{.Mountpoint}}' 2>/dev/null) \
+      || fatal "ipfs_host_data volume not found — phase docker_volumes must have populated it"
+    [ -f "$kubo_vol/config" ] || fatal "kubo config not present at $kubo_vol/config — phase docker_volumes did not populate identity"
+
+    on_disk_peer=$(jq -r '.Identity.PeerID // empty' < "$kubo_vol/config" 2>/dev/null)
+    expected_kubo_peer=$(jq -r '.ID // empty' < "$BUNDLE_DIR/kubo/id.json" 2>/dev/null)
+    [ -n "$on_disk_peer" ] && [ -n "$expected_kubo_peer" ] \
+      || fatal "could not extract kubo peer ID from on-disk config or bundle"
+    [ "$on_disk_peer" = "$expected_kubo_peer" ] \
+      || fatal "kubo identity mismatch: on-disk=$on_disk_peer bundle=$expected_kubo_peer"
+    log "  kubo identity verified offline: $on_disk_peer"
+
+    # Verify cluster identity files on disk.
+    local cluster_vol expected_cluster_peer on_disk_cluster_peer
+    cluster_vol=$(docker volume inspect ipfs_cluster_data --format '{{.Mountpoint}}' 2>/dev/null) \
+      || fatal "ipfs_cluster_data volume not found"
+    [ -f "$cluster_vol/identity.json" ] || fatal "cluster identity.json not present at $cluster_vol/"
+
+    on_disk_cluster_peer=$(jq -r '.id // empty' < "$cluster_vol/identity.json" 2>/dev/null)
+    expected_cluster_peer=$(jq -r '.id // empty' < "$BUNDLE_DIR/cluster/identity.json" 2>/dev/null)
+    [ -n "$on_disk_cluster_peer" ] && [ -n "$expected_cluster_peer" ] \
+      || fatal "could not extract cluster peer ID"
+    [ "$on_disk_cluster_peer" = "$expected_cluster_peer" ] \
+      || fatal "cluster identity mismatch: on-disk=$on_disk_cluster_peer bundle=$expected_cluster_peer"
+    log "  cluster identity verified offline: $on_disk_cluster_peer"
+
+    # Pre-create the (stopped) kubo + cluster containers so failover can just
+    # `docker start` them. restart=no keeps them off across reboots.
+    for c in "$IPFS_CONTAINER" "$CLUSTER_CONTAINER" "$GATEWAY_CONTAINER"; do
+      if docker inspect "$c" >/dev/null 2>&1; then
+        docker stop -t 5 "$c" >/dev/null 2>&1 || true
+        docker update --restart=no "$c" >/dev/null 2>&1 || true
+      fi
+    done
+    log "  identity-bearing containers set to restart=no"
+
+    log "infrastructure containers configured for standby (postgres up, kubo+cluster off)"
+    mark_phase_done docker_infra_start
+    return 0
+  fi
+  # ---------------------- end STANDBY-BOOTSTRAP branch ------------------------
+
   # Postgres
   if ! docker ps --format '{{.Names}}' | grep -q "^${PG_CONTAINER}$"; then
     docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
@@ -1067,6 +1181,147 @@ phase_docker_infra_start() {
 # ============================================================================
 phase_pg_restore() {
   log_phase "9. pg_restore — restore from fresh dump"
+
+  # ----------------------------------------------------------------------------
+  # STANDBY-BOOTSTRAP MODE: instead of restoring from the bundle's pg_dump,
+  # set this postgres up as a replica that streams WAL from primary. The
+  # bundle's dump is stale by definition (it was taken at bundle-creation
+  # time) — what we want is to receive primary's current state via WAL
+  # archive shipping for the lifetime of this standby.
+  #
+  # Sequence:
+  #   1. Stop postgres container.
+  #   2. Wipe data volume (pg_basebackup writes into an empty data dir).
+  #   3. Run pg_basebackup against primary (-X stream -P).
+  #   4. Write standby.signal + recovery configuration.
+  #   5. Restart postgres → enters hot-standby mode, replays WAL continuously.
+  # ----------------------------------------------------------------------------
+  if $STANDBY_BOOTSTRAP; then
+    local repl_pass repl_pass_file="/root/.fula-replicator-password"
+    [ -r "$repl_pass_file" ] || fatal "$repl_pass_file not found — copy from primary (see setup-primary-for-replication.sh output)"
+    repl_pass=$(cat "$repl_pass_file" | tr -d '[:space:]')
+    [ -n "$repl_pass" ] || fatal "$repl_pass_file is empty"
+
+    local pg_vol pg_user
+    pg_vol=$(docker volume inspect postgres-pinning-data --format '{{.Mountpoint}}' 2>/dev/null) \
+      || fatal "postgres-pinning-data volume not found"
+    pg_user=$(env_get "$PINNING_HOME/.env" POSTGRES_USER)
+    pg_user="${pg_user:-pinning_user}"
+
+    log "  stopping postgres container so we can wipe its data dir"
+    docker stop -t 30 "$PG_CONTAINER" >/dev/null 2>&1 || true
+
+    log "  wiping postgres data volume contents"
+    # We DON'T remove the volume itself (it's bind-mounted into the container);
+    # we just empty its contents so pg_basebackup writes into a clean dir.
+    find "$pg_vol" -mindepth 1 -delete
+
+    log "  running pg_basebackup from $PRIMARY_HOST_FOR_STANDBY via SSH tunnel (this may take many minutes)"
+    # Primary's postgres listens on 127.0.0.1:5432 (loopback only) and the SSH
+    # key is already in place from --primary-host setup. So tunnel through SSH:
+    # standby's localhost:55432 -> primary's localhost:5432. pg_basebackup
+    # connects to localhost:55432 inside the docker container (--network host
+    # makes the container share standby's network namespace).
+    local tunnel_local_port=55432
+    local ssh_key="/root/.ssh/standby_ed25519"
+    [ -f "$ssh_key" ] || ssh-keygen -t ed25519 -f "$ssh_key" -N "" -C "fula-standby@$(hostname)" >/dev/null
+
+    # If the key was just generated, the operator hasn't authorized it yet.
+    # Test SSH first; give a useful error if it fails.
+    if ! timeout 10 ssh -i "$ssh_key" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+         "root@$PRIMARY_HOST_FOR_STANDBY" true 2>/dev/null; then
+      log "  SSH to primary not yet authorized. Public key to install on primary:"
+      log ""
+      cat "$ssh_key.pub" | sed 's/^/    /'
+      log ""
+      log "  On primary, append the line above to ~root/.ssh/authorized_keys, then re-run:"
+      log "    bash $0 --phase=pg_restore --standby-bootstrap --primary-host $PRIMARY_HOST_FOR_STANDBY ..."
+      fatal "primary SSH not yet authorized"
+    fi
+
+    # Open the tunnel in the background. -fN runs it without executing a
+    # command (just the forwarding); -E /dev/null silences MOTD noise.
+    ssh -i "$ssh_key" -o BatchMode=yes -o ExitOnForwardFailure=yes \
+        -L "$tunnel_local_port:127.0.0.1:5432" \
+        -fN "root@$PRIMARY_HOST_FOR_STANDBY" \
+      || fatal "could not establish SSH tunnel to primary"
+
+    # Track the tunnel so we can kill it on exit (success or failure).
+    local tunnel_pid
+    tunnel_pid=$(lsof -ti tcp:$tunnel_local_port -sTCP:LISTEN 2>/dev/null | head -n1 || true)
+    if [ -n "$tunnel_pid" ]; then
+      trap "kill $tunnel_pid 2>/dev/null || true" RETURN
+    fi
+
+    # Now run pg_basebackup against the tunnel. --network host makes the
+    # container's localhost == standby's localhost == tunnel endpoint.
+    if ! docker run --rm --network host \
+        -e PGPASSWORD="$repl_pass" \
+        -v postgres-pinning-data:/data \
+        postgres:15 \
+        pg_basebackup \
+          -h 127.0.0.1 \
+          -p "$tunnel_local_port" \
+          -U replicator \
+          -D /data \
+          -X stream \
+          -P \
+          -v; then
+      [ -n "$tunnel_pid" ] && kill "$tunnel_pid" 2>/dev/null || true
+      fatal "pg_basebackup failed — check setup-primary-for-replication.sh ran on primary, /root/.fula-replicator-password matches, and primary's pg_hba.conf has 'host replication replicator 127.0.0.1/32 md5' (it does by default when the setup script ran)"
+    fi
+    [ -n "$tunnel_pid" ] && kill "$tunnel_pid" 2>/dev/null || true
+
+    log "  writing standby.signal + restore_command"
+    # standby.signal: zero-byte marker file telling postgres to start in
+    # standby (hot-standby) mode.
+    touch "$pg_vol/standby.signal"
+
+    # restore_command: postgres calls this for each WAL file it needs from
+    # the archive. Our shim script rsyncs the requested file from primary.
+    # primary_conninfo is optional but lets postgres fall back to streaming
+    # replication directly if archive shipping lags behind.
+    cat >> "$pg_vol/postgresql.auto.conf" <<EOF
+
+# ----- warm-standby configuration (added by recover.sh --standby-bootstrap) -----
+# WAL archive shipping (NOT streaming replication, because primary's postgres
+# is bound to 127.0.0.1 only — would need an SSH-tunnel daemon for streaming).
+# Archive shipping is also robust against extended standby downtime: WAL files
+# accumulate in primary's archive dir up to the retention window (7 days) and
+# the standby catches up whenever it's reachable.
+#
+# /var/lib/pg-archive inside the container is a read-only bind mount of
+# /var/lib/fula-pg-wal-archive on the host. A host-side cron pulls fresh
+# WAL files into that dir via SSH+rsync from primary. Postgres reads the
+# files via this simple cp — no ssh/rsync needed inside the container.
+restore_command = 'cp /var/lib/pg-archive/%f %p'
+recovery_target_timeline = 'latest'
+hot_standby = on
+EOF
+
+    # Fix ownership — pg_basebackup ran as postgres uid inside the throwaway
+    # container; the file we appended was written as root on the host.
+    local pg_uid pg_gid
+    pg_uid=$(stat -c '%u' "$pg_vol/PG_VERSION" 2>/dev/null || echo 999)
+    pg_gid=$(stat -c '%g' "$pg_vol/PG_VERSION" 2>/dev/null || echo 999)
+    chown "$pg_uid:$pg_gid" "$pg_vol/standby.signal" "$pg_vol/postgresql.auto.conf"
+
+    log "  starting postgres in hot-standby mode"
+    docker start "$PG_CONTAINER" >/dev/null || fatal "failed to start postgres after replica setup"
+    wait_for "postgres ready (replica)" 60 docker exec "$PG_CONTAINER" pg_isready -U "$pg_user" -d postgres
+
+    # Sanity check: confirm replica mode is active.
+    local in_recovery
+    in_recovery=$(docker exec "$PG_CONTAINER" psql -U "$pg_user" -d postgres -tAc \
+      "SELECT pg_is_in_recovery();" 2>/dev/null | tr -d '[:space:]')
+    [ "$in_recovery" = "t" ] || fatal "postgres did not enter recovery mode (pg_is_in_recovery=$in_recovery) — replica setup failed"
+
+    log "postgres is now a hot-standby replica of $PRIMARY_HOST_FOR_STANDBY"
+    mark_phase_done pg_restore
+    return 0
+  fi
+  # ---------------------- end STANDBY-BOOTSTRAP branch ------------------------
+
   local dump="$BUNDLE_DIR/postgres/pinning-fresh.dump"
   [ -f "$dump" ] || fatal "missing $dump (re-run migrate-zip.sh on old server, or use --skip-pg-restore)"
 
@@ -1176,6 +1431,11 @@ If you intend to wipe and re-restore, re-run with --force-wipe."
 # ============================================================================
 phase_verify_ipns_path() {
   log_phase "10. verify_ipns_path — exercise IPNS-only recovery against production"
+  if $STANDBY_BOOTSTRAP; then
+    log "  skipped: standby-bootstrap mode (no live kubo to query the DHT with)"
+    mark_phase_done verify_ipns_path
+    return
+  fi
   if $PARALLEL_RUN_MODE; then
     log "  skipped: parallel-run mode active (kubo peer-ID collision with old server makes"
     log "  bitswap fetches across the colliding identity unreliable). Re-run with"
@@ -1282,6 +1542,12 @@ phase_verify_ipns_path() {
 # ============================================================================
 phase_apply_kubo_keys() {
   log_phase "11. apply_kubo_keys (verify)"
+  if $STANDBY_BOOTSTRAP; then
+    log "  skipped: standby-bootstrap mode (kubo daemon not running). Keystore"
+    log "  presence will be re-verified by failover after kubo starts."
+    mark_phase_done apply_kubo_keys
+    return
+  fi
   docker exec "$IPFS_CONTAINER" ipfs key list -l | grep -E "fula-(db-backup|registry)" \
     || fatal "expected IPNS keys missing"
   log "  IPNS keys verified"
@@ -1298,6 +1564,13 @@ phase_resolve_registry_cid() {
   # Restore any saved gateway state first (registry.cid, db-backup.cid, history)
   if [ -f "$BUNDLE_DIR/fula-gateway/state.tgz" ]; then
     _safe_tar "fula-gateway state extract" -xzf "$BUNDLE_DIR/fula-gateway/state.tgz" -C /
+  fi
+
+  if $STANDBY_BOOTSTRAP; then
+    log "  skipped resolve: standby-bootstrap (no live kubo). Bundled registry.cid"
+    log "  remains in place; sync will keep it current; failover refreshes it."
+    mark_phase_done resolve_registry_cid
+    return
   fi
 
   # Override registry.cid with a fresh resolve (in case the bundled one is stale).
@@ -1322,6 +1595,11 @@ phase_resolve_registry_cid() {
 # ============================================================================
 phase_ipfs_repo_verify() {
   log_phase "13. ipfs_repo_verify"
+  if $STANDBY_BOOTSTRAP; then
+    log "  skipped: standby-bootstrap (no live kubo to verify against)"
+    mark_phase_done ipfs_repo_verify
+    return
+  fi
   docker exec "$IPFS_CONTAINER" ipfs repo verify 2>&1 | tee /tmp/repo-verify.log || true
   local bad
   bad=$(grep -c "did not verify" /tmp/repo-verify.log 2>/dev/null || echo 0)
@@ -1424,6 +1702,29 @@ phase_install_fula_api() {
      ! docker image inspect fula-gateway >/dev/null 2>&1; then
     log "  building fula-gateway image from source"
     ( cd "$FULA_API_REPO" && docker build -t fula-gateway:local -f Dockerfile . )
+  fi
+
+  # STANDBY-BOOTSTRAP: image built, but NEVER start the container — it would
+  # serve traffic and write to /var/lib/fula-gateway while primary is still
+  # publishing the same IPNS records.
+  if $STANDBY_BOOTSTRAP; then
+    # Pre-create the (stopped) container with restart=no so failover can
+    # `docker start` it without rerunning docker run.
+    if ! docker inspect "$GATEWAY_CONTAINER" >/dev/null 2>&1; then
+      local img
+      img=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^fula-gateway' | head -1)
+      docker create --name "$GATEWAY_CONTAINER" --restart no \
+        --network host --env-file /etc/fula/.env \
+        -v /var/lib/fula-gateway:/var/lib/fula-gateway \
+        "$img" >/dev/null
+      log "  fula-gateway container pre-created (stopped, restart=no)"
+    else
+      docker update --restart=no "$GATEWAY_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    # Skip the registry-ipns cron — primary owns that IPNS key.
+    log "  skipped registry-ipns cron: standby-bootstrap (primary owns the IPNS key)"
+    mark_phase_done install_fula_api
+    return
   fi
 
   if ! docker ps --format '{{.Names}}' | grep -q "^${GATEWAY_CONTAINER}$"; then
@@ -1598,7 +1899,21 @@ phase_apply_systemd_units() {
     done
   fi
   systemctl daemon-reload
-  log "  systemd units applied"
+
+  # STANDBY-BOOTSTRAP: explicitly disable every identity-bearing service so a
+  # host reboot doesn't bring them up. (Bundle's units may have WantedBy
+  # entries.) Re-enabled on failover.
+  if $STANDBY_BOOTSTRAP; then
+    local u
+    for u in fula-pinning-service fula-upload-server fula-pinning-webui \
+             fula-gateway fula-ai-service x402-gateway libp2p-service \
+             mainnet-pool-server mainnet-rewards-server; do
+      systemctl disable "$u" >/dev/null 2>&1 || true
+    done
+    log "  systemd units installed and DISABLED (standby mode)"
+  else
+    log "  systemd units applied"
+  fi
   mark_phase_done apply_systemd_units
 }
 
@@ -1711,8 +2026,13 @@ PY
   fi
   # Clean up successful .pre-strip backups
   rm -f /etc/nginx/sites-available/*.pre-strip 2>/dev/null || true
-  systemctl reload nginx 2>/dev/null || systemctl restart nginx
-  log "  nginx reloaded"
+  if $STANDBY_BOOTSTRAP; then
+    log "  standby-bootstrap: nginx config installed but NOT started (would 502 with no backends)"
+    systemctl disable nginx >/dev/null 2>&1 || true
+  else
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx
+    log "  nginx reloaded"
+  fi
   mark_phase_done apply_nginx
 }
 
@@ -1727,35 +2047,233 @@ phase_apply_cron() {
   # to fula-db-backup IPNS — having two nodes publishing to the same key
   # creates conflicting IPNS records and corrupts the disaster-recovery path.
   # The bundle's own cron.d files (if any) likely have similar concerns.
-  local cron_target
-  if $PARALLEL_RUN_MODE; then
+  #
+  # In standby-bootstrap mode, the same logic applies (primary is publishing
+  # the IPNS keys; standby must NOT publish). We stage the IPNS-publishing
+  # crons into $STANDBY_STATE_BASE/deferred-cron/ for the failover script
+  # to activate when this server becomes primary.
+  local cron_target stage_dir=""
+  if $STANDBY_BOOTSTRAP; then
+    stage_dir="$STANDBY_STATE_BASE/deferred-cron"
+    install -d -m 0755 "$stage_dir"
+    cron_target="/etc/cron.d"
+  elif $PARALLEL_RUN_MODE; then
     install -d -m 0755 "$DEFERRED_CRON_DIR"
     cron_target="$DEFERRED_CRON_DIR"
   else
     cron_target="/etc/cron.d"
   fi
 
+  # Copy bundled crons. In standby mode, IPNS-publishing crons (db-backup,
+  # registry-ipns) go to the staging dir instead of /etc/cron.d so they don't
+  # run on this passive standby.
   if [ -d "$BUNDLE_DIR/cron/cron.d" ]; then
     for f in "$BUNDLE_DIR/cron/cron.d"/*; do
       [ -f "$f" ] || continue
-      cp "$f" "$cron_target/$(basename "$f")"
-      chmod 644 "$cron_target/$(basename "$f")"
+      local base; base=$(basename "$f")
+      if $STANDBY_BOOTSTRAP && [[ "$base" =~ ^fula-(db-backup|registry-ipns)$ ]]; then
+        cp "$f" "$stage_dir/$base"
+        chmod 644 "$stage_dir/$base"
+      else
+        cp "$f" "$cron_target/$base"
+        chmod 644 "$cron_target/$base"
+      fi
     done
   fi
 
-  # Belt and suspenders: ensure backup-db cron exists (per plan §postinstall)
-  cat > "$cron_target/fula-db-backup" <<'EOF'
-0 3 * * * root . /root/.fula-backup-key && /opt/pinning-service/scripts/backup-db.sh >> /var/log/fula-db-backup.log 2>&1
+  # Belt and suspenders: ensure backup-db cron exists.
+  if $STANDBY_BOOTSTRAP; then
+    cat > "$stage_dir/fula-db-backup" <<'EOF'
+0 3 * * * root . /root/.fula-backup-key && /opt/pinning-service/scripts/migration/backup-db.sh >> /var/log/fula-db-backup.log 2>&1
 EOF
-  chmod 644 "$cron_target/fula-db-backup"
-
-  if $PARALLEL_RUN_MODE; then
-    log "  parallel-run: staged crons in $DEFERRED_CRON_DIR (NOT installed to /etc/cron.d/ yet)"
-    log "  Run with --finalize-cutover after old server's kubo+cluster are stopped to activate."
+    chmod 644 "$stage_dir/fula-db-backup"
+    log "  standby-bootstrap: db-backup + registry-ipns crons staged at $stage_dir (not installed)"
+    log "  Failover (standby-failover.sh) will activate them on promotion."
   else
-    log "  cron applied"
+    cat > "$cron_target/fula-db-backup" <<'EOF'
+0 3 * * * root . /root/.fula-backup-key && /opt/pinning-service/scripts/migration/backup-db.sh >> /var/log/fula-db-backup.log 2>&1
+EOF
+    chmod 644 "$cron_target/fula-db-backup"
+
+    if $PARALLEL_RUN_MODE; then
+      log "  parallel-run: staged crons in $DEFERRED_CRON_DIR (NOT installed to /etc/cron.d/ yet)"
+      log "  Run with --finalize-cutover after old server's kubo+cluster are stopped to activate."
+    else
+      log "  cron applied"
+    fi
   fi
   mark_phase_done apply_cron
+}
+
+# ============================================================================
+# PHASE 22b — install_standby_cron (STANDBY-BOOTSTRAP ONLY)
+#
+# Sets up the warm-standby sync infrastructure:
+#   - /var/lib/fula-standby/ state dir
+#   - SSH key for pulling data from primary (printed at end so operator can
+#     install it on primary's authorized_keys)
+#   - /etc/fula-standby/standby-config.sh populated with primary host details
+#     and the host paths to sync from (resolved from the bundle's
+#     datastore_spec and docker mounts)
+#   - /etc/cron.d/fula-standby-sync (hourly; gated by MODE=sync-enabled
+#     in the standby-sync.sh preflight)
+# ============================================================================
+phase_install_standby_cron() {
+  log_phase "22b. install_standby_cron"
+  if ! $STANDBY_BOOTSTRAP; then
+    log "  not standby-bootstrap mode; nothing to do"
+    mark_phase_done install_standby_cron
+    return
+  fi
+
+  install -d -m 0700 "$STANDBY_STATE_BASE"
+  install -d -m 0755 "$STANDBY_STATE_BASE/staging"
+  install -d -m 0755 /etc/fula-standby
+
+  # SSH key for pulling from primary. Reuse if present.
+  local ssh_key="/root/.ssh/standby_ed25519"
+  if [ ! -f "$ssh_key" ]; then
+    install -d -m 0700 /root/.ssh
+    ssh-keygen -t ed25519 -f "$ssh_key" -N "" -C "fula-standby@$(hostname -f 2>/dev/null || hostname)" >/dev/null
+    log "  generated SSH key: $ssh_key"
+  else
+    log "  reusing SSH key: $ssh_key"
+  fi
+
+  # Derive primary-side host paths from the bundle. The bundle's datastore_spec
+  # tells us where kubo's blocks + datastore live on primary (default or
+  # bind-mounted to /uniondrive). The cluster path comes from the cluster
+  # mount metadata in docker/ipfs_cluster.json.
+  local primary_kubo_blocks primary_kubo_datastore primary_cluster_data
+  if [ -f "$BUNDLE_DIR/kubo/datastore_spec" ]; then
+    # The spec is JSON like {"mounts":[{"path":"blocks","mountpoint":"/blocks"},...]}
+    # In Fula Box deployments the actual on-disk path may be /uniondrive/ipfs_datastore/blocks.
+    # We default to docker volume mountpoint and let the operator override.
+    primary_kubo_blocks=$(jq -r '.mounts[]? | select(.mountpoint=="/blocks") | (.path // empty)' "$BUNDLE_DIR/kubo/datastore_spec" 2>/dev/null | head -n1)
+    primary_kubo_datastore=$(jq -r '.mounts[]? | select(.mountpoint=="/") | (.path // empty)' "$BUNDLE_DIR/kubo/datastore_spec" 2>/dev/null | head -n1)
+  fi
+  # If extraction failed or paths are relative ("blocks"), we leave them blank
+  # so the operator fills them in /etc/fula-standby/standby-config.sh.
+  case "$primary_kubo_blocks" in /*) : ;; *) primary_kubo_blocks="" ;; esac
+  case "$primary_kubo_datastore" in /*) : ;; *) primary_kubo_datastore="" ;; esac
+
+  # Write the runtime config. Template values can be edited later if anything
+  # is wrong (e.g., primary host changed DNS name).
+  cat > /etc/fula-standby/standby-config.sh <<EOF
+#!/usr/bin/env bash
+# Auto-generated by recover.sh --standby-bootstrap on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Edit values below if they need to change.
+
+PRIMARY_HOST="$PRIMARY_HOST_FOR_STANDBY"
+PRIMARY_USER="root"
+SSH_KEY="$ssh_key"
+SSH_OPTS="-i \$SSH_KEY -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+
+# Primary-side host paths (resolved from bundle metadata; verify if blank)
+PRIMARY_KUBO_BLOCKS="${primary_kubo_blocks}"
+PRIMARY_KUBO_DATASTORE="${primary_kubo_datastore}"
+PRIMARY_CLUSTER_DATA=""        # leave blank — sync-cluster.sh resolves at runtime via docker inspect on primary
+PRIMARY_PG_ARCHIVE="/var/lib/pg-archive"
+
+# Standby-side state
+STANDBY_STATE_DIR="$STANDBY_STATE_BASE"
+STANDBY_MODE_FILE="$STANDBY_STATE_BASE/MODE"
+STANDBY_LOG_FILE="/var/log/fula-standby-sync.log"
+STANDBY_LOCK_FILE="/var/lock/fula-standby-sync.lock"
+STANDBY_STAGING_DIR="$STANDBY_STATE_BASE/staging"
+
+RSYNC_BWLIMIT="50M"
+
+STANDBY_DOCKER_OFF=(ipfs_host ipfs_cluster fula-gateway-1)
+STANDBY_SYSTEMD_OFF=(
+  fula-pinning-service fula-upload-server fula-pinning-webui
+  fula-gateway fula-ai-service x402-gateway
+  libp2p-service mainnet-pool-server mainnet-rewards-server
+)
+EOF
+  chmod 0600 /etc/fula-standby/standby-config.sh
+  log "  wrote /etc/fula-standby/standby-config.sh"
+
+  # Install the hourly sync cron. The cron will run, but the sync script's
+  # preflight refuses unless MODE=sync-enabled — so the cron is effectively
+  # armed by the operator flipping MODE after verifying SSH works.
+  cat > /etc/cron.d/fula-standby-sync <<'EOF'
+# Warm-standby data sync: pulls fresh data from primary every hour. The sync
+# script's preflight refuses to run unless /var/lib/fula-standby/MODE reads
+# "sync-enabled" — that gate is flipped by the operator after authorizing
+# this server's SSH key on primary.
+17 * * * * root /opt/pinning-service/scripts/migration/standby/standby-sync.sh
+EOF
+  chmod 0644 /etc/cron.d/fula-standby-sync
+  log "  installed /etc/cron.d/fula-standby-sync (hourly)"
+
+  # Install the WAL puller cron at high frequency. Postgres consumes WAL
+  # files via the in-container `cp` restore_command (set in phase 9), so
+  # this cron is what keeps the bind-mounted archive dir fresh. Frequent
+  # runs (every minute) minimize replication lag.
+  cat > /etc/cron.d/fula-standby-wal-puller <<'EOF'
+# Warm-standby WAL puller: rsyncs fresh WAL segments from primary's archive
+# dir into the standby's local archive dir (which is bind-mounted into the
+# postgres container as /var/lib/pg-archive:ro). Runs every minute. Skips
+# files already present (rsync --ignore-existing); WAL files are immutable.
+*/1 * * * * root /opt/pinning-service/scripts/migration/standby/standby-sync-postgres-wal.sh >> /var/log/fula-standby-wal.log 2>&1
+EOF
+  chmod 0644 /etc/cron.d/fula-standby-wal-puller
+  log "  installed /etc/cron.d/fula-standby-wal-puller (every minute)"
+
+  # Install the standby-side WAL retention cron. Without this, the local
+  # archive grows unbounded — rsync --ignore-existing never deletes. We use
+  # the same 7-day retention as primary so the two archives age out in sync.
+  # Postgres only re-reads recent WAL during recovery; once a segment has
+  # been replayed, it's safe to delete locally.
+  cat > /etc/cron.d/fula-standby-wal-retention <<'EOF'
+# Delete locally-stored WAL archives older than 7 days. Postgres has
+# already replayed them via restore_command; keeping them around just
+# burns standby disk. Matches the primary-side retention.
+33 3 * * * root find /var/lib/fula-pg-wal-archive -type f -name '0*' -mtime +7 -delete >/dev/null 2>&1
+EOF
+  chmod 0644 /etc/cron.d/fula-standby-wal-retention
+  log "  installed /etc/cron.d/fula-standby-wal-retention (daily)"
+
+  # Set initial MODE = bootstrap-complete. Operator flips to sync-enabled
+  # after authorizing SSH on primary and verifying connectivity.
+  echo "bootstrap-complete" > "$STANDBY_STATE_BASE/MODE"
+  chmod 0644 "$STANDBY_STATE_BASE/MODE"
+
+  log ""
+  log "  ============================================================"
+  log "  STANDBY BOOTSTRAP COMPLETE — operator action required"
+  log "  ============================================================"
+  log "  1. Copy this server's SSH pubkey to PRIMARY ($PRIMARY_HOST_FOR_STANDBY):"
+  log ""
+  log "     cat $ssh_key.pub"
+  log ""
+  log "     # On primary, append it to ~root/.ssh/authorized_keys"
+  log ""
+  log "  2. Test SSH from THIS server:"
+  log ""
+  log "     ssh -i $ssh_key root@$PRIMARY_HOST_FOR_STANDBY 'hostname'"
+  log ""
+  log "  3. Verify PostgreSQL hot-standby is replaying WAL:"
+  log ""
+  log "     docker exec postgres-pinning psql -U postgres -c 'SELECT pg_is_in_recovery();'"
+  log "     # should return 't'"
+  log ""
+  log "  4. Arm the sync cron:"
+  log ""
+  log "     echo sync-enabled > $STANDBY_STATE_BASE/MODE"
+  log ""
+  log "  5. Manually trigger the first sync to confirm everything works:"
+  log ""
+  log "     bash /opt/pinning-service/scripts/migration/standby/standby-sync.sh"
+  log "     tail $STANDBY_STATE_BASE/../log/fula-standby-sync.log"
+  log ""
+  log "  6. To failover later (when primary fails):"
+  log ""
+  log "     bash /opt/pinning-service/scripts/migration/standby/standby-failover.sh [--with-fence]"
+  log "  ============================================================"
+
+  mark_phase_done install_standby_cron
 }
 
 # ============================================================================
@@ -1912,6 +2430,11 @@ except Exception:
 # ============================================================================
 phase_dns_cutover_pause() {
   log_phase "24. dns_cutover_pause"
+  if $STANDBY_BOOTSTRAP; then
+    log "  skipped: standby-bootstrap (DNS stays pointed at primary)"
+    mark_phase_done dns_cutover_pause
+    return
+  fi
   if $DEFER_DNS; then
     log "  --defer-dns set: skipping DNS-cutover pause."
     log "  Test the new server via /etc/hosts on a test machine, then later run:"
@@ -1940,6 +2463,12 @@ phase_dns_cutover_pause() {
 # ============================================================================
 phase_certs() {
   log_phase "25. certs"
+  if $STANDBY_BOOTSTRAP; then
+    log "  skipped: standby-bootstrap (standby keeps primary's certs via rsync;"
+    log "  re-issuance after failover happens via --phase=certs in failover script)"
+    mark_phase_done certs
+    return
+  fi
   if $DEFER_DNS; then
     log "  --defer-dns set: skipping certbot issuance for all domains."
     log "  Existing certs (if restored from bundle) continue serving via nginx."
@@ -2001,6 +2530,19 @@ phase_start() {
   log_phase "26. start — enable + start services"
   systemctl daemon-reload
 
+  # STANDBY-BOOTSTRAP: only redis-server starts. fula-* services stay disabled
+  # until failover. nginx stays off too (would 502 with no backends).
+  if $STANDBY_BOOTSTRAP; then
+    log "  standby-bootstrap: starting only redis-server; fula-* + nginx stay stopped"
+    if systemctl list-unit-files 2>/dev/null | grep -q "^redis-server\.service" || \
+       [ -f /etc/systemd/system/redis-server.service ]; then
+      systemctl enable redis-server >/dev/null 2>&1 || true
+      systemctl restart redis-server 2>&1 | tail -5 || check_warn "redis-server failed to start"
+    fi
+    mark_phase_done start
+    return
+  fi
+
   # Order matters: dependencies first (libp2p-service before mainnet-pool-server)
   local services=(
     redis-server
@@ -2053,6 +2595,20 @@ phase_start() {
 # ============================================================================
 phase_post_verify() {
   log_phase "27. post_verify — comprehensive health matrix"
+
+  # STANDBY-BOOTSTRAP runs a different verification: identity-bearing services
+  # must NOT be running, postgres must be in recovery mode, sync infrastructure
+  # must be in place. The normal "is fula-pinning-service active?" check would
+  # falsely fail.
+  if $STANDBY_BOOTSTRAP; then
+    _verify_standby_state
+    _verify_postgres
+    _verify_redis
+    _verify_disk_resources
+    mark_phase_done post_verify
+    return
+  fi
+
   _verify_systemd_services
   _verify_docker_containers
   _verify_network_listeners
@@ -2067,6 +2623,86 @@ phase_post_verify() {
   _verify_disk_resources
   _verify_negative_exposure
   mark_phase_done post_verify
+}
+
+# ---------------- standby-bootstrap state ----------------
+# Counterpart to _verify_systemd_services for STANDBY_BOOTSTRAP=true. Asserts
+# the opposite of the usual checks: identity-bearing services must be STOPPED,
+# containers must NOT be running, sync infrastructure must be wired up.
+_verify_standby_state() {
+  log "  --- standby state ---"
+
+  # 1. Identity-bearing containers must not be running.
+  local c
+  for c in ipfs_host ipfs_cluster fula-gateway-1; do
+    local st
+    st=$(docker inspect "$c" --format '{{.State.Status}}' 2>/dev/null || echo absent)
+    if [ "$st" = "running" ] || [ "$st" = "restarting" ]; then
+      check_fail "container $c is $st (should be stopped on standby)"
+    else
+      check_pass "container $c is $st"
+    fi
+  done
+
+  # 2. Identity-bearing systemd units must not be active or enabled.
+  local u
+  for u in fula-pinning-service fula-upload-server fula-pinning-webui \
+           fula-gateway fula-ai-service x402-gateway libp2p-service \
+           mainnet-pool-server mainnet-rewards-server; do
+    if [ ! -f "/etc/systemd/system/${u}.service" ] && \
+       ! systemctl list-unit-files 2>/dev/null | grep -q "^${u}\.service"; then
+      continue
+    fi
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+      check_fail "$u is active (should be stopped on standby)"
+    elif systemctl is-enabled --quiet "$u" 2>/dev/null; then
+      check_warn "$u is enabled (should be disabled — would auto-start on reboot)"
+    else
+      check_pass "$u is stopped and disabled"
+    fi
+  done
+
+  # 3. Sync infrastructure must be present.
+  if [ -f /etc/fula-standby/standby-config.sh ]; then
+    check_pass "/etc/fula-standby/standby-config.sh exists"
+  else
+    check_fail "/etc/fula-standby/standby-config.sh missing"
+  fi
+  if [ -f /etc/cron.d/fula-standby-sync ]; then
+    check_pass "sync cron installed"
+  else
+    check_fail "/etc/cron.d/fula-standby-sync missing"
+  fi
+  if [ -f /root/.ssh/standby_ed25519.pub ]; then
+    check_pass "standby SSH key generated"
+  else
+    check_fail "/root/.ssh/standby_ed25519.pub missing"
+  fi
+  if [ -f "$STANDBY_STATE_BASE/MODE" ]; then
+    local mode
+    mode=$(cat "$STANDBY_STATE_BASE/MODE" | head -n1)
+    check_pass "MODE = $mode"
+  else
+    check_fail "$STANDBY_STATE_BASE/MODE missing"
+  fi
+
+  # 4. Deferred crons (IPNS-publishing) must NOT be in /etc/cron.d.
+  for f in fula-db-backup fula-registry-ipns; do
+    if [ -f "/etc/cron.d/$f" ]; then
+      check_fail "/etc/cron.d/$f exists on standby (would publish to primary's IPNS keys)"
+    else
+      check_pass "/etc/cron.d/$f absent (correct — staged in $STANDBY_STATE_BASE/deferred-cron/)"
+    fi
+  done
+
+  # 5. Postgres must be in recovery (hot-standby) mode.
+  local in_recovery
+  in_recovery=$(docker exec postgres-pinning psql -U postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null | tr -d '[:space:]' || echo unknown)
+  if [ "$in_recovery" = "t" ]; then
+    check_pass "postgres is in recovery mode (hot-standby)"
+  else
+    check_fail "postgres pg_is_in_recovery=$in_recovery (expected 't')"
+  fi
 }
 
 # ---------------- systemd services ----------------
@@ -2507,7 +3143,7 @@ _verify_backup_readiness() {
   fi
 
   # Verify the backup-db.sh script exists and is executable
-  local backup_script="$PINNING_REPO/scripts/backup-db.sh"
+  local backup_script="$PINNING_REPO/scripts/migration/backup-db.sh"
   if [ -x "$backup_script" ] || [ -f "$backup_script" ]; then
     check_pass "backup-db.sh present at $backup_script"
   else
@@ -2628,6 +3264,29 @@ phase_prewarm_cluster_pins() {
 # ============================================================================
 phase_postinstall_checklist() {
   log_phase "29. postinstall_checklist"
+
+  # STANDBY-BOOTSTRAP: a different checklist was already printed by
+  # phase_install_standby_cron. Don't double-up — just summarize and exit.
+  if $STANDBY_BOOTSTRAP; then
+    cat <<EOF
+
+============================================================
+  Standby bootstrap complete.
+============================================================
+This server is now a WARM-STANDBY replica. fula-* services are stopped and
+DISABLED; postgres is in hot-standby mode replaying primary's WAL.
+
+See the previous "STANDBY BOOTSTRAP COMPLETE" block for the operator
+checklist (SSH key authorization, arming the sync cron, etc.).
+
+Sync log:      /var/log/fula-standby-sync.log
+Failover cmd:  bash /opt/pinning-service/scripts/migration/standby/standby-failover.sh
+============================================================
+EOF
+    mark_phase_done postinstall_checklist
+    return
+  fi
+
   local me
   me=$(my_public_ip)
   cat <<EOF
@@ -2673,7 +3332,7 @@ EOF
 
   3. Trigger a backup smoke test:
        . /root/.fula-backup-key && \\
-         /opt/pinning-service/scripts/backup-db.sh
+         /opt/pinning-service/scripts/migration/backup-db.sh
 
   4. Pin round-trip test:
        curl -X POST https://api.cloud.fx.land/pins \\
@@ -2725,6 +3384,7 @@ PHASE_ORDER=(
   apply_systemd_units
   apply_nginx
   apply_cron
+  install_standby_cron
   apply_ufw
   dns_cutover_pause
   certs

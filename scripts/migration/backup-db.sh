@@ -8,7 +8,7 @@
 #   docker exec ipfs_host ipfs key gen fula-db-backup
 #
 # Cron entry (daily at 3 AM):
-#   0 3 * * * /opt/pinning-service/scripts/backup-db.sh >> /var/log/fula-db-backup.log 2>&1
+#   0 3 * * * /opt/pinning-service/scripts/migration/backup-db.sh >> /var/log/fula-db-backup.log 2>&1
 #
 # Required environment:
 #   BACKUP_ENCRYPTION_KEY  — AES-256 key for dump encryption (openssl rand -hex 32)

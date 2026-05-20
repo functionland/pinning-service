@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# standby-config.sh.example — template for the warm-standby configuration.
+#
+# At bootstrap (recover.sh --standby-bootstrap), recover.sh writes the live
+# version of this file to /etc/fula-standby/standby-config.sh with values
+# auto-populated from the migration bundle.
+#
+# All standby scripts source /etc/fula-standby/standby-config.sh, NOT this
+# template. Hand-edit /etc/fula-standby/standby-config.sh if you need to
+# change e.g. PRIMARY_HOST after the primary's DNS name changes.
+
+# ---- Connectivity to the primary server ----
+PRIMARY_HOST=""                    # FQDN or IP of the primary (e.g. cloud.fx.land)
+PRIMARY_USER="root"                # SSH user on primary; needs sudo / docker / read access
+SSH_KEY="/root/.ssh/standby_ed25519"
+
+# Common SSH options used by every ssh/rsync invocation. BatchMode prevents
+# interactive prompts (which would hang the cron). accept-new trusts the host
+# key on first contact then locks it in (TOFU).
+SSH_OPTS="-i $SSH_KEY -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+
+# ---- Primary-side host paths to sync FROM ----
+# Resolved at bootstrap from the bundle's datastore_spec + docker inspect.
+# These are the HOST paths on the primary, not in-container paths.
+PRIMARY_KUBO_BLOCKS=""             # e.g. /uniondrive/ipfs_datastore/blocks  OR  /var/lib/docker/volumes/ipfs_host_data/_data/blocks
+PRIMARY_KUBO_DATASTORE=""          # e.g. /uniondrive/ipfs_datastore/datastore
+PRIMARY_CLUSTER_DATA=""            # e.g. /uniondrive/ipfs-cluster  OR  /var/lib/docker/volumes/ipfs_cluster_data/_data
+PRIMARY_PG_ARCHIVE="/var/lib/pg-archive"   # WAL archive dir on primary; created by setup-primary-for-replication.sh
+
+# ---- Standby-side state ----
+STANDBY_STATE_DIR="/var/lib/fula-standby"
+STANDBY_MODE_FILE="$STANDBY_STATE_DIR/MODE"          # "bootstrap-complete" | "sync-enabled" | "promoted"
+STANDBY_LOG_FILE="/var/log/fula-standby-sync.log"
+STANDBY_LOCK_FILE="/var/lock/fula-standby-sync.lock"
+STANDBY_STAGING_DIR="$STANDBY_STATE_DIR/staging"
+
+# ---- Performance knobs ----
+RSYNC_BWLIMIT="50M"                # rsync --bwlimit; cap bandwidth to avoid saturating either link
+
+# ---- Identity-bearing services that MUST stay stopped on standby ----
+# Sourced by preflight + failover. Kept here so adding/removing a service
+# updates both sides.
+STANDBY_DOCKER_OFF=(ipfs_host ipfs_cluster fula-gateway-1)
+STANDBY_SYSTEMD_OFF=(
+  fula-pinning-service
+  fula-upload-server
+  fula-pinning-webui
+  fula-gateway
+  fula-ai-service
+  x402-gateway
+  libp2p-service
+  mainnet-pool-server
+  mainnet-rewards-server
+)

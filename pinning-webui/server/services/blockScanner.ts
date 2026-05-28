@@ -7,8 +7,9 @@
  * Uses PostgreSQL for database operations.
  */
 
-import { query, getClient } from '../database/postgres.js';
+import { query } from '../database/postgres.js';
 import { hashWalletAddress } from '../utils/hash.js';
+import { creditUser } from './creditService.js';
 
 // Chain configuration
 export interface ChainConfig {
@@ -210,8 +211,9 @@ export async function processTransfer(chainId: number, transfer: TokenTransfer):
     const wallet = walletResult.rows[0];
 
     if (wallet) {
-      // Auto-credit the user
-      await creditUser(wallet.user_id, amountFula, transfer.hash, chainId);
+      // Auto-credit the user via the shared creditService (also fires
+      // multi-level referral bonuses to the user's ancestors).
+      await creditUser(wallet.user_id, amountFula, `${chainId}:${transfer.hash}`, 'deposit');
 
       // Update transaction with user_id — no plain-text email
       await query(
@@ -228,41 +230,6 @@ export async function processTransfer(chainId: number, transfer: TokenTransfer):
   } catch (error) {
     console.error(`[blockScanner] Error processing transfer ${transfer.hash}:`, error);
     return false;
-  }
-}
-
-// Credit FULA to a user's account
-async function creditUser(userId: string, amount: number, txHash: string, chainId: number): Promise<void> {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
-
-    // Atomic upsert — no read-then-write race condition
-    const result = await client.query<{ balance_fula: number }>(
-      `INSERT INTO user_credits (user_id, balance_fula, total_deposited_fula)
-       VALUES ($1, $2, $2)
-       ON CONFLICT (user_id) DO UPDATE
-       SET balance_fula = user_credits.balance_fula + $2,
-           total_deposited_fula = user_credits.total_deposited_fula + $2,
-           is_suspended = 0, updated_at = NOW()
-       RETURNING balance_fula`,
-      [userId, amount]
-    );
-    const newBalance = result.rows[0].balance_fula;
-
-    // Log the deposit in credit history — no plain-text email
-    await client.query(
-      `INSERT INTO credit_history (user_id, tx_type, amount_fula, balance_after, reference_id)
-       VALUES ($1, 'deposit', $2, $3, $4)`,
-      [userId, amount, newBalance, `${chainId}:${txHash}`]
-    );
-
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
   }
 }
 

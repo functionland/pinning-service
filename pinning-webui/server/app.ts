@@ -3070,19 +3070,38 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       `, [userId]);
       const levelStats = levelStatsResult.rows;
 
-      // Per-code direct-referral counts (Level 1 only, grouped by referral_code)
-      const perCodeCountsResult = await query<{ code: string; total_referred: string }>(`
-        SELECT rc.code, COUNT(r.id)::text AS total_referred
+      // Per-code rollup: direct-referral counts (Level 1) AND total bonus
+      // earned by the recipient via this specific code (attributed to the
+      // recipient's chain-entry code, i.e. the leftmost code in each bonus's
+      // description chain). Scalar subqueries avoid cardinality blow-up
+      // that a single JOIN of referrals × referral_bonuses would produce.
+      const perCodeResult = await query<{ code: string; total_referred: string; total_bonus: string }>(`
+        SELECT
+          rc.code,
+          (SELECT COUNT(*) FROM referrals r
+            WHERE r.referrer_id = rc.user_id AND r.referral_code = rc.code)::text AS total_referred,
+          (SELECT COALESCE(SUM(rb.bonus_amount_fula), 0) FROM referral_bonuses rb
+            WHERE rb.recipient_user_id = rc.user_id AND rb.recipient_referral_code = rc.code)::text AS total_bonus
         FROM referral_codes rc
-        LEFT JOIN referrals r
-          ON r.referrer_id = rc.user_id AND r.referral_code = rc.code
         WHERE rc.user_id = $1
-        GROUP BY rc.code
       `, [userId]);
-      const perCodeCounts = new Map<string, number>();
-      for (const row of perCodeCountsResult.rows) {
-        perCodeCounts.set(row.code, parseInt(row.total_referred, 10));
+      const perCodeData = new Map<string, { referred: number; bonus: number }>();
+      for (const row of perCodeResult.rows) {
+        perCodeData.set(row.code, {
+          referred: parseInt(row.total_referred, 10),
+          bonus: parseFloat(row.total_bonus),
+        });
       }
+
+      // Total bonuses earned by this user across all their codes (for the
+      // stats tile). Cross-checks against user_credits.total_bonus_received_fula.
+      const totalBonusResult = await query<{ total: string }>(
+        `SELECT COALESCE(SUM(bonus_amount_fula), 0)::text AS total
+         FROM referral_bonuses
+         WHERE recipient_user_id = $1`,
+        [userId]
+      );
+      const totalBonusReceived = parseFloat(totalBonusResult.rows[0]?.total || '0');
 
       // Build stats object with level breakdown
       const stats = {
@@ -3115,7 +3134,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           inheritedName: c.inheritedName,
           isDefault: c.isDefault,
           createdAt: c.createdAt,
-          totalReferred: perCodeCounts.get(c.code) ?? 0,
+          totalReferred: perCodeData.get(c.code)?.referred ?? 0,
+          totalBonus: perCodeData.get(c.code)?.bonus ?? 0,
         })),
         // Legacy: single default code for backward compatibility
         code: defaultCode.code,
@@ -3123,6 +3143,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         stats,
         totalReferred: stats.level1.count,
         totalCreditsFromReferrals: stats.total.credits,
+        totalBonusReceived,
       });
     } catch (error) {
       console.error('[webui] Error getting referral info:', error);
@@ -3627,20 +3648,26 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       const offset = (page - 1) * limit;
       const includeZero = req.query.includeZero === 'true';
 
-      // Get referrers with stats
+      // Get referrers with stats. The totalBonus subquery is correlated to
+      // (rc.user_id, rc.code) and computed once per grouped row, so it does
+      // not multiply with the LEFT JOINs on referrals × user_credits.
       const referrersResult = await query<{
         user_id: string;
         code: string;
         codecreatedat: string;
         totalreferred: string;
         totalcreditsfromreferrals: string;
+        totalbonus: string;
       }>(`
         SELECT
           rc.user_id,
           rc.code,
           rc.created_at as codeCreatedAt,
           COUNT(r.id)::text as totalReferred,
-          COALESCE(SUM(uc.total_deposited_fula), 0)::text as totalCreditsFromReferrals
+          COALESCE(SUM(uc.total_deposited_fula), 0)::text as totalCreditsFromReferrals,
+          (SELECT COALESCE(SUM(rb.bonus_amount_fula), 0) FROM referral_bonuses rb
+            WHERE rb.recipient_user_id = rc.user_id
+              AND rb.recipient_referral_code = rc.code)::text as totalBonus
         FROM referral_codes rc
         LEFT JOIN referrals r ON rc.user_id = r.referrer_id AND rc.code = r.referral_code
         LEFT JOIN user_credits uc ON r.referred_id = uc.user_id
@@ -3655,6 +3682,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         codeCreatedAt: r.codecreatedat,
         totalReferred: parseInt(r.totalreferred, 10),
         totalCreditsFromReferrals: parseFloat(r.totalcreditsfromreferrals),
+        totalBonus: parseFloat(r.totalbonus),
       }));
 
       // Get total count of (user_id, code) rows matching the same per-code filter as the data query

@@ -16,6 +16,7 @@ interface ReferralCode {
   isDefault: boolean;
   createdAt: string;
   totalReferred: number;
+  totalBonus: number;
 }
 
 interface ReferralInfo {
@@ -28,6 +29,15 @@ interface ReferralInfo {
     level3: LevelStats;
     total: LevelStats;
   };
+  totalBonusReceived: number;
+}
+
+// Trim trailing zeros from a fixed-decimal FULA string so 1.50000000 → 1.5,
+// 0.10000000 → 0.1, but 1.000 → 1. Keeps the bonus column readable.
+function fmtFula(n: number): string {
+  if (!isFinite(n)) return '0';
+  const s = n.toFixed(6);
+  return s.replace(/\.?0+$/, '') || '0';
 }
 
 export default function Referrals() {
@@ -216,6 +226,7 @@ export default function Referrals() {
                   <th className="text-left py-2 px-2 font-medium text-gray-600">{t.referrals?.labelColumn || 'Label'}</th>
                   <th className="text-left py-2 px-2 font-medium text-gray-600">{t.referrals?.codeColumn || 'Code'}</th>
                   <th className="text-right py-2 px-2 font-medium text-gray-600">{t.referrals?.referredColumn || 'Referred'}</th>
+                  <th className="text-right py-2 px-2 font-medium text-gray-600">{t.referrals?.bonusColumn || 'Bonus (FULA)'}</th>
                   <th className="text-left py-2 px-2 font-medium text-gray-600 hidden md:table-cell">{t.referrals?.linkColumn || 'Link'}</th>
                   <th className="text-right py-2 px-2 font-medium text-gray-600">{t.referrals?.actionsColumn || 'Actions'}</th>
                 </tr>
@@ -258,6 +269,10 @@ export default function Referrals() {
                     {/* Referred count */}
                     <td className="py-3 px-2 text-right font-medium text-primary-600">
                       {codeItem.totalReferred ?? 0}
+                    </td>
+                    {/* Bonus earned via this code (recipient's chain-entry attribution) */}
+                    <td className="py-3 px-2 text-right font-medium text-purple-600">
+                      {fmtFula(codeItem.totalBonus ?? 0)}
                     </td>
                     {/* Link (hidden on mobile) */}
                     <td className="py-3 px-2 hidden md:table-cell" onClick={(e) => e.stopPropagation()}>
@@ -318,7 +333,15 @@ export default function Referrals() {
 
       {/* Stats Card */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">{t.referrals?.stats || 'Referral Stats'}</h2>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">{t.referrals?.stats || 'Referral Stats'}</h2>
+          {info && (
+            <div className="text-sm text-purple-700 bg-purple-50 border border-purple-200 rounded-lg px-3 py-1.5">
+              <span className="font-medium">{t.referrals?.totalBonusEarned || 'Total bonus earned'}:</span>{' '}
+              <span className="font-mono font-semibold">{fmtFula(info.totalBonusReceived ?? 0)} FULA</span>
+            </div>
+          )}
+        </div>
 
         {info ? (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

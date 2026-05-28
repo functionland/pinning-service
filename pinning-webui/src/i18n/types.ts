@@ -254,6 +254,14 @@ export interface Translations {
     walletsTitle: string;
     historyTitle: string;
     chainsTitle: string;
+    // Credit-history table columns + tx_type display labels.
+    historyType?: string;
+    historyAmount?: string;
+    historyBalance?: string;
+    historyDetails?: string;
+    historyDate?: string;
+    historyTypeReferralBonus?: string;
+    historyTypeDeduction?: string;
   };
   common: {
     loading: string;
@@ -323,6 +331,9 @@ export interface Translations {
     userId?: string;
     searchPlaceholder?: string;
     search?: string;
+    // Referral-bonus surface
+    bonusColumn?: string;
+    totalBonusEarned?: string;
   };
   admin?: {
     title: string;
@@ -365,6 +376,7 @@ export interface Translations {
     tryIncludeZero: string;
     noReferred: string;
     actions: string;
+    bonusPaid?: string;
   };
   download?: {
     title: string;

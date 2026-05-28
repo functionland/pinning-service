@@ -504,31 +504,43 @@ export default function Billing() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-gray-500 border-b">
-                  <th className="pb-2">Type</th>
-                  <th className="pb-2">Amount</th>
-                  <th className="pb-2">Balance After</th>
-                  <th className="pb-2">Date</th>
+                  <th className="pb-2">{t.billing?.historyType || 'Type'}</th>
+                  <th className="pb-2">{t.billing?.historyAmount || 'Amount'}</th>
+                  <th className="pb-2">{t.billing?.historyBalance || 'Balance After'}</th>
+                  <th className="pb-2">{t.billing?.historyDetails || 'Details'}</th>
+                  <th className="pb-2">{t.billing?.historyDate || 'Date'}</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {history.map((item, idx) => (
-                  <tr key={idx} className="text-gray-700">
-                    <td className="py-2">
-                      <span className={`px-2 py-1 rounded text-xs ${
-                        item.txType === 'deposit' ? 'bg-green-100 text-green-700' :
-                        item.txType === 'adjustment' ? 'bg-blue-100 text-blue-700' :
-                        'bg-gray-100 text-gray-700'
-                      }`}>
-                        {item.txType}
-                      </span>
-                    </td>
-                    <td className={`py-2 font-mono ${item.amountFula >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                      {item.amountFula >= 0 ? '+' : ''}{item.amountFula.toFixed(4)}
-                    </td>
-                    <td className="py-2 font-mono">{item.balanceAfter.toFixed(4)}</td>
-                    <td className="py-2 text-gray-500">{new Date(item.createdAt).toLocaleString()}</td>
-                  </tr>
-                ))}
+                {history.map((item, idx) => {
+                  const typeLabel = item.txType === 'referral_bonus'
+                    ? (t.billing?.historyTypeReferralBonus || 'referral bonus')
+                    : item.txType === 'hourly_deduction'
+                    ? (t.billing?.historyTypeDeduction || 'deduction')
+                    : item.txType;
+                  const typeClasses =
+                    item.txType === 'deposit' ? 'bg-green-100 text-green-700' :
+                    item.txType === 'adjustment' ? 'bg-blue-100 text-blue-700' :
+                    item.txType === 'referral_bonus' ? 'bg-purple-100 text-purple-700' :
+                    'bg-gray-100 text-gray-700';
+                  return (
+                    <tr key={idx} className="text-gray-700">
+                      <td className="py-2">
+                        <span className={`px-2 py-1 rounded text-xs ${typeClasses}`}>
+                          {typeLabel}
+                        </span>
+                      </td>
+                      <td className={`py-2 font-mono ${item.amountFula >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        {item.amountFula >= 0 ? '+' : ''}{item.amountFula.toFixed(4)}
+                      </td>
+                      <td className="py-2 font-mono">{item.balanceAfter.toFixed(4)}</td>
+                      <td className="py-2 text-gray-500 max-w-md truncate" title={item.referenceId || ''}>
+                        {item.referenceId || '—'}
+                      </td>
+                      <td className="py-2 text-gray-500">{new Date(item.createdAt).toLocaleString()}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

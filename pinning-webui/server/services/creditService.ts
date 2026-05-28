@@ -3,6 +3,7 @@
  * Uses PostgreSQL for database operations
  */
 
+import type { PoolClient } from 'pg';
 import { query, getClient, decryptApiKey, encryptApiKey } from '../database/postgres.js';
 import { emailToUserId, hashWalletAddress } from '../utils/hash.js';
 
@@ -14,6 +15,21 @@ const ADMIN_USER_IDS = ADMIN_EMAILS.map(e => emailToUserId(e));
 
 // FULA token decimals
 const FULA_DECIMALS = 18;
+
+// Referral bonus rates per level (1-indexed: BONUS_RATES[0] = level 1)
+// Bonus = sourceAmount * BONUS_RATES[level - 1], rounded to FULA_ROUNDING_DIGITS.
+const BONUS_RATES = [0.10, 0.01, 0.01] as const;
+
+// Round bonuses to 6 decimal places. REAL (float32) carries ~7 decimal digits of
+// total precision, so finer rounding is illusory once balances grow.
+const FULA_ROUNDING_DIGITS = 6;
+const FULA_ROUNDING_FACTOR = Math.pow(10, FULA_ROUNDING_DIGITS);
+
+// Kill switch for the referral-bonus distribution path. When false, creditUser
+// behaves exactly as it did before this feature: no chain walk, no bonus rows.
+// Default is true (feature enabled). Set REFERRAL_BONUSES_ENABLED=false at the
+// process level to disable in an incident without a redeploy.
+const REFERRAL_BONUSES_ENABLED = process.env.REFERRAL_BONUSES_ENABLED !== 'false';
 
 // Chain configuration
 export interface ChainInfo {
@@ -130,7 +146,165 @@ export async function getUserCreditStatus(userId: string): Promise<UserCreditSta
   };
 }
 
-// Credit user with FULA (from manual claim or admin adjustment)
+// ============================================================
+// Internal types & helpers for creditUser + referral bonuses
+// ============================================================
+
+type CreditTxType = 'deposit' | 'adjustment' | 'referral_bonus';
+
+interface ChainEntry {
+  /** The referrer's user_id (a SHA-256 hash; already opaque — do NOT re-hash). */
+  userId: string;
+  /** The referral_code used by the descendant at this link in the chain. */
+  code: string;
+}
+
+interface BonusMetadata {
+  /** The recipient-owned code at the chain entry — used for per-code attribution. */
+  recipientCode: string;
+  /** The signup code of the original credit's source user (rightmost in description chain). */
+  sourceSignupCode: string;
+  /** 1, 2, or 3. */
+  level: 1 | 2 | 3;
+}
+
+interface CreditOp {
+  userId: string;
+  amount: number;
+  txType: CreditTxType;
+  referenceId: string;
+  /** Present iff this op is a referral bonus. */
+  bonus?: BonusMetadata;
+}
+
+/**
+ * Walks the referrals graph up to 3 levels above `startUserId`. Returns a
+ * chain ordered from level-1 (immediate referrer) outward. Stops early on:
+ *  - missing referrer (chain ends naturally)
+ *  - cycle detection (defensive — the unique index on referred_id and
+ *    sign-up validation should prevent cycles, but we guard anyway)
+ */
+async function _walkReferralChain(
+  client: PoolClient,
+  startUserId: string
+): Promise<ChainEntry[]> {
+  const chain: ChainEntry[] = [];
+  const seen = new Set<string>([startUserId]);
+  let cursor = startUserId;
+
+  for (let level = 1; level <= 3; level++) {
+    const result = await client.query<{ referrer_id: string; referral_code: string }>(
+      `SELECT referrer_id, referral_code
+       FROM referrals
+       WHERE referred_id = $1`,
+      [cursor]
+    );
+    if (result.rows.length === 0) break;
+    const { referrer_id, referral_code } = result.rows[0];
+    if (!referrer_id || seen.has(referrer_id)) break; // cycle / self-referral guard
+    chain.push({ userId: referrer_id, code: referral_code });
+    seen.add(referrer_id);
+    cursor = referrer_id;
+  }
+
+  return chain;
+}
+
+/**
+ * Formats the human-readable description string used as `reference_id` on
+ * the bonus's credit_history row. The user-specified format:
+ *   '<pct>%' bonus referral code <chain> for '<sourceUserId>' level '<N>'
+ * where <chain> is the codes from recipient's entry code (leftmost) down to
+ * the source's signup code (rightmost), joined with ' > '. L1 collapses to a
+ * single code; L3 is a 3-code chain.
+ */
+function _formatBonusDescription(
+  rate: number,
+  codePath: string[],
+  sourceUserId: string,
+  level: number
+): string {
+  const pct = `${Math.round(rate * 100)}%`;
+  const quotedChain = codePath.map(c => `'${c}'`).join(' > ');
+  return `'${pct}' bonus referral code ${quotedChain} for '${sourceUserId}' level '${level}'`;
+}
+
+/**
+ * Atomic UPSERT on user_credits + append to credit_history for one credit op,
+ * using a caller-provided client (so the caller owns the transaction).
+ *
+ * Dispatch on txType:
+ *   - 'deposit'        → balance += amount, total_deposited_fula += amount,
+ *                        is_suspended cleared.
+ *   - 'adjustment'     → balance += amount, totals unchanged, is_suspended cleared.
+ *   - 'referral_bonus' → balance += amount, total_bonus_received_fula += amount,
+ *                        is_suspended PRESERVED (a descendant's credit must not
+ *                        silently unsuspend an ancestor).
+ *
+ * Returns the new credit_history.id and the post-UPSERT balance.
+ */
+async function _insertCreditRow(
+  client: PoolClient,
+  userId: string,
+  amount: number,
+  txType: CreditTxType,
+  referenceId: string
+): Promise<{ creditHistoryId: number; balanceAfter: number }> {
+  const depositAdd = txType === 'deposit' ? amount : 0;
+
+  let upsertSql: string;
+  let upsertArgs: unknown[];
+
+  if (txType === 'referral_bonus') {
+    upsertSql = `
+      INSERT INTO user_credits (user_id, balance_fula, total_bonus_received_fula)
+      VALUES ($1, $2, $2)
+      ON CONFLICT (user_id) DO UPDATE
+      SET balance_fula = user_credits.balance_fula + $2,
+          total_bonus_received_fula = user_credits.total_bonus_received_fula + $2,
+          updated_at = NOW()
+      RETURNING balance_fula
+    `;
+    upsertArgs = [userId, amount];
+  } else {
+    upsertSql = `
+      INSERT INTO user_credits (user_id, balance_fula, total_deposited_fula)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (user_id) DO UPDATE
+      SET balance_fula = user_credits.balance_fula + $2,
+          total_deposited_fula = user_credits.total_deposited_fula + $3,
+          is_suspended = 0, updated_at = NOW()
+      RETURNING balance_fula
+    `;
+    upsertArgs = [userId, amount, depositAdd];
+  }
+
+  const balanceResult = await client.query<{ balance_fula: number }>(upsertSql, upsertArgs);
+  const balanceAfter = balanceResult.rows[0].balance_fula;
+
+  const historyResult = await client.query<{ id: number }>(
+    `INSERT INTO credit_history (user_id, tx_type, amount_fula, balance_after, reference_id)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id`,
+    [userId, txType, amount, balanceAfter, referenceId]
+  );
+
+  return { creditHistoryId: historyResult.rows[0].id, balanceAfter };
+}
+
+/**
+ * Public credit entry point: atomic-upserts the user's balance, appends the
+ * credit_history row, and (for positive deposits/adjustments) emits up to 3
+ * referral bonus credits to ancestors in the same transaction.
+ *
+ * Deadlock safety: source + ancestor UPSERTs are sorted by user_id ASC so all
+ * concurrent transactions acquire row locks in the same order regardless of
+ * which user is the source of the original credit.
+ *
+ * No cascade: bonus credits use txType='referral_bonus', which this function
+ * does NOT itself emit bonuses for (the bonus-emission branch is keyed on
+ * txType ∈ {deposit, adjustment} only).
+ */
 export async function creditUser(
   userId: string,
   amount: number,
@@ -141,26 +315,90 @@ export async function creditUser(
   try {
     await client.query('BEGIN');
 
-    // Atomic upsert — no read-then-write race condition
-    const depositAdd = txType === 'deposit' ? amount : 0;
-    const result = await client.query<{ balance_fula: number }>(
-      `INSERT INTO user_credits (user_id, balance_fula, total_deposited_fula)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (user_id) DO UPDATE
-       SET balance_fula = user_credits.balance_fula + $2,
-           total_deposited_fula = user_credits.total_deposited_fula + $3,
-           is_suspended = 0, updated_at = NOW()
-       RETURNING balance_fula`,
-      [userId, amount, depositAdd]
-    );
-    const newBalance = result.rows[0].balance_fula;
+    // 1. Walk the referral chain BEFORE acquiring any row locks (read-only).
+    //    Only positive credits trigger bonuses; negative / zero amounts skip
+    //    the walk. The kill switch lets ops disable bonuses without redeploy.
+    let chain: ChainEntry[] = [];
+    if (amount > 0 && REFERRAL_BONUSES_ENABLED) {
+      chain = await _walkReferralChain(client, userId);
+    }
 
-    // Log in credit history — no plain-text email
-    await client.query(
-      `INSERT INTO credit_history (user_id, tx_type, amount_fula, balance_after, reference_id)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [userId, txType, amount, newBalance, referenceId]
-    );
+    // 2. Build the full set of credit operations: source + bonus ops.
+    const ops: CreditOp[] = [
+      { userId, amount, txType, referenceId },
+    ];
+
+    for (let i = 0; i < chain.length; i++) {
+      const level = (i + 1) as 1 | 2 | 3;
+      const rate = BONUS_RATES[i];
+      const bonusAmount = Math.round(amount * rate * FULA_ROUNDING_FACTOR) / FULA_ROUNDING_FACTOR;
+      if (bonusAmount <= 0) continue;
+
+      // codePath at level N = [chain[N-1].code, chain[N-2].code, ..., chain[0].code]
+      // i.e. recipient's chain-entry code first, source's signup code last.
+      const codePath: string[] = [];
+      for (let j = i; j >= 0; j--) codePath.push(chain[j].code);
+
+      const description = _formatBonusDescription(rate, codePath, userId, level);
+
+      ops.push({
+        userId: chain[i].userId,
+        amount: bonusAmount,
+        txType: 'referral_bonus',
+        referenceId: description,
+        bonus: {
+          recipientCode: chain[i].code,
+          sourceSignupCode: chain[0].code, // = codePath[codePath.length - 1]
+          level,
+        },
+      });
+    }
+
+    // 3. Sort by userId ASC so all transactions acquire row locks in the same
+    //    order. This eliminates deadlocks on overlapping ancestor chains.
+    ops.sort((a, b) => (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0));
+
+    // 4. Apply all UPSERTs in sorted order.
+    const results: Array<{ op: CreditOp; creditHistoryId: number }> = [];
+    let sourceCreditHistoryId: number | null = null;
+    for (const op of ops) {
+      const { creditHistoryId } = await _insertCreditRow(
+        client,
+        op.userId,
+        op.amount,
+        op.txType,
+        op.referenceId
+      );
+      results.push({ op, creditHistoryId });
+      if (!op.bonus && op.userId === userId && op.txType === txType) {
+        sourceCreditHistoryId = creditHistoryId;
+      }
+    }
+
+    // 5. Record each bonus in referral_bonuses for per-code rollup + audit.
+    //    Within this transaction, sourceCreditHistoryId is brand-new (SERIAL),
+    //    so the UNIQUE (source_credit_history_id, level) constraint cannot
+    //    spuriously conflict; the ON CONFLICT DO NOTHING is the idempotency
+    //    contract for a future admin-only backfill endpoint that may replay
+    //    bonus emission over existing credit_history rows.
+    if (sourceCreditHistoryId !== null) {
+      for (const { op, creditHistoryId } of results) {
+        if (!op.bonus) continue;
+        await client.query(
+          `INSERT INTO referral_bonuses (
+             credit_history_id, recipient_user_id, recipient_referral_code,
+             source_credit_history_id, source_user_id, source_referral_code,
+             level, bonus_amount_fula, source_amount_fula
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (source_credit_history_id, level) DO NOTHING`,
+          [
+            creditHistoryId, op.userId, op.bonus.recipientCode,
+            sourceCreditHistoryId, userId, op.bonus.sourceSignupCode,
+            op.bonus.level, op.amount, amount,
+          ]
+        );
+      }
+    }
 
     await client.query('COMMIT');
   } catch (err) {

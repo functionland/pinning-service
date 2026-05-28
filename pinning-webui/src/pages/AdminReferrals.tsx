@@ -8,6 +8,13 @@ interface Referrer {
   codeCreatedAt: string;
   totalReferred: number;
   totalCreditsFromReferrals: number;
+  totalBonus: number;
+}
+
+function fmtFula(n: number): string {
+  if (!isFinite(n)) return '0';
+  const s = n.toFixed(6);
+  return s.replace(/\.?0+$/, '') || '0';
 }
 
 interface ReferrersResponse {
@@ -131,6 +138,9 @@ export default function AdminReferrals() {
                       {t.adminReferrals?.totalCredits || 'Credits Generated'}
                     </th>
                     <th className="text-right text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
+                      {t.adminReferrals?.bonusPaid || 'Bonus Paid'}
+                    </th>
+                    <th className="text-right text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">
                       {t.adminReferrals?.actions || 'Actions'}
                     </th>
                   </tr>
@@ -157,6 +167,9 @@ export default function AdminReferrals() {
                         <td className="px-4 py-3 text-sm text-right text-gray-600">
                           {referrer.totalCreditsFromReferrals.toFixed(2)} FULA
                         </td>
+                        <td className="px-4 py-3 text-sm text-right font-medium text-purple-600">
+                          {fmtFula(referrer.totalBonus ?? 0)} FULA
+                        </td>
                         <td className="px-4 py-3 text-right">
                           <button
                             className="text-primary-600 hover:text-primary-800 text-sm font-medium"
@@ -175,7 +188,7 @@ export default function AdminReferrals() {
                       {/* Expanded Row - Referral Tree */}
                       {selectedReferrer === rowKey && (
                         <tr>
-                          <td colSpan={5} className="px-4 py-4 bg-gray-50">
+                          <td colSpan={6} className="px-4 py-4 bg-gray-50">
                             <div className="space-y-3">
                               <h3 className="font-medium text-gray-900">
                                 {t.adminReferrals?.referredBy || 'Users referred by'} <span className="font-mono text-sm">{truncateHash(referrer.userId)}</span>

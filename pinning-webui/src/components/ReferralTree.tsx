@@ -26,6 +26,7 @@ interface ReferralTreeProps {
   isAdmin?: boolean;
   highlightUserId?: string; // userId hash to highlight (from email search)
   code?: string; // Optional per-code filter — only applied at the top level
+  ancestorIds?: string[]; // Track ancestors to prevent infinite loops
 }
 
 // Display a truncated userId hash: first 8 + ... + last 4
@@ -41,6 +42,7 @@ export default function ReferralTree({
   isAdmin = false,
   highlightUserId,
   code,
+  ancestorIds = [],
 }: ReferralTreeProps) {
   const { t } = useLanguage();
   const [data, setData] = useState<ReferredResponse | null>(null);
@@ -156,6 +158,7 @@ export default function ReferralTree({
                 maxLevel={maxLevel}
                 isAdmin={isAdmin}
                 highlightUserId={highlightUserId}
+                ancestorIds={ancestorIds}
                 isExpanded={expandedIds.has(user.userId)}
                 onToggle={() => toggleExpand(user.userId)}
                 formatDate={formatDate}
@@ -200,6 +203,7 @@ interface ReferralRowProps {
   maxLevel: number;
   isAdmin: boolean;
   highlightUserId?: string;
+  ancestorIds: string[];
   isExpanded: boolean;
   onToggle: () => void;
   formatDate: (date: string) => string;
@@ -212,12 +216,14 @@ function ReferralRow({
   maxLevel,
   isAdmin,
   highlightUserId,
+  ancestorIds,
   isExpanded,
   onToggle,
   formatDate,
   t,
 }: ReferralRowProps) {
-  const canExpand = user.referralCount > 0 && level < maxLevel;
+  const isAncestor = ancestorIds.includes(user.userId);
+  const canExpand = user.referralCount > 0 && level < maxLevel && !isAncestor;
   const isHighlighted = highlightUserId && user.userId === highlightUserId;
 
   return (
@@ -243,6 +249,12 @@ function ReferralRow({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
               </svg>
             </button>
+          ) : isAncestor ? (
+            <div className="flex justify-center" title="Circular reference detected">
+              <svg className="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </div>
           ) : (
             <span className="w-4 h-4 block"></span>
           )}
@@ -255,6 +267,11 @@ function ReferralRow({
             {canExpand && (
               <span className="text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
                 {user.referralCount}
+              </span>
+            )}
+            {isAncestor && (
+              <span className="text-[10px] text-red-500 bg-red-50 px-1 rounded border border-red-100 uppercase font-bold">
+                Cycle
               </span>
             )}
           </div>
@@ -296,6 +313,7 @@ function ReferralRow({
                 maxLevel={maxLevel}
                 isAdmin={isAdmin}
                 highlightUserId={highlightUserId}
+                ancestorIds={[...ancestorIds, userId]}
               />
             </div>
           </td>

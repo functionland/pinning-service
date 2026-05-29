@@ -3051,13 +3051,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // Get referral stats with 3-level breakdown using recursive CTE
       const levelStatsResult = await query<{ level: number; count: string; credits: string }>(`
         WITH RECURSIVE referral_chain AS (
-          SELECT referred_id, 1 as level
+          SELECT referred_id, 1 as level, ARRAY[referred_id] as path
           FROM referrals WHERE referrer_id = $1
           UNION ALL
-          SELECT r.referred_id, rc.level + 1
+          SELECT r.referred_id, rc.level + 1, rc.path || r.referred_id
           FROM referrals r
           JOIN referral_chain rc ON r.referrer_id = rc.referred_id
-          WHERE rc.level < 3
+          WHERE rc.level < 3 AND r.referred_id <> $1 AND NOT r.referred_id = ANY(rc.path)
         )
         SELECT
           rc.level,
@@ -3317,13 +3317,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // Verify the target is in the current user's referral chain (up to 3 levels)
       const isInChainResult = await query(`
         WITH RECURSIVE referral_chain AS (
-          SELECT referred_id, 1 as level
+          SELECT referred_id, 1 as level, ARRAY[referred_id] as path
           FROM referrals WHERE referrer_id = $1
           UNION ALL
-          SELECT r.referred_id, rc.level + 1
+          SELECT r.referred_id, rc.level + 1, rc.path || r.referred_id
           FROM referrals r
           JOIN referral_chain rc ON r.referrer_id = rc.referred_id
-          WHERE rc.level < 3
+          WHERE rc.level < 3 AND r.referred_id <> $1 AND NOT r.referred_id = ANY(rc.path)
         )
         SELECT 1 FROM referral_chain WHERE referred_id = $2
         UNION

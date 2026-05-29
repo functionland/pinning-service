@@ -180,11 +180,28 @@ export async function getOrCreateWebuiUser(
           'SELECT user_id FROM referral_codes WHERE code = $1',
           [referralCode]
         );
-        if (referrer.rows[0] && referrer.rows[0].user_id !== userId) {
-          await query(
-            'INSERT INTO referrals (referrer_id, referred_id, referral_code) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-            [referrer.rows[0].user_id, userId, referralCode]
-          );
+        const referrerId = referrer.rows[0]?.user_id;
+        if (referrerId && referrerId !== userId) {
+          // Cycle guard: ensure userId is not an ancestor of referrerId
+          const cycleCheck = await query(`
+            WITH RECURSIVE up AS (
+              SELECT referrer_id, 1 AS depth FROM referrals WHERE referred_id = $1
+              UNION ALL
+              SELECT r.referrer_id, up.depth + 1
+              FROM referrals r JOIN up ON r.referred_id = up.referrer_id
+              WHERE up.depth < 100
+            )
+            SELECT 1 FROM up WHERE referrer_id = $2 LIMIT 1
+          `, [referrerId, userId]);
+
+          if (cycleCheck.rows.length === 0) {
+            await query(
+              'INSERT INTO referrals (referrer_id, referred_id, referral_code) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+              [referrerId, userId, referralCode]
+            );
+          } else {
+            console.warn(`[webui] Blocked circular referral: ${userId} -> ${referrerId} -> ... -> ${userId}`);
+          }
         }
       }
     }
@@ -272,12 +289,29 @@ export async function getOrCreateWebuiUser(
       'SELECT user_id FROM referral_codes WHERE code = $1',
       [referralCode]
     );
+    const referrerId = referrer.rows[0]?.user_id;
     // Prevent self-referral and only link if referrer exists
-    if (referrer.rows[0] && referrer.rows[0].user_id !== userId) {
-      await query(
-        'INSERT INTO referrals (referrer_id, referred_id, referral_code) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [referrer.rows[0].user_id, userId, referralCode]
-      );
+    if (referrerId && referrerId !== userId) {
+      // Cycle guard: ensure userId is not an ancestor of referrerId
+      const cycleCheck = await query(`
+        WITH RECURSIVE up AS (
+          SELECT referrer_id, 1 AS depth FROM referrals WHERE referred_id = $1
+          UNION ALL
+          SELECT r.referrer_id, up.depth + 1
+          FROM referrals r JOIN up ON r.referred_id = up.referrer_id
+          WHERE up.depth < 100
+        )
+        SELECT 1 FROM up WHERE referrer_id = $2 LIMIT 1
+      `, [referrerId, userId]);
+
+      if (cycleCheck.rows.length === 0) {
+        await query(
+          'INSERT INTO referrals (referrer_id, referred_id, referral_code) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+          [referrerId, userId, referralCode]
+        );
+      } else {
+        console.warn(`[webui] Blocked circular referral: ${userId} -> ${referrerId} -> ... -> ${userId}`);
+      }
     }
   }
 

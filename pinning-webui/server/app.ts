@@ -3051,7 +3051,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // Get referral stats with 3-level breakdown using recursive CTE
       const levelStatsResult = await query<{ level: number; count: string; credits: string }>(`
         WITH RECURSIVE referral_chain AS (
-          SELECT referred_id, 1 as level, ARRAY[referred_id] as path
+          SELECT referred_id, 1 as level, ARRAY[referred_id]::varchar[] as path
           FROM referrals WHERE referrer_id = $1
           UNION ALL
           SELECT r.referred_id, rc.level + 1, rc.path || r.referred_id
@@ -3317,7 +3317,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // Verify the target is in the current user's referral chain (up to 3 levels)
       const isInChainResult = await query(`
         WITH RECURSIVE referral_chain AS (
-          SELECT referred_id, 1 as level, ARRAY[referred_id] as path
+          SELECT referred_id, 1 as level, ARRAY[referred_id]::varchar[] as path
           FROM referrals WHERE referrer_id = $1
           UNION ALL
           SELECT r.referred_id, rc.level + 1, rc.path || r.referred_id

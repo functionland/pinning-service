@@ -16,7 +16,7 @@ async function main() {
     console.log('Detecting cycles...');
     const detectCyclesQuery = `
       WITH RECURSIVE referral_chain AS (
-        SELECT referrer_id, referred_id, referred_at, ARRAY[referred_id] as path, FALSE as is_cycle
+        SELECT referrer_id, referred_id, referred_at, ARRAY[referred_id]::varchar[] as path, FALSE as is_cycle
         FROM referrals
         UNION ALL
         SELECT r.referrer_id, r.referred_id, r.referred_at, rc.path || r.referred_id, r.referred_id = ANY(rc.path)

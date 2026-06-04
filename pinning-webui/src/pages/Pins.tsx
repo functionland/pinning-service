@@ -21,7 +21,7 @@ import {
   decryptFxFile,
 } from '../services/encryptionService';
 import { useFxBulkDownload } from '../context/FxBulkDownloadContext';
-import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles } from '../services/fulaClientService';
+import { getFulaClient, fetchAndDecryptFula, fetchAndDecryptByCid, fetchAndDecryptByStorageKey, listFulaBuckets, listDecryptedFiles, listDirectoryFiles } from '../services/fulaClientService';
 import {
   storeEncryptionKey,
   retrieveEncryptionKey,
@@ -753,10 +753,21 @@ export default function Pins() {
 
       const client = await getFulaClient(keyBytes, accessToken, 'https://s3.cloud.fx.land');
 
-      // List files with decrypted metadata
-      // Note: listDecrypted uses HEAD requests on S3 objects
-      // For FlatNamespace, metadata comes from object headers, not forest
-      const files = await listDecryptedFiles(client, bucket, { prefix: prefix || undefined });
+      // Prefer the FOREST WALK (listDirectory) — it yields logical decrypted
+      // filenames and the true directory tree (the HEAD path surfaces raw S3
+      // objects, e.g. chunk keys). On a gc-orphaned bucket the walk can THROW —
+      // a forest node 404s and the wasm/web build has no gateway-race recovery
+      // (native only) — so fall back to the HEAD listing so the page degrades
+      // gracefully instead of erroring. Orphaned buckets re-pin (and start
+      // listing via the forest) once a native FxFiles client writes them.
+      let files: any[];
+      try {
+        files = await listDirectoryFiles(client, bucket, { prefix: prefix || undefined });
+        console.log('[FxFiles] listDirectory (forest walk) returned', files?.length ?? 0, 'files');
+      } catch (forestErr) {
+        console.warn('[FxFiles] forest walk failed; falling back to HEAD listing (listDecrypted):', forestErr);
+        files = await listDecryptedFiles(client, bucket, { prefix: prefix || undefined });
+      }
 
       // DEBUG: Log raw response
       console.log('[FxFiles] Bucket:', bucket, 'Prefix:', prefix);

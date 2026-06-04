@@ -141,6 +141,27 @@ export async function listFulaDirectory(
 }
 
 /**
+ * List files in a bucket via the FOREST WALK (listDirectory), flattened to the
+ * same flat array shape that {@link listDecryptedFiles} returns so existing
+ * callers' transforms work unchanged.
+ *
+ * The forest walk yields logical (decrypted) file paths in `originalKey` and the
+ * true directory tree, unlike the HEAD path which surfaces raw S3 objects.
+ * Prefer this. NOTE: on a gc-orphaned bucket the walk can THROW — a forest node
+ * 404s and the wasm/web build has no gateway-race recovery (that exists only on
+ * native) — so callers should catch and fall back to {@link listDecryptedFiles}.
+ */
+export async function listDirectoryFiles(
+  client: any,
+  bucket: string,
+  options?: { prefix?: string }
+): Promise<any[]> {
+  const listing: any = await listDirectory(client, bucket, options?.prefix);
+  const entries: any[] = Array.isArray(listing?.entries) ? listing.entries : [];
+  return entries.flatMap((e: any) => (Array.isArray(e?.files) ? e.files : []));
+}
+
+/**
  * Fetch and decrypt a file by its storage key from a specific bucket
  *
  * Use this when you know both the bucket and the storage key (CID).

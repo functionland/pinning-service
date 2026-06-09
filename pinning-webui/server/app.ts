@@ -115,6 +115,12 @@ export interface AppConfig {
   systemKey?: string;  // For x402 gateway integration
   s3AdminJwt?: string;  // For internal S3 fetch (share links)
   s3InternalUrl?: string;  // Internal S3 endpoint (default: http://127.0.0.1:9000)
+  // v8 migration: bucket the collab manifest + collab files are WRITTEN to.
+  // Default 'fula-metadata' (legacy ⇒ behaviour-preserving no-op). Set
+  // COLLAB_METADATA_WRITE_BUCKET=fula-metadata-v8 to route writes to the fresh
+  // sibling once the legacy forest is gc-damaged (matches the FxFiles app's v8
+  // routing). Reads try the write bucket then fall back to legacy.
+  collabMetadataWriteBucket?: string;
   // Phase 3.2 admin trigger endpoints — see /api/admin/fula/*.
   // `fulaCliInternalUrl` defaults to `s3InternalUrl` (same host:port,
   // different path namespace). `mainnetRewardsUrl` is a separate
@@ -2327,7 +2333,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         }
 
         const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
-        const bucket = 'fula-metadata';
+        const bucket = config.collabMetadataWriteBucket || 'fula-metadata';
         const storageKey = `.fula/collab/${groupId}/files/${fileId}`;
         const uploadUrl = `${s3BaseUrl}/${bucket}/${storageKey}`;
 
@@ -2378,18 +2384,29 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
       const storageKey = `.fula/collab/${groupId}/files/${fileId}`;
-      const fetchUrl = `${s3BaseUrl}/fula-metadata/${storageKey}`;
+      // MERGE-read: a file lives in exactly one bucket — try the (v8) write
+      // bucket first, then fall back to legacy (covers files uploaded before
+      // the v8 cutover). Single read when both names are the same.
+      const writeBucket = config.collabMetadataWriteBucket || 'fula-metadata';
+      const readBuckets = writeBucket === 'fula-metadata'
+        ? ['fula-metadata']
+        : [writeBucket, 'fula-metadata'];
 
-      const s3Response = await fetch(fetchUrl, {
-        headers: { 'Authorization': `Bearer ${s3Jwt}` },
-      });
-
-      if (!s3Response.ok) {
-        console.error('[webui] Collab file fetch failed:', s3Response.status);
-        return res.status(s3Response.status === 404 ? 404 : 500).json({ error: 'File not found' });
+      let buffer: Buffer | null = null;
+      let lastStatus = 500;
+      for (const b of readBuckets) {
+        const r = await fetch(`${s3BaseUrl}/${b}/${storageKey}`, {
+          headers: { 'Authorization': `Bearer ${s3Jwt}` },
+        });
+        if (r.ok) { buffer = Buffer.from(await r.arrayBuffer()); break; }
+        lastStatus = r.status;
       }
 
-      const buffer = Buffer.from(await s3Response.arrayBuffer());
+      if (!buffer) {
+        console.error('[webui] Collab file fetch failed:', lastStatus);
+        return res.status(lastStatus === 404 ? 404 : 500).json({ error: 'File not found' });
+      }
+
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Length', buffer.length.toString());
       res.send(buffer);
@@ -2418,8 +2435,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         }
 
         const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
+        const bucket = config.collabMetadataWriteBucket || 'fula-metadata';
         const storageKey = `.fula/collab/${groupId}/files/${fileId}`;
-        const deleteUrl = `${s3BaseUrl}/fula-metadata/${storageKey}`;
+        const deleteUrl = `${s3BaseUrl}/${bucket}/${storageKey}`;
 
         console.log('[webui] Collab file delete:', { groupId, fileId });
 
@@ -2520,7 +2538,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         }
 
         const s3BaseUrl = config.s3InternalUrl || 'http://127.0.0.1:9000';
-        const bucket = 'fula-metadata';
+        const bucket = config.collabMetadataWriteBucket || 'fula-metadata';
         const storageKey = `.fula/collab/${groupId}/manifest.json`;
         const uploadUrl = `${s3BaseUrl}/${bucket}/${encodeURIComponent(storageKey)}`;
 

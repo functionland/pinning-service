@@ -27,6 +27,9 @@ const config: AppConfig = {
   systemKey: process.env.PINNING_SYSTEM_KEY,  // For x402 gateway integration
   s3AdminJwt: process.env.S3_ADMIN_JWT,  // For internal S3 fetch (share links)
   s3InternalUrl: process.env.S3_INTERNAL_URL || 'http://127.0.0.1:9000',
+  // v8 migration (see Config.collabMetadataWriteBucket). Default = legacy no-op.
+  collabMetadataWriteBucket:
+    process.env.COLLAB_METADATA_WRITE_BUCKET || 'fula-metadata',
   // Phase 3.2 admin trigger endpoints. fula-cli defaults to the
   // same host as the S3 endpoint (same process); mainnet-rewards
   // is a separate service at :5667 by default.

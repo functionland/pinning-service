@@ -162,19 +162,35 @@ func (s *PinsAPIServiceSQLite) DeletePinByRequestId(ctx context.Context, request
 		return createErrorResponse(http.StatusForbidden, "FORBIDDEN", "You don't have permission to delete this pin"), errors.New("unauthorized")
 	}
 
-	// Unpin from IPFS Cluster asynchronously
-	go func(cid string) {
-		unpinCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-
-		if err := s.unpinFromCluster(unpinCtx, cid); err != nil {
-			log.Printf("Warning: failed to unpin from cluster: %v", err)
-		}
-	}(pinStatus.Pin.Cid)
-
-	// Mark pin as deleted
+	// Mark THIS pin deleted first so it is excluded from the ref-count below.
 	if err := s.db.MarkPinAsDeleted(ctx, requestid); err != nil {
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to delete pin"), err
+	}
+
+	// F6 ref-count guard: only unpin the CID from the cluster when NO other
+	// active pin (any user) still references it. See the Postgres handler for the
+	// full rationale. Bias toward retention: on a count error, skip the unpin.
+	cid := pinStatus.Pin.Cid
+	remaining, err := s.db.CountActivePinsByCID(ctx, cid)
+	if err != nil {
+		log.Printf("Warning: CountActivePinsByCID(%s) failed; skipping cluster unpin to avoid data loss: %v", cid, err)
+	} else if remaining == 0 {
+		go func(cid string) {
+			unpinCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			// Re-check just before unpinning to shrink the TOCTOU window where a
+			// concurrent AddPin landed after the count above.
+			if n, rerr := s.db.CountActivePinsByCID(unpinCtx, cid); rerr != nil || n > 0 {
+				log.Printf("Skipping unpin of %s: re-check found %d active pin(s) (err=%v)", cid, n, rerr)
+				return
+			}
+			if err := s.unpinFromCluster(unpinCtx, cid); err != nil {
+				log.Printf("Warning: failed to unpin from cluster: %v", err)
+			}
+		}(cid)
+	} else {
+		log.Printf("CID %s still referenced by %d active pin(s); skipping cluster unpin", cid, remaining)
 	}
 
 	return Response(http.StatusAccepted, nil), nil

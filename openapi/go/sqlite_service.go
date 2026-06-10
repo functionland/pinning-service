@@ -427,6 +427,24 @@ func (s *SQLiteService) GetExistingPinByCID(ctx context.Context, username, cid s
 	return &pinStatus, nil
 }
 
+// CountActivePinsByCID returns how many non-deleted, non-failed pins reference
+// this CID across ALL users (the F6 ref-count). See
+// PostgresService.CountActivePinsByCID for the rationale.
+func (s *SQLiteService) CountActivePinsByCID(ctx context.Context, cid string) (int, error) {
+	if cid == "" {
+		return 0, errors.New("cid cannot be empty")
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM pins WHERE cid = ? AND status NOT IN ('deleted', 'failed')",
+		cid,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count active pins by cid: %w", err)
+	}
+	return n, nil
+}
+
 // GetPinByRequestID retrieves a pin by its request ID
 func (s *SQLiteService) GetPinByRequestID(ctx context.Context, requestID string) (PinStatus, string, error) {
 	if requestID == "" {

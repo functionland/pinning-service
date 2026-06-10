@@ -193,6 +193,22 @@ func (s *PinsAPIService) DeletePinByRequestId(ctx context.Context, requestid str
 		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error()), err
 	}
 
+	// F6 ref-count guard: skip the cluster unpin if any other active pin (any
+	// user) still references this CID — the cluster pins by CID only, so an
+	// unconditional unpin would destroy data another user still holds. The pin is
+	// already marked deleted above, so it is excluded from this count. Bias toward
+	// retention: on a count error, skip the unpin (a leaked pin is wasted storage;
+	// an erroneous unpin is data loss).
+	remaining, cntErr := s.firestoreService.CountActivePinsByCID(ctx, pin.Pin.Cid)
+	if cntErr != nil {
+		log.Printf("Warning: CountActivePinsByCID(%s) failed; skipping cluster unpin to avoid data loss: %v", pin.Pin.Cid, cntErr)
+		return Response(http.StatusAccepted, nil), nil
+	}
+	if remaining > 0 {
+		log.Printf("CID %s still referenced by %d active pin(s); skipping cluster unpin", pin.Pin.Cid, remaining)
+		return Response(http.StatusAccepted, nil), nil
+	}
+
 	// Remove pin from IPFS
 	err = s.unpinFromIPFSCluster(ctx, pin.Pin.Cid)
 	if err != nil {

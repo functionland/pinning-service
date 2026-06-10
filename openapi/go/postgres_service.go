@@ -415,6 +415,27 @@ func (s *PostgresService) GetExistingPinByCID(ctx context.Context, username, cid
 	return &pinStatus, nil
 }
 
+// CountActivePinsByCID returns how many non-deleted, non-failed pins reference
+// this CID across ALL users (the F6 ref-count). ipfs-cluster pins by CID with
+// no per-user awareness, so a delete must trigger a cluster unpin ONLY when this
+// reaches zero — otherwise one user deleting their pin would destroy a CID
+// another user still holds. Active = status NOT IN ('deleted','failed'): a
+// 'queued'/'pinning' pin still intends to hold the CID, so it counts.
+func (s *PostgresService) CountActivePinsByCID(ctx context.Context, cid string) (int, error) {
+	if cid == "" {
+		return 0, errors.New("cid cannot be empty")
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM pins WHERE cid = $1 AND status NOT IN ('deleted', 'failed')",
+		cid,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count active pins by cid: %w", err)
+	}
+	return n, nil
+}
+
 // GetPinByRequestID retrieves a pin by its request ID. Returns the pin status
 // along with both ownership identifiers from the row: user_id (SHA-256 hash,
 // post-PII-wipe form) and username (legacy email/plain form). Either may be

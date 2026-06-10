@@ -172,6 +172,29 @@ func (s *FirestoreService) UpdatePinStatus(ctx context.Context, requestID, statu
 	return nil
 }
 
+// CountActivePinsByCID returns how many non-deleted, non-failed pins reference
+// this CID across ALL users (the F6 ref-count). See
+// PostgresService.CountActivePinsByCID for the rationale. Firestore can't filter
+// `NOT IN` alongside an equality, so we fetch by cid and tally in-process — the
+// same in-Go-filtering style the rest of this service uses.
+func (s *FirestoreService) CountActivePinsByCID(ctx context.Context, cid string) (int, error) {
+	if cid == "" {
+		return 0, errors.New("cid cannot be empty")
+	}
+	docs, err := s.Client.Collection("pins").Where("cid", "==", cid).Documents(ctx).GetAll()
+	if err != nil {
+		return 0, fmt.Errorf("failed to count active pins by cid: %w", err)
+	}
+	n := 0
+	for _, doc := range docs {
+		status, _ := doc.Data()["status"].(string)
+		if status != "deleted" && status != "failed" {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (s *FirestoreService) GetPinByRequestID(ctx context.Context, requestID string) (PinStatus, string, error) {
 	if requestID == "" {
 		return PinStatus{}, "", errors.New("requestID cannot be empty")

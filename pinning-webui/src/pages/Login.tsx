@@ -445,10 +445,10 @@ export default function Login() {
             Choose how to secure your vault
           </h2>
           <p className="text-sm text-gray-500 text-center mb-4">
-            Your files are end-to-end encrypted on every option.
+            Your files are end-to-end encrypted on every option. Pick the level of protection you want.
           </p>
 
-          {/* Mode B — Maximum security (Recommended) */}
+          {/* Mode B — Maximum Security (Recommended) */}
           {showModeB && (
           <Link
             to={`/login/mode-b${subpathQuery}`}
@@ -458,7 +458,7 @@ export default function Login() {
               <div className="flex-shrink-0 text-2xl">🛡️</div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
-                  <h3 className="text-base font-semibold text-gray-900">Maximum security</h3>
+                  <h3 className="text-base font-semibold text-gray-900">Maximum Security</h3>
                   <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded bg-green-100 text-green-700">
                     Recommended
                   </span>
@@ -474,14 +474,40 @@ export default function Login() {
           </Link>
           )}
 
-          {/* Mode A — Standard (inline Google + Apple buttons) */}
-          {showModeA && (
-          <div className="rounded-xl border border-gray-200 p-4">
-            <div className="flex items-start gap-3 mb-3">
+          {/* Mode C — Maximum Privacy (Advanced) */}
+          {showModeC && (
+          <Link
+            to={`/login/mode-c${subpathQuery}`}
+            className="block rounded-xl border border-gray-200 hover:border-purple-500 hover:shadow-md transition-all p-4 group"
+          >
+            <div className="flex items-start gap-3">
               <div className="flex-shrink-0 text-2xl">🔑</div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
-                  <h3 className="text-base font-semibold text-gray-900">Standard security</h3>
+                  <h3 className="text-base font-semibold text-gray-900">Maximum Privacy</h3>
+                  <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded bg-purple-100 text-purple-700">
+                    Advanced
+                  </span>
+                </div>
+                <p className="text-xs text-gray-600 mb-2">
+                  No Google or Apple required — a 24-word recovery phrase secures your vault. Lose it = lose your data.
+                </p>
+                <p className="text-xs text-primary-600 group-hover:underline">
+                  Create or restore a passphrase vault →
+                </p>
+              </div>
+            </div>
+          </Link>
+          )}
+
+          {/* Mode A — Maximum Ease (inline Google + Apple buttons) */}
+          {showModeA && (
+          <div className="rounded-xl border border-gray-200 p-4">
+            <div className="flex items-start gap-3 mb-3">
+              <div className="flex-shrink-0 text-2xl">👤</div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <h3 className="text-base font-semibold text-gray-900">Maximum Ease</h3>
                   <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded bg-blue-100 text-blue-700">
                     Easiest
                   </span>
@@ -510,32 +536,6 @@ export default function Login() {
           </div>
           )}
 
-          {/* Mode C — Passphrase only (Advanced) */}
-          {showModeC && (
-          <Link
-            to={`/login/mode-c${subpathQuery}`}
-            className="block rounded-xl border border-gray-200 hover:border-purple-500 hover:shadow-md transition-all p-4 group"
-          >
-            <div className="flex items-start gap-3">
-              <div className="flex-shrink-0 text-2xl">🔐</div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1">
-                  <h3 className="text-base font-semibold text-gray-900">Passphrase only</h3>
-                  <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded bg-purple-100 text-purple-700">
-                    Advanced
-                  </span>
-                </div>
-                <p className="text-xs text-gray-600 mb-2">
-                  No Google or Apple required — a 24-word recovery phrase secures your vault. Lose it = lose your data.
-                </p>
-                <p className="text-xs text-primary-600 group-hover:underline">
-                  Create or restore a passphrase vault →
-                </p>
-              </div>
-            </div>
-          </Link>
-          )}
-
           {/* When the app pinned a specific mode (e.g. modeParam='b'),
               tell the user why the other two are missing — they can
               still pick a different mode from inside the FxFiles app. */}
@@ -546,7 +546,7 @@ export default function Login() {
             </p>
           ) : (
             <p className="text-[11px] text-gray-500 text-center italic pt-2">
-              Each mode is a separate vault. You can't switch later without re-uploading your files.
+              You can't switch modes later without re-uploading your files — each mode is a separate vault.
             </p>
           )}
 

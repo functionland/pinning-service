@@ -125,7 +125,7 @@ services:
       - path: ${FULA_GATEWAY_ENV_FILE:-/opt/fula-master/fula-gateway.env}
         required: false
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${FULA_GATEWAY_PORT:-8080}"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${FULA_GATEWAY_PORT:-9000}"]
       interval: 15s
       timeout: 5s
       retries: 8

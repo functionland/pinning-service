@@ -8,12 +8,15 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ipfs-cluster/ipfs-cluster/api"
 	clusterapi "github.com/ipfs-cluster/ipfs-cluster/api/rest/client"
 	ipfspath "github.com/ipfs/boxo/path"
+	cid "github.com/ipfs/go-cid"
 	ipfsrpc "github.com/ipfs/kubo/client/rpc"
 )
 
@@ -130,6 +133,178 @@ func (s *PinsAPIServicePostgres) AddPin(ctx context.Context, pin Pin) (ImplRespo
 		Pin:       pin,
 		Delegates: delegates,
 		Info:      map[string]string{"status_details": "Submitted to IPFS Cluster"},
+	}
+
+	return Response(http.StatusAccepted, status), nil
+}
+
+// ImportDag imports a DAG from an uploaded CAR file (vendor extension): the
+// CAR is validated (single root, hash integrity, completeness), the blocks
+// are imported to the IPFS cluster via /add?format=car (which also
+// cluster-pins the root with the configured replication factor), and a pin
+// row is created under the user's account so quota accounting picks the size
+// up exactly like a pin-by-CID. See PinsAPIServicer for the carPath/onDone
+// ownership contract.
+func (s *PinsAPIServicePostgres) ImportDag(ctx context.Context, carPath string, name string, onDone func()) (ImplResponse, error) {
+	// Until the async import goroutine takes over, every return path must
+	// remove the temp CAR and release the caller's concurrency slot.
+	asyncStarted := false
+	defer func() {
+		if !asyncStarted {
+			os.Remove(carPath)
+			if onDone != nil {
+				onDone()
+			}
+		}
+	}()
+
+	userID, err := s.extractUserIDFromAuth(ctx)
+	if err != nil {
+		return createErrorResponse(http.StatusUnauthorized, "UNAUTHORIZED", err.Error()), err
+	}
+
+	fi, err := os.Stat(carPath)
+	if err != nil {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "uploaded CAR not accessible"), err
+	}
+	carSize := fi.Size()
+
+	lim := carImportLimitsFromEnv()
+	if carSize > lim.MaxCarBytes {
+		err := fmt.Errorf("CAR file is %d bytes, max %d", carSize, lim.MaxCarBytes)
+		return createErrorResponse(http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", err.Error()), err
+	}
+
+	// Credit gate, same as AddPin (fail-open on lookup errors). Unlike
+	// pin-by-CID — where the DAG size is unknown until after pinning — the
+	// upload size is known here, so additionally reject free-tier users whose
+	// import could not possibly fit their remaining allowance.
+	creditStatus, creditErr := s.db.GetCreditStatus(ctx, userID)
+	if creditErr != nil {
+		log.Printf("Warning: credit check failed for user %s: %v", userID, creditErr)
+	} else {
+		if !creditStatus.CanUpload {
+			log.Printf("DAG import blocked for user %s: %s", userID, creditStatus.Message)
+			return createErrorResponse(http.StatusPaymentRequired, "INSUFFICIENT_CREDITS", creditStatus.Message), errors.New("insufficient credits")
+		}
+		if creditStatus.CurrentBytes+carSize > creditStatus.FreeTierBytes && creditStatus.BalanceFula <= 0 {
+			msg := fmt.Sprintf("importing %d bytes would exceed the free tier (%d of %d bytes used); please add FULA credits",
+				carSize, creditStatus.CurrentBytes, creditStatus.FreeTierBytes)
+			log.Printf("DAG import blocked for user %s: %s", userID, msg)
+			return createErrorResponse(http.StatusPaymentRequired, "INSUFFICIENT_CREDITS", msg), errors.New("insufficient credits")
+		}
+	}
+
+	stats, err := validateCARFile(ctx, carPath, lim)
+	if err != nil {
+		for _, sentinel := range []error{ErrCARInvalid, ErrCARNoRoots, ErrCARMultipleRoots, ErrCARRootMissing,
+			ErrCARIncomplete, ErrCARBlockTooLarge, ErrCARTooManyBlocks, ErrCARUnsupportedCodec} {
+			if errors.Is(err, sentinel) {
+				return carImportErrorResponse(err), err
+			}
+		}
+		log.Printf("DAG import: unexpected validation failure for user %s: %v", userID, err)
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "failed to validate CAR file"), err
+	}
+
+	pin := Pin{
+		Cid:  stats.Root.String(),
+		Name: name,
+		Meta: map[string]string{"source": "car_import"},
+	}
+	if err := validatePin(pin); err != nil {
+		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", err.Error()), err
+	}
+
+	// Dedup/heal: an already-pinned CID needs no import; an existing row that
+	// never reached "pinned" (failed, or stuck fetching from the network) is
+	// reused and healed by this import, which supplies the missing blocks.
+	var requestId string
+	healing := false
+	existingPin, err := s.db.GetExistingPinByCID(ctx, userID, pin.Cid)
+	if err != nil {
+		log.Printf("Warning: failed to check for existing pin: %v", err)
+	}
+	if existingPin != nil {
+		if existingPin.Status == PINNED {
+			log.Printf("DAG import: CID %s already pinned for user %s, returning existing pin %s", pin.Cid, userID, existingPin.Requestid)
+			return Response(http.StatusOK, *existingPin), nil
+		}
+		requestId = existingPin.Requestid
+		healing = true
+		if err := s.db.UpdatePinStatusAndSize(ctx, requestId, "queued", 0); err != nil {
+			log.Printf("Warning: failed to reset pin %s for re-import: %v", requestId, err)
+		}
+	} else {
+		requestId, err = s.db.AddPin(ctx, userID, pin, "uploaded")
+		if err != nil {
+			log.Printf("ImportDag DB error for user %s cid %s: %v", userID, pin.Cid, err)
+			return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to add pin"), err
+		}
+	}
+
+	delegates := s.getDelegates(ctx)
+
+	go func(reqID string, root cid.Cid, version uint64, pinName, path string, carSize, validatedBytes int64) {
+		defer func() {
+			os.Remove(path)
+			if onDone != nil {
+				onDone()
+			}
+		}()
+
+		importCtx, cancel := context.WithTimeout(context.Background(), clusterImportTimeout(carSize))
+		defer cancel()
+
+		s.db.UpdatePinStatusAndSize(importCtx, reqID, "pinning", 0)
+
+		if err := addCARToCluster(importCtx, s.ipfsClusterAPI, path, version, pinName, root); err != nil {
+			log.Printf("Warning: DAG import failed for CID %s (request %s): %v", root, reqID, err)
+			s.db.UpdatePinStatusAndSize(importCtx, reqID, "failed", 0)
+			return
+		}
+		log.Printf("DAG import: CAR for CID %s imported to cluster (request %s)", root, reqID)
+
+		if s.enableIPFSPinning && s.ipfsAPI != nil {
+			if p, pathErr := ipfspath.NewPath("/ipfs/" + root.String()); pathErr == nil {
+				if pinErr := s.ipfsAPI.Pin().Add(importCtx, p); pinErr != nil {
+					log.Printf("Warning: direct IPFS pin after DAG import failed for %s: %v", root, pinErr)
+				}
+			}
+		}
+
+		sizeCtx, sizeCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer sizeCancel()
+
+		size, sizeErr := s.getCIDSize(sizeCtx, root.String())
+		if sizeErr != nil || size <= 0 {
+			// Never miss quota accounting: fall back to the validated sum of
+			// unique block sizes, which matches dag/stat for a complete DAG.
+			log.Printf("Warning: dag/stat unavailable for %s (err=%v, size=%d); using validated CAR bytes %d", root, sizeErr, size, validatedBytes)
+			size = validatedBytes
+		}
+		if updateErr := s.db.UpdatePinSize(sizeCtx, reqID, size); updateErr != nil {
+			log.Printf("Warning: failed to update pin size for %s: %v", reqID, updateErr)
+		}
+	}(requestId, stats.Root, stats.Version, name, carPath, carSize, stats.UniqueBytes)
+	asyncStarted = true
+
+	statusDetails := "CAR accepted, importing to IPFS Cluster"
+	if healing {
+		statusDetails = "CAR accepted, re-importing to IPFS Cluster"
+	}
+	status := PinStatus{
+		Requestid: requestId,
+		Status:    QUEUED,
+		Created:   time.Now(),
+		Pin:       pin,
+		Delegates: delegates,
+		Info: map[string]string{
+			"status_details": statusDetails,
+			"source":         "car_import",
+			"car_size":       strconv.FormatInt(carSize, 10),
+			"block_count":    strconv.FormatInt(stats.BlockCount, 10),
+		},
 	}
 
 	return Response(http.StatusAccepted, status), nil

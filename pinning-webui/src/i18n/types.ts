@@ -77,6 +77,21 @@ export interface Translations {
     title: string;
     totalPins: string;
     addPin: string;
+    // DAG import (CAR upload) — optional so locales can lag behind; the UI
+    // falls back to English strings when a key is missing.
+    importDag?: string;
+    importDagTitle?: string;
+    importDagDesc?: string;
+    importDagDropHint?: string;
+    importDagRootCid?: string;
+    importDagMultiRootError?: string;
+    importDagPreviewUnavailable?: string;
+    importDagImport?: string;
+    importDagUploading?: string;
+    importDagImporting?: string;
+    importDagErrInvalid?: string;
+    importDagErrTooLarge?: string;
+    importDagErrQuota?: string;
     addTitle: string;
     cidLabel: string;
     cidPlaceholder: string;

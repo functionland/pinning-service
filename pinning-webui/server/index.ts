@@ -49,6 +49,11 @@ const config: AppConfig = {
   applePrivateKey: process.env.APPLE_PRIVATE_KEY_PATH
     ? fs.readFileSync(process.env.APPLE_PRIVATE_KEY_PATH, 'utf8')
     : undefined,
+  // DAG import (CAR upload) vendor extension — must match the Go pinning
+  // service's DAG_IMPORT_ENABLED so the UI button and the upstream endpoint
+  // appear/disappear together.
+  dagImportEnabled: ['true', '1'].includes((process.env.DAG_IMPORT_ENABLED || '').toLowerCase()),
+  dagImportMaxCarBytes: parseInt(process.env.DAG_IMPORT_MAX_CAR_BYTES || '838860800', 10),
 };
 
 // Refuse to start with default secrets in production
@@ -77,6 +82,7 @@ console.log(`[webui]   NODE_ENV: ${config.nodeEnv}`);
 console.log(`[webui]   PINNING_SYSTEM_KEY: ${config.systemKey ? '****' : '(not set)'}`);
 console.log(`[webui]   APPLE_CLIENT_ID: ${config.appleClientId || '(not set)'}`);
 console.log(`[webui]   APPLE_PRIVATE_KEY: ${config.applePrivateKey ? 'loaded from file' : '(not set)'}`);
+console.log(`[webui]   DAG_IMPORT_ENABLED: ${config.dagImportEnabled ? 'true' : 'false'}`);
 
 async function main() {
   try {

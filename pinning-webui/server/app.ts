@@ -141,6 +141,14 @@ export interface AppConfig {
   appleTeamId?: string;
   appleKeyId?: string;
   applePrivateKey?: string;
+  // DAG import (CAR upload) vendor extension. Off by default; when enabled the
+  // webui exposes POST /api/pins/import-dag (streamed through to the Go
+  // pinning service's POST /pins/import/car) and advertises the feature via
+  // GET /api/features so the UI shows the Import DAG button.
+  // Envs: DAG_IMPORT_ENABLED, DAG_IMPORT_MAX_CAR_BYTES (default 800 MB —
+  // matches the nginx client_max_body_size on the webui vhost).
+  dagImportEnabled?: boolean;
+  dagImportMaxCarBytes?: number;
 }
 
 // Database operations type (async for PostgreSQL)
@@ -573,6 +581,44 @@ export function httpPost(url: string, headers: Record<string, string>, body: str
     req.setTimeout(30000, () => { req.destroy(); reject(new Error('Request timeout')); });
     req.write(body);
     req.end();
+  });
+}
+
+// httpPostStream POSTs a readable stream as the request body (no buffering —
+// used to pipe CAR uploads through to the pinning service). The response body
+// is small JSON, so it is collected as text like the other helpers.
+export function httpPostStream(
+  url: string,
+  headers: Record<string, string>,
+  source: NodeJS.ReadableStream,
+  timeoutMs: number = 15 * 60 * 1000
+): Promise<{ status: number; data: string }> {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url);
+    const options = {
+      hostname: urlObj.hostname,
+      port: parseInt(urlObj.port) || 80,
+      path: urlObj.pathname + urlObj.search,
+      method: 'POST',
+      headers: headers
+    };
+
+    const req = http.request(options, (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode || 500, data }));
+    });
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('Upstream request timed out'));
+    });
+    req.on('error', reject);
+    source.on('error', (err) => {
+      // Client aborted mid-upload — tear down the upstream request too.
+      req.destroy(err as Error);
+      reject(err);
+    });
+    source.pipe(req);
   });
 }
 
@@ -1768,6 +1814,70 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
+  // DAG import (CAR upload) — vendor extension, env-gated. The multipart body
+  // is piped through to the Go pinning service untouched (express.json
+  // ignores multipart, so the raw stream is still available here); the
+  // feature-flag check runs BEFORE requireAuth so a disabled deployment
+  // 404s without revealing the route.
+  app.post(
+    '/api/pins/import-dag',
+    (_req: Request, res: Response, next: NextFunction) => {
+      if (!config.dagImportEnabled) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+      next();
+    },
+    requireAuth,
+    async (req: Request, res: Response) => {
+      try {
+        const maxBytes = config.dagImportMaxCarBytes ?? 838860800;
+        const contentLength = parseInt((req.headers['content-length'] as string) || '0', 10);
+        if (contentLength && contentLength > maxBytes + 1048576) {
+          return res.status(413).json({ error: 'CAR file too large' });
+        }
+
+        const keys = await dbOps.getApiKeys(req.session.user!.userId);
+        if (!keys || keys.length === 0) {
+          return res.status(400).json({ error: 'No API key found. Please create an API key first.' });
+        }
+
+        const headers: Record<string, string> = {
+          'Authorization': `Bearer ${keys[0].key_id}`,
+          'Content-Type': (req.headers['content-type'] as string) || 'multipart/form-data',
+        };
+        if (contentLength) {
+          headers['Content-Length'] = String(contentLength);
+        }
+
+        console.log(`[webui] Importing DAG (CAR upload, ${contentLength || 'unknown'} bytes) via pinning service`);
+        const response = await httpPostStream('http://127.0.0.1:6000/pins/import/car', headers, req);
+
+        if (response.status === 200 || response.status === 202) {
+          const pinData = JSON.parse(response.data);
+          return res.status(response.status).json({
+            requestId: pinData.requestid,
+            cid: pinData.pin?.cid,
+            status: pinData.status || 'queued',
+            info: pinData.info || {},
+          });
+        }
+
+        // Propagate upstream errors (400 invalid CAR / 402 quota / 413 / 429)
+        // with the pinning service's failure details when available.
+        let message = 'Failed to import DAG';
+        try {
+          const failure = JSON.parse(response.data);
+          message = failure?.error?.details || failure?.error?.reason || message;
+        } catch { /* non-JSON upstream error body */ }
+        console.error('[webui] DAG import failed:', response.status, message);
+        return res.status(response.status).json({ error: message });
+      } catch (error) {
+        console.error('[webui] Error importing DAG:', error);
+        res.status(502).json({ error: 'Failed to reach pinning service' });
+      }
+    }
+  );
+
   app.get('/api/stats', requireAuth, async (req: Request, res: Response) => {
     try {
       const stats = await dbOps.getUserStats(req.session.user!.userId);
@@ -2658,6 +2768,15 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Health check
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
+
+  // Feature flags for the frontend (no auth — same exposure as /api/health).
+  // The UI uses this to decide whether to render the Import DAG button.
+  app.get('/api/features', (_req: Request, res: Response) => {
+    res.json({
+      dagImport: !!config.dagImportEnabled,
+      dagImportMaxCarBytes: config.dagImportMaxCarBytes ?? 838860800,
+    });
   });
 
   // Public stats (no auth required)

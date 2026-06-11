@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,12 +19,17 @@ import (
 
 // MockPinsAPIService is a mock implementation for testing
 type MockPinsAPIService struct {
-	pins     map[string]PinStatus
-	mu       sync.RWMutex
-	counter  int64
-	addDelay time.Duration
-	failAdd  bool
-	failGet  bool
+	pins       map[string]PinStatus
+	mu         sync.RWMutex
+	counter    int64
+	addDelay   time.Duration
+	failAdd    bool
+	failGet    bool
+	failImport bool
+	// importedNames records the "name" form fields seen by ImportDag;
+	// importedSizes the byte size of each uploaded CAR temp file.
+	importedNames []string
+	importedSizes []int64
 }
 
 func NewMockPinsAPIService() *MockPinsAPIService {
@@ -190,6 +196,46 @@ func (m *MockPinsAPIService) GetPinNodes(ctx context.Context, requestid string) 
 		Requestid: requestid,
 		Nodes:     []PinNodeInfo{},
 	}), nil
+}
+
+// ImportDag honors the PinsAPIServicer contract: it takes ownership of the
+// temp CAR (removes it) and calls onDone exactly once.
+func (m *MockPinsAPIService) ImportDag(ctx context.Context, carPath string, name string, onDone func()) (ImplResponse, error) {
+	defer func() {
+		os.Remove(carPath)
+		if onDone != nil {
+			onDone()
+		}
+	}()
+
+	fi, err := os.Stat(carPath)
+	if err != nil {
+		return createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "uploaded CAR not accessible"), err
+	}
+
+	if m.failImport {
+		return createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "mock import failure"), fmt.Errorf("mock import failure")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.importedNames = append(m.importedNames, name)
+	m.importedSizes = append(m.importedSizes, fi.Size())
+
+	m.counter++
+	requestId := fmt.Sprintf("import-%d-%d", time.Now().UnixNano(), m.counter)
+	status := PinStatus{
+		Requestid: requestId,
+		Status:    QUEUED,
+		Created:   time.Now(),
+		Pin:       Pin{Cid: "bafytestimportroot", Name: name, Meta: map[string]string{"source": "car_import"}},
+		Delegates: []string{"/ip4/127.0.0.1/tcp/4001/p2p/QmTestPeer"},
+		Info:      map[string]string{"status_details": "CAR accepted, importing to IPFS Cluster"},
+	}
+	m.pins[requestId] = status
+
+	return Response(http.StatusAccepted, status), nil
 }
 
 // Helper function to create test router

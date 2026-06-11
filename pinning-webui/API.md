@@ -498,6 +498,48 @@ Add a new pin.
 }
 ```
 
+#### POST /api/pins/import-dag
+
+Import a DAG from a CAR file (vendor extension — the [IPFS Pinning Service API spec](https://ipfs.github.io/pinning-services-api-spec/) is pin-by-CID only and has no upload endpoint; CAR upload is how data that exists only on the client gets pinned, the same pattern used by web3.storage and NFT.storage). The webui streams the upload through to the pinning service's `POST /pins/import/car` (Bearer auth) which validates the CAR, imports the blocks into the IPFS cluster (`/add?format=car`, replicated per cluster config), and creates a pin under the user's account; the DAG size counts against the storage quota automatically.
+
+**Feature-gated:** both this route and `POST /pins/import/car` return `404` unless `DAG_IMPORT_ENABLED=true` is set on the respective service. `GET /api/features` advertises availability to the UI.
+
+**Request:** `multipart/form-data`
+- `file` — the CAR file (CARv1 or CARv2; CARv2 is unwrapped to its inner v1 payload before reaching the cluster)
+- `name` — optional pin name (≤255 chars)
+
+**Validation (server-side):** exactly one root; every block's multihash verified; per-block size ≤ `DAG_IMPORT_MAX_BLOCK_BYTES` (default 2 MiB, the bitswap limit); codecs limited to `raw`, `dag-pb`, `dag-cbor` (what the cluster adder can decode); unique blocks ≤ `DAG_IMPORT_MAX_BLOCKS`; the DAG must be **complete** — every CID referenced by any block must be present in the CAR (a partial DAG would pin-hang forever fetching blocks that may exist nowhere).
+
+**Response (202, or 200 when the CID is already actively pinned by this user):**
+```json
+{
+  "requestId": "uuid",
+  "cid": "bafy...",
+  "status": "queued",
+  "info": {
+    "status_details": "CAR accepted, importing to IPFS Cluster",
+    "source": "car_import",
+    "car_size": "1048576",
+    "block_count": "42"
+  }
+}
+```
+The import then proceeds asynchronously: `queued → pinning → pinned` (or `failed`), observable via the regular refresh endpoint. Re-importing a CAR whose root the user already has in a `failed`/stuck state reuses the existing request id and heals the pin.
+
+**Errors:** `400` invalid CAR (junk/truncated, hash mismatch, 0 or >1 roots, root block absent, incomplete DAG, unsupported codec, oversized block, too many blocks) — the message carries the specific reason; `402` insufficient credits (including: the import would exceed the remaining free tier with zero FULA balance); `413` CAR larger than `DAG_IMPORT_MAX_CAR_BYTES` (default 800 MB); `429` too many concurrent imports.
+
+#### GET /api/features
+
+Feature flags for the frontend (no auth).
+
+**Response:**
+```json
+{
+  "dagImport": false,
+  "dagImportMaxCarBytes": 838860800
+}
+```
+
 #### POST /api/pins/bulk-unpin
 
 Unpin multiple items at once.

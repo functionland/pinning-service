@@ -222,6 +222,60 @@ describe.runIf(pgAvailable)('API Endpoints', () => {
       expect(res.status).toBe(401);
     });
   });
+
+  describe('DAG Import (flag off — default config)', () => {
+    it('GET /api/features should advertise dagImport=false', async () => {
+      const res = await request(app).get('/api/features');
+
+      expect(res.status).toBe(200);
+      expect(res.body.dagImport).toBe(false);
+    });
+
+    it('POST /api/pins/import-dag should 404 when disabled (before auth)', async () => {
+      const res = await request(app)
+        .post('/api/pins/import-dag')
+        .attach('file', Buffer.from('not a car'), 'test.car');
+
+      expect(res.status).toBe(404);
+    });
+  });
+});
+
+describe.runIf(pgAvailable)('DAG Import (flag on)', () => {
+  let app: Express;
+
+  beforeAll(async () => {
+    const result = createApp(
+      { ...testConfig, dagImportEnabled: true, dagImportMaxCarBytes: 1024 },
+      { skipRateLimit: true }
+    );
+    app = result.app;
+  });
+
+  afterAll(async () => {
+    await closePool();
+  });
+
+  it('GET /api/features should advertise dagImport=true with the size cap', async () => {
+    const res = await request(app).get('/api/features');
+
+    expect(res.status).toBe(200);
+    expect(res.body.dagImport).toBe(true);
+    expect(res.body.dagImportMaxCarBytes).toBe(1024);
+  });
+
+  it('POST /api/pins/import-dag should 401 when not authenticated', async () => {
+    const res = await request(app)
+      .post('/api/pins/import-dag')
+      .attach('file', Buffer.from('car bytes'), 'test.car');
+
+    expect(res.status).toBe(401);
+  });
+
+  // Authenticated happy path and 413 precheck require a real session plus a
+  // mocked upstream pinning service — covered by the Go test suite
+  // (dag_import_controller_test.go / dag_import_service_test.go) and the
+  // manual E2E checklist in the PR.
 });
 
 describe.runIf(pgAvailable)('Database Operations', () => {

@@ -12,7 +12,11 @@ package openapi
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -71,6 +75,15 @@ func (c *PinsAPIController) Routes() Routes {
 			strings.ToUpper("Get"),
 			"/pins/{requestid}/nodes",
 			c.GetPinNodes,
+		},
+		// Vendor extension. The path has three segments on purpose: a
+		// two-segment POST /pins/import would collide with the template
+		// POST /pins/{requestid} and, since routes are registered from a map
+		// (random iteration order), dispatch would be nondeterministic.
+		"ImportDag": Route{
+			strings.ToUpper("Post"),
+			"/pins/import/car",
+			c.ImportDag,
 		},
 		"GetPins": Route{
 			strings.ToUpper("Get"),
@@ -157,6 +170,139 @@ func (c *PinsAPIController) GetPinNodes(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	result, err := c.service.GetPinNodes(r.Context(), requestidParam)
+	if err != nil {
+		c.errorHandler(w, r, err, &result)
+		return
+	}
+	_ = EncodeJSONResponse(result.Body, &result.Code, w)
+}
+
+// ImportDag - Import a DAG from an uploaded CAR file (vendor extension).
+// Spools the multipart upload to a temp file and hands it to the service,
+// which validates the CAR and imports it to the IPFS cluster asynchronously.
+func (c *PinsAPIController) ImportDag(w http.ResponseWriter, r *http.Request) {
+	if !dagImportEnabled() {
+		createErrorResponseJSON(w, createErrorResponse(http.StatusNotFound, "NOT_FOUND", "not found"))
+		return
+	}
+
+	// One slot per import for its WHOLE lifetime (spool + validate + async
+	// cluster add) — bounds temp-disk and cluster-stream amplification. The
+	// service releases the slot via onDone when all its work finishes.
+	release, ok := acquireImportSlot()
+	if !ok {
+		createErrorResponseJSON(w, createErrorResponse(http.StatusTooManyRequests, "TOO_MANY_REQUESTS", "too many concurrent DAG imports; retry shortly"))
+		return
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
+
+	lim := carImportLimitsFromEnv()
+	if r.ContentLength > lim.MaxCarBytes+(1<<20) {
+		createErrorResponseJSON(w, createErrorResponse(http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE",
+			fmt.Sprintf("CAR file exceeds the maximum allowed size of %d bytes", lim.MaxCarBytes)))
+		return
+	}
+
+	// The server-wide ReadTimeout is tuned for small JSON bodies; give this
+	// upload route its own read deadline (best-effort — nginx normally buffers
+	// the body, making the local read fast anyway).
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(10 * time.Minute))
+	r.Body = http.MaxBytesReader(w, r.Body, lim.MaxCarBytes+(1<<20))
+
+	mr, err := r.MultipartReader()
+	if err != nil {
+		createErrorResponseJSON(w, createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "expected multipart/form-data with a 'file' part"))
+		return
+	}
+
+	var name string
+	var tmpPath string
+	removeTmp := func() {
+		if tmpPath != "" {
+			os.Remove(tmpPath)
+			tmpPath = ""
+		}
+	}
+
+	writeBodyErr := func(err error) {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			createErrorResponseJSON(w, createErrorResponse(http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE",
+				fmt.Sprintf("CAR file exceeds the maximum allowed size of %d bytes", lim.MaxCarBytes)))
+			return
+		}
+		createErrorResponseJSON(w, createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "failed to read multipart upload"))
+	}
+
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			removeTmp()
+			writeBodyErr(err)
+			return
+		}
+		switch part.FormName() {
+		case "name":
+			data, err := io.ReadAll(io.LimitReader(part, MaxNameLength+1))
+			part.Close()
+			if err != nil {
+				removeTmp()
+				writeBodyErr(err)
+				return
+			}
+			if len(data) > MaxNameLength {
+				removeTmp()
+				createErrorResponseJSON(w, createErrorResponse(http.StatusBadRequest, "BAD_REQUEST",
+					fmt.Sprintf("name exceeds maximum length of %d characters", MaxNameLength)))
+				return
+			}
+			name = string(data)
+		case "file":
+			if tmpPath != "" { // only the first file part counts
+				io.Copy(io.Discard, part)
+				part.Close()
+				continue
+			}
+			tmp, err := os.CreateTemp("", "dag-import-*.car")
+			if err != nil {
+				part.Close()
+				createErrorResponseJSON(w, createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "failed to store upload"))
+				return
+			}
+			tmpPath = tmp.Name()
+			_, copyErr := io.Copy(tmp, part)
+			closeErr := tmp.Close()
+			part.Close()
+			if copyErr != nil || closeErr != nil {
+				removeTmp()
+				if copyErr == nil {
+					copyErr = closeErr
+				}
+				writeBodyErr(copyErr)
+				return
+			}
+		default:
+			io.Copy(io.Discard, part)
+			part.Close()
+		}
+	}
+
+	if tmpPath == "" {
+		createErrorResponseJSON(w, createErrorResponse(http.StatusBadRequest, "BAD_REQUEST", "missing 'file' part with the CAR payload"))
+		return
+	}
+
+	// Ownership of the temp file AND the concurrency slot moves to the service.
+	handedOff = true
+	result, err := c.service.ImportDag(r.Context(), tmpPath, name, release)
 	if err != nil {
 		c.errorHandler(w, r, err, &result)
 		return

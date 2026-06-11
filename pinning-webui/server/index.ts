@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createApp, initializeDatabase, seedChainSyncState, type AppConfig } from './app.js';
 import { startBlockScanner, stopBlockScanner } from './services/blockScanner.js';
 import { startDeductionJob, stopDeductionJob } from './services/deductionJob.js';
+import { releaseLease } from './services/leaderLease.js';
 import { closePool } from './database/postgres.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -145,6 +146,7 @@ process.on('SIGTERM', async () => {
   console.log('[webui] Shutting down...');
   stopBlockScanner();
   stopDeductionJob();
+  await releaseLease(); // hand the cron lease to a standby master immediately
   await closePool();
   process.exit(0);
 });

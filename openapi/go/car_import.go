@@ -47,6 +47,7 @@ var (
 	ErrCARBlockTooLarge    = errors.New("CAR file contains a block larger than the maximum allowed size")
 	ErrCARTooManyBlocks    = errors.New("CAR file contains too many blocks")
 	ErrCARUnsupportedCodec = errors.New("CAR file contains a block with an unsupported codec")
+	ErrCARBlockTooDeep     = errors.New("CAR file contains a block nested beyond the maximum allowed depth")
 )
 
 // importDecoder mirrors the exact decoder registry ipfs-cluster's CAR adder
@@ -77,6 +78,7 @@ type carImportLimits struct {
 	MaxCarBytes   int64 // whole-file cap (413)
 	MaxBlockBytes int64 // per-block cap; blocks above the bitswap limit are unservable
 	MaxBlocks     int64 // unique-block cap; also bounds validator memory
+	MaxDagDepth   int   // max dag-cbor nesting depth per block (decode-cost cap)
 }
 
 func envInt64(name string, def int64) int64 {
@@ -96,7 +98,139 @@ func carImportLimitsFromEnv() carImportLimits {
 		MaxCarBytes:   envInt64("DAG_IMPORT_MAX_CAR_BYTES", 838860800), // 800 MB
 		MaxBlockBytes: envInt64("DAG_IMPORT_MAX_BLOCK_BYTES", 2097152), // 2 MiB (bitswap limit)
 		MaxBlocks:     envInt64("DAG_IMPORT_MAX_BLOCKS", 250000),
+		MaxDagDepth:   int(envInt64("DAG_IMPORT_MAX_DAG_DEPTH", 1024)),
 	}
+}
+
+// dagCborWithinDepth structurally walks a dag-cbor block (without building the
+// decoded node tree) and reports whether its nesting depth stays within
+// maxDepth. It exists because go-ipld-prime's dag-cbor decode + Links() walk
+// is eager: a ~2 MiB block of deeply-nested arrays decodes to a multi-hundred-
+// MB in-memory tree (~240 MiB measured) over ~1.7 s — a memory/CPU
+// amplification a malicious user could fire concurrently to push the service
+// toward its memory limit. It does NOT crash (Go's growable stack absorbs the
+// recursion), so this is a cost cap, not a crash fix. The scan is O(bytes)
+// and aborts as soon as the depth budget is exceeded (a deep bomb is rejected
+// after ~maxDepth bytes), so it is far cheaper than the decode it guards.
+//
+// Real DAGs are shallow (UnixFS trees are a handful deep; the default 1024 is
+// orders of magnitude beyond any legitimate dag-cbor document), so this never
+// trips on genuine `ipfs dag export` content — which is dag-pb anyway.
+//
+// Returns ErrCARBlockTooDeep if the budget is exceeded, ErrCARInvalid (wrapped)
+// if the CBOR framing is malformed/truncated/uses indefinite lengths (which
+// dag-cbor forbids and go-ipld-prime also rejects), or nil otherwise. Leaf and
+// tag value-types are intentionally NOT validated here — that stays
+// go-ipld-prime's job; this only bounds structural nesting.
+func dagCborWithinDepth(data []byte, maxDepth int) error {
+	// remaining[i] = number of child items still expected at nesting level i.
+	// Seed with one top-level item. Open-container depth = len(remaining)-1.
+	remaining := make([]int, 1, 16)
+	remaining[0] = 1
+	i := 0
+	n := len(data)
+
+	readArg := func(ai byte) (uint64, error) {
+		switch {
+		case ai < 24:
+			return uint64(ai), nil
+		case ai == 24:
+			if i+1 > n {
+				return 0, io.ErrUnexpectedEOF
+			}
+			v := uint64(data[i])
+			i++
+			return v, nil
+		case ai == 25:
+			if i+2 > n {
+				return 0, io.ErrUnexpectedEOF
+			}
+			v := uint64(data[i])<<8 | uint64(data[i+1])
+			i += 2
+			return v, nil
+		case ai == 26:
+			if i+4 > n {
+				return 0, io.ErrUnexpectedEOF
+			}
+			v := uint64(data[i])<<24 | uint64(data[i+1])<<16 | uint64(data[i+2])<<8 | uint64(data[i+3])
+			i += 4
+			return v, nil
+		case ai == 27:
+			if i+8 > n {
+				return 0, io.ErrUnexpectedEOF
+			}
+			var v uint64
+			for k := 0; k < 8; k++ {
+				v = v<<8 | uint64(data[i+k])
+			}
+			i += 8
+			return v, nil
+		default: // 28,29,30 reserved; 31 indefinite — not allowed in dag-cbor
+			return 0, fmt.Errorf("unsupported CBOR additional-info %d", ai)
+		}
+	}
+
+	for len(remaining) > 0 {
+		// Close any completed containers.
+		if remaining[len(remaining)-1] == 0 {
+			remaining = remaining[:len(remaining)-1]
+			continue
+		}
+		if i >= n {
+			return fmt.Errorf("%w: truncated CBOR block", ErrCARInvalid)
+		}
+		b := data[i]
+		i++
+		major := b >> 5
+		ai := b & 0x1f
+		arg, err := readArg(ai)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrCARInvalid, err)
+		}
+
+		// This item fills one slot of the current container.
+		remaining[len(remaining)-1]--
+
+		// Every CBOR item is at least one byte, so no container can have more
+		// direct children (or a string more payload bytes) than there are
+		// bytes left in the block. Checking arg against the remaining length
+		// BEFORE any arithmetic both rejects absurd/truncated headers and keeps
+		// every value small enough that int() conversions can't overflow.
+		remBytes := uint64(n - i)
+		switch major {
+		case 0, 1, 7: // uint, negint, simple/float — leaves (arg already consumed)
+		case 2, 3: // byte/text string — skip arg payload bytes
+			if arg > remBytes {
+				return fmt.Errorf("%w: CBOR string length overruns block", ErrCARInvalid)
+			}
+			i += int(arg)
+		case 4, 5, 6: // array, map, tag — containers that open children
+			var children uint64
+			switch major {
+			case 4: // array: arg items
+				children = arg
+			case 5: // map: arg entries × (key+value)
+				if arg > remBytes { // guard before doubling so arg*2 can't overflow
+					return fmt.Errorf("%w: CBOR map count overruns block", ErrCARInvalid)
+				}
+				children = arg * 2
+			case 6: // tag: wraps exactly one item
+				children = 1
+			}
+			if children > remBytes {
+				return fmt.Errorf("%w: CBOR container count overruns block", ErrCARInvalid)
+			}
+			if children > 0 {
+				remaining = append(remaining, int(children))
+				if len(remaining)-1 > maxDepth {
+					return fmt.Errorf("%w (depth > %d)", ErrCARBlockTooDeep, maxDepth)
+				}
+			}
+		default:
+			return fmt.Errorf("%w: unknown CBOR major type %d", ErrCARInvalid, major)
+		}
+	}
+	return nil
 }
 
 // dagImportSpoolDir returns the directory CAR uploads are spooled to and
@@ -156,24 +290,79 @@ func dagImportRequiredBalance(currentBytes, carSize, freeTierBytes int64) (requi
 	return gb * rate * days / 30, days
 }
 
-// importSlots bounds concurrent imports (temp disk and CPU amplification).
-var (
-	importSlotsOnce sync.Once
-	importSlots     chan struct{}
-)
+// importLimiter bounds concurrent imports two ways: a global cap (total temp
+// disk / CPU / cluster load) AND a per-user cap. The per-user cap is the
+// availability guarantee — a single user cannot occupy every global slot and
+// starve everyone else for the (up to 30-minute) lifetime of a large import.
+type importLimiter struct {
+	mu        sync.Mutex
+	global    int
+	perUser   map[string]int
+	maxGlobal int
+	maxUser   int
+}
 
-// acquireImportSlot reserves a concurrent-import slot. It returns a release
-// function and whether a slot was available (false → respond 429).
-func acquireImportSlot() (func(), bool) {
-	importSlotsOnce.Do(func() {
-		importSlots = make(chan struct{}, envInt64("DAG_IMPORT_MAX_CONCURRENT", 2))
-	})
-	select {
-	case importSlots <- struct{}{}:
-		return func() { <-importSlots }, true
-	default:
+func newImportLimiter(maxGlobal, maxUser int) *importLimiter {
+	if maxGlobal < 1 {
+		maxGlobal = 1
+	}
+	if maxUser < 1 {
+		maxUser = 1
+	}
+	return &importLimiter{perUser: make(map[string]int), maxGlobal: maxGlobal, maxUser: maxUser}
+}
+
+// acquire reserves a global slot and (when userID != "") a per-user slot. It
+// returns an idempotent release and whether both reservations succeeded. An
+// empty userID (unresolved auth — the service will 401 anyway) is bounded by
+// the global cap only.
+func (l *importLimiter) acquire(userID string) (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.global >= l.maxGlobal {
 		return func() {}, false
 	}
+	if userID != "" && l.perUser[userID] >= l.maxUser {
+		return func() {}, false
+	}
+
+	l.global++
+	if userID != "" {
+		l.perUser[userID]++
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.global--
+			if userID != "" {
+				if l.perUser[userID] <= 1 {
+					delete(l.perUser, userID)
+				} else {
+					l.perUser[userID]--
+				}
+			}
+		})
+	}, true
+}
+
+var (
+	importLimiterOnce sync.Once
+	globalImportLim   *importLimiter
+)
+
+// acquireImportSlot reserves an import slot for userID against the process-wide
+// limiter (configured from DAG_IMPORT_MAX_CONCURRENT / _PER_USER on first use).
+func acquireImportSlot(userID string) (func(), bool) {
+	importLimiterOnce.Do(func() {
+		globalImportLim = newImportLimiter(
+			int(envInt64("DAG_IMPORT_MAX_CONCURRENT", 5)),
+			int(envInt64("DAG_IMPORT_MAX_CONCURRENT_PER_USER", 1)),
+		)
+	})
+	return globalImportLim.acquire(userID)
 }
 
 // CARStats summarizes a validated CAR.
@@ -251,6 +440,20 @@ func validateCARFile(ctx context.Context, path string, lim carImportLimits) (*CA
 		case uint64(cid.Raw), uint64(cid.DagProtobuf), uint64(cid.DagCBOR):
 		default:
 			return nil, fmt.Errorf("%w (codec 0x%x in block %s; supported: raw, dag-pb, dag-cbor)", ErrCARUnsupportedCodec, codec, c)
+		}
+
+		// Bound dag-cbor nesting BEFORE the eager go-ipld-prime decode below:
+		// a deeply-nested ≤2 MiB dag-cbor block decodes into a multi-hundred-MB
+		// tree (memory amplification). The cheap structural scan rejects a
+		// nesting bomb after ~MaxDagDepth bytes. (raw has no structure; dag-pb
+		// is flat, so neither needs this.)
+		if codec == uint64(cid.DagCBOR) && lim.MaxDagDepth > 0 {
+			if err := dagCborWithinDepth(data, lim.MaxDagDepth); err != nil {
+				if errors.Is(err, ErrCARBlockTooDeep) {
+					return nil, fmt.Errorf("%w (block %s)", ErrCARBlockTooDeep, c)
+				}
+				return nil, fmt.Errorf("%w: block %s: %v", ErrCARInvalid, c, err)
+			}
 		}
 
 		nd, err := importDecoder.DecodeNode(ctx, blk)

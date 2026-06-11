@@ -245,11 +245,16 @@ func (b *blockingImportService) ImportDag(ctx context.Context, carPath string, n
 	return b.MockPinsAPIService.ImportDag(ctx, carPath, name, onDone)
 }
 
-// TestImportDagEndpoint_ConcurrencyLimit: the semaphore (process-wide, cached
-// at the default capacity of 2 on first use) yields 429 when exhausted and
-// recovers once imports finish.
+// TestImportDagEndpoint_ConcurrencyLimit: the global import cap yields 429
+// when exhausted and recovers once imports finish. The mock has no
+// ResolveUserID, so the controller keys on "" (global-only) — exactly the
+// global cap is under test here; per-user behavior is covered by
+// TestImportLimiter_PerUserAndGlobal. We pin the process-wide limiter to a
+// global cap of 2 so the test is deterministic regardless of run order.
 func TestImportDagEndpoint_ConcurrencyLimit(t *testing.T) {
 	t.Setenv("DAG_IMPORT_ENABLED", "true")
+	importLimiterOnce.Do(func() {}) // consume the once so acquireImportSlot won't re-init
+	globalImportLim = newImportLimiter(2, 1)
 
 	service := &blockingImportService{
 		MockPinsAPIService: NewMockPinsAPIService(),

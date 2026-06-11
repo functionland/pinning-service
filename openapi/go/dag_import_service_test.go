@@ -39,22 +39,26 @@ type fakeClusterClient struct {
 func (f *fakeClusterClient) AddMultiFile(ctx context.Context, mfr *files.MultiFileReader, params api.AddParams, out chan<- api.AddedOutput) error {
 	defer close(out)
 
-	// Parse the multipart stream like the cluster server would and measure
-	// the actual file payload (the CARv1 bytes) inside it.
-	var payloadBytes int64
+	// Replicate the cluster's FromMultipart + carAdder.Add EXACTLY (adder.go
+	// in ipfs-cluster v1.1.1): boxo's part reader treats part filenames as
+	// paths ('/' creates nested directories), and the first entry must be a
+	// plain file. A naive multipart drain here would miss framing bugs that
+	// the real cluster rejects — as production did with base64 pin names.
 	mpr := multipart.NewReader(mfr, mfr.Boundary())
-	for {
-		part, err := mpr.NextPart()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("fake cluster: bad multipart: %w", err)
-		}
-		n, _ := io.Copy(io.Discard, part)
-		payloadBytes += n
-		part.Close()
+	dir, err := files.NewFileFromPartReader(mpr, "multipart/form-data")
+	if err != nil {
+		return fmt.Errorf("fake cluster: bad multipart: %w", err)
 	}
+	defer dir.Close()
+	it := dir.Entries()
+	if !it.Next() {
+		return errors.New("fake cluster: empty multipart")
+	}
+	file, ok := it.Node().(files.File)
+	if !ok {
+		return errors.New("expected CAR file is not of type file")
+	}
+	payloadBytes, _ := io.Copy(io.Discard, file)
 
 	f.mu.Lock()
 	f.addCalls++
@@ -226,6 +230,44 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return data
+}
+
+// TestImportDag_NameWithSlashes: client-side-encrypted pin names are standard
+// base64 and routinely contain '/'. The multipart filename must NOT be
+// derived from the name — boxo's path-splitting parser on the cluster side
+// would see a nested directory and reject the add with "expected CAR file is
+// not of type file" (the first production failure). The pin name must still
+// reach the cluster via params.Name.
+func TestImportDag_NameWithSlashes(t *testing.T) {
+	fx := buildValidCar(t, true)
+	const dagStatSize = int64(2024)
+
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, dagStatSize, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	encryptedish := "xK9/2bQ+frL/Aw==" // base64-like, slashes included
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), sacrificialCopy(t, fx.path), encryptedish, onDone)
+	if err != nil {
+		t.Fatalf("ImportDag: %v", err)
+	}
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("code = %d, want 202", resp.Code)
+	}
+	status := resp.Body.(PinStatus)
+	wait()
+
+	rowStatus, rowSize := pinRow(t, dbsvc, status.Requestid)
+	if rowStatus != "pinning" || rowSize != dagStatSize {
+		t.Errorf("row = (%s, %d), want (pinning, %d) — slashed name must not break the cluster add", rowStatus, rowSize, dagStatSize)
+	}
+	if fake.calls() != 1 {
+		t.Errorf("cluster add calls = %d, want 1", fake.calls())
+	}
+	if fake.lastName != encryptedish {
+		t.Errorf("cluster pin name = %q, want %q (must travel via params.Name)", fake.lastName, encryptedish)
+	}
 }
 
 // TestImportDag_SizeFallback: if dag/stat is unavailable the validated

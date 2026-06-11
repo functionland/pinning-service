@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -445,6 +446,123 @@ func TestImportDag_402_StrictPreflight(t *testing.T) {
 	if _, statErr := os.Stat(carPath); !os.IsNotExist(statErr) {
 		t.Errorf("temp CAR not cleaned up on 402 path")
 	}
+}
+
+// seedCredits creates the user_credits table (the sqlite test schema doesn't
+// ship it) and inserts a balance row, so GetCreditStatus sees a real balance
+// instead of its fail-open default.
+func seedCredits(t *testing.T, dbsvc *SQLiteService, userEmail string, balance float64) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := dbsvc.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS user_credits (
+			user_email TEXT,
+			balance_fula REAL DEFAULT 0,
+			is_suspended INTEGER DEFAULT 0
+		)`); err != nil {
+		t.Fatalf("create user_credits: %v", err)
+	}
+	if _, err := dbsvc.db.ExecContext(ctx,
+		"INSERT INTO user_credits (user_email, balance_fula) VALUES (?, ?)", userEmail, balance); err != nil {
+		t.Fatalf("seed credits: %v", err)
+	}
+}
+
+// parkUserOverFreeTier seeds an existing pinned row that puts the user's
+// storage at free tier + extraBytes.
+func parkUserOverFreeTier(t *testing.T, dbsvc *SQLiteService, user string, extraBytes int64) {
+	t.Helper()
+	filler := addActivePin(t, dbsvc, user, "cidFiller", "pinned")
+	if err := dbsvc.UpdatePinSize(context.Background(), filler, DefaultFreeTierBytes+extraBytes); err != nil {
+		t.Fatalf("UpdatePinSize: %v", err)
+	}
+}
+
+// TestImportDag_402_InsufficientProjectedBalance: a paid user whose balance
+// cannot fund the projected post-import storage for the configured horizon is
+// rejected up front — a dust balance must not buy an 800MB import that would
+// suspend the account hours later with the data already pinned.
+func TestImportDag_402_InsufficientProjectedBalance(t *testing.T) {
+	fx := buildValidCar(t, true)
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, 1, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	// 10 GiB over the free tier → at 3 FULA/GB-month and a 30-day horizon the
+	// import requires ≈30 FULA; the user has only dust.
+	parkUserOverFreeTier(t, dbsvc, "userA", 10<<30)
+	seedCredits(t, dbsvc, "userA", 0.5)
+
+	carPath := sacrificialCopy(t, fx.path)
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), carPath, "", onDone)
+	wait()
+
+	if err == nil || resp.Code != http.StatusPaymentRequired {
+		t.Fatalf("code = %d (err=%v), want 402", resp.Code, err)
+	}
+	failure, ok := resp.Body.(Failure)
+	if !ok {
+		t.Fatalf("body type = %T, want Failure", resp.Body)
+	}
+	if !strings.Contains(failure.Error.Details, "requires at least") {
+		t.Errorf("details = %q, want projected-balance message", failure.Error.Details)
+	}
+	if fake.calls() != 0 {
+		t.Errorf("cluster add calls = %d, want 0", fake.calls())
+	}
+	if _, statErr := os.Stat(carPath); !os.IsNotExist(statErr) {
+		t.Errorf("temp CAR not cleaned up on projected-balance 402")
+	}
+}
+
+// TestImportDag_ProjectedBalanceSufficient: the same projection passes when
+// the balance covers the horizon — paid users with real balances import fine.
+func TestImportDag_ProjectedBalanceSufficient(t *testing.T) {
+	fx := buildValidCar(t, true)
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, 1234, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	parkUserOverFreeTier(t, dbsvc, "userA", 10<<30)
+	seedCredits(t, dbsvc, "userA", 50) // ≈30 FULA required
+
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), sacrificialCopy(t, fx.path), "", onDone)
+	if err != nil {
+		t.Fatalf("ImportDag: %v", err)
+	}
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("code = %d, want 202", resp.Code)
+	}
+	wait()
+	if fake.calls() != 1 {
+		t.Errorf("cluster add calls = %d, want 1", fake.calls())
+	}
+}
+
+// TestImportDag_ProjectedBalanceDisabled: DAG_IMPORT_MIN_BALANCE_DAYS=0 turns
+// the projection off — any positive balance suffices (pre-existing behavior).
+func TestImportDag_ProjectedBalanceDisabled(t *testing.T) {
+	t.Setenv("DAG_IMPORT_MIN_BALANCE_DAYS", "0")
+
+	fx := buildValidCar(t, true)
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, 1234, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	parkUserOverFreeTier(t, dbsvc, "userA", 10<<30)
+	seedCredits(t, dbsvc, "userA", 0.5) // dust, but the check is disabled
+
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), sacrificialCopy(t, fx.path), "", onDone)
+	if err != nil {
+		t.Fatalf("ImportDag: %v", err)
+	}
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("code = %d, want 202", resp.Code)
+	}
+	wait()
 }
 
 // TestImportDag_402_OverFreeTier: a user already over the free tier with no

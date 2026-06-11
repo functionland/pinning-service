@@ -99,6 +99,47 @@ func carImportLimitsFromEnv() carImportLimits {
 	}
 }
 
+func envFloat(name string, def float64) float64 {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 {
+		return def
+	}
+	return f
+}
+
+// dagImportRequiredBalance returns the minimum FULA balance required to accept
+// an import that adds carSize bytes, plus the funding horizon used.
+//
+// Storage is billed as an hourly burn (FULA_PER_GB_MONTH × billable GB / 720,
+// see pinning-webui's deductionJob), never as an upfront charge — so "enough
+// balance to store it" is necessarily time-based: the balance must keep the
+// PROJECTED over-free-tier storage funded for DAG_IMPORT_MIN_BALANCE_DAYS
+// days. Unlike pin-by-CID (size unknown until after pinning), the upload size
+// is known here, so this can be enforced before accepting the data. The CAR
+// file size slightly overestimates the stored DAG size (framing overhead),
+// which errs on the side of rejection.
+//
+// Returns required == 0 when the projection stays inside the free tier or the
+// check is disabled (DAG_IMPORT_MIN_BALANCE_DAYS=0).
+func dagImportRequiredBalance(currentBytes, carSize, freeTierBytes int64) (required float64, days float64) {
+	days = envFloat("DAG_IMPORT_MIN_BALANCE_DAYS", 30)
+	if days <= 0 {
+		return 0, days
+	}
+	// Keep in sync with the webui deduction job's FULA_PER_GB_MONTH.
+	rate := envFloat("FULA_PER_GB_MONTH", 3)
+	billable := currentBytes + carSize - freeTierBytes
+	if billable <= 0 {
+		return 0, days
+	}
+	gb := float64(billable) / (1024 * 1024 * 1024) // GiB, matching the deduction job
+	return gb * rate * days / 30, days
+}
+
 // importSlots bounds concurrent imports (temp disk and CPU amplification).
 var (
 	importSlotsOnce sync.Once

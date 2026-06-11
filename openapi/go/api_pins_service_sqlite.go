@@ -190,6 +190,12 @@ func (s *PinsAPIServiceSQLite) ImportDag(ctx context.Context, carPath string, na
 			log.Printf("DAG import blocked for user %s: %s", userID, msg)
 			return createErrorResponse(http.StatusPaymentRequired, "INSUFFICIENT_CREDITS", msg), errors.New("insufficient credits")
 		}
+		if required, days := dagImportRequiredBalance(creditStatus.CurrentBytes, carSize, creditStatus.FreeTierBytes); required > 0 && creditStatus.BalanceFula < required {
+			msg := fmt.Sprintf("insufficient balance for this import: storing the projected %.3f GB over the free tier for %.0f days requires at least %.4f FULA (balance: %.4f FULA); please add credits",
+				float64(creditStatus.CurrentBytes+carSize-creditStatus.FreeTierBytes)/(1024*1024*1024), days, required, creditStatus.BalanceFula)
+			log.Printf("DAG import blocked for user %s: %s", userID, msg)
+			return createErrorResponse(http.StatusPaymentRequired, "INSUFFICIENT_CREDITS", msg), errors.New("insufficient credits")
+		}
 	}
 
 	stats, err := validateCARFile(ctx, carPath, lim)

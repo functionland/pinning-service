@@ -177,8 +177,12 @@ func (s *PinsAPIServicePostgres) ImportDag(ctx context.Context, carPath string, 
 
 	// Credit gate, same as AddPin (fail-open on lookup errors). Unlike
 	// pin-by-CID — where the DAG size is unknown until after pinning — the
-	// upload size is known here, so additionally reject free-tier users whose
-	// import could not possibly fit their remaining allowance.
+	// upload size is known here, so two stricter checks run before any data
+	// is accepted: a zero-balance user may not cross the free-tier boundary,
+	// and a paid user's balance must cover the projected post-import storage
+	// cost for DAG_IMPORT_MIN_BALANCE_DAYS days (otherwise a dust balance
+	// could import a large CAR and be suspended hours later with the data
+	// already pinned at the service's expense).
 	creditStatus, creditErr := s.db.GetCreditStatus(ctx, userID)
 	if creditErr != nil {
 		log.Printf("Warning: credit check failed for user %s: %v", userID, creditErr)
@@ -190,6 +194,12 @@ func (s *PinsAPIServicePostgres) ImportDag(ctx context.Context, carPath string, 
 		if creditStatus.CurrentBytes+carSize > creditStatus.FreeTierBytes && creditStatus.BalanceFula <= 0 {
 			msg := fmt.Sprintf("importing %d bytes would exceed the free tier (%d of %d bytes used); please add FULA credits",
 				carSize, creditStatus.CurrentBytes, creditStatus.FreeTierBytes)
+			log.Printf("DAG import blocked for user %s: %s", userID, msg)
+			return createErrorResponse(http.StatusPaymentRequired, "INSUFFICIENT_CREDITS", msg), errors.New("insufficient credits")
+		}
+		if required, days := dagImportRequiredBalance(creditStatus.CurrentBytes, carSize, creditStatus.FreeTierBytes); required > 0 && creditStatus.BalanceFula < required {
+			msg := fmt.Sprintf("insufficient balance for this import: storing the projected %.3f GB over the free tier for %.0f days requires at least %.4f FULA (balance: %.4f FULA); please add credits",
+				float64(creditStatus.CurrentBytes+carSize-creditStatus.FreeTierBytes)/(1024*1024*1024), days, required, creditStatus.BalanceFula)
 			log.Printf("DAG import blocked for user %s: %s", userID, msg)
 			return createErrorResponse(http.StatusPaymentRequired, "INSUFFICIENT_CREDITS", msg), errors.New("insufficient credits")
 		}

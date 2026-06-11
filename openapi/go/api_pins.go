@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -271,10 +272,15 @@ func (c *PinsAPIController) ImportDag(w http.ResponseWriter, r *http.Request) {
 				part.Close()
 				continue
 			}
-			tmp, err := os.CreateTemp("", "dag-import-*.car")
+			spoolDir, err := dagImportSpoolDir()
+			var tmp *os.File
+			if err == nil {
+				tmp, err = os.CreateTemp(spoolDir, "dag-import-*.car")
+			}
 			if err != nil {
 				part.Close()
-				createErrorResponseJSON(w, createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "failed to store upload"))
+				log.Printf("ImportDag: cannot create spool file (dir %q): %v — if the service runs with ProtectSystem=strict, set PrivateTmp=true in the unit or point DAG_IMPORT_TMP_DIR at a writable path", spoolDir, err)
+				createErrorResponseJSON(w, createErrorResponse(http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "failed to store upload (server temp directory not writable)"))
 				return
 			}
 			tmpPath = tmp.Name()

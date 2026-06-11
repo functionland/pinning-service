@@ -40,5 +40,12 @@ type PinsAPIServicer interface {
 	GetPinByRequestId(context.Context, string) (ImplResponse, error)
 	GetPinNodes(context.Context, string) (ImplResponse, error)
 	GetPins(context.Context, []string, string, TextMatchingStrategy, []Status, time.Time, time.Time, int32, map[string]string) (ImplResponse, error)
+	// ImportDag imports an uploaded CAR file (vendor extension; the standard
+	// Pinning Service API has no upload endpoint). carPath is a temp file the
+	// SERVICE takes ownership of: it must be removed on every path, including
+	// the async import. onDone (may be nil) must be called exactly once when
+	// all work — including any async import — has finished; it releases the
+	// caller's concurrency slot.
+	ImportDag(ctx context.Context, carPath string, name string, onDone func()) (ImplResponse, error)
 	ReplacePinByRequestId(context.Context, string, Pin) (ImplResponse, error)
 }

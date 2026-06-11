@@ -34,6 +34,7 @@ import {
   parsePlaylists,
   detectMimeType,
 } from '../services/sharingService';
+import ImportDagModal from '../components/ImportDagModal';
 
 // S3 endpoint for FxFiles storage
 const S3_ENDPOINT = 'https://s3.cloud.fx.land';
@@ -127,6 +128,13 @@ export default function Pins() {
   const [newCid, setNewCid] = useState('');
   const [newName, setNewName] = useState('');
   const [adding, setAdding] = useState(false);
+  // DAG import (CAR upload) — server-gated feature; fail closed until
+  // /api/features confirms it is enabled.
+  const [features, setFeatures] = useState<{ dagImport: boolean; dagImportMaxCarBytes: number }>({
+    dagImport: false,
+    dagImportMaxCarBytes: 838860800,
+  });
+  const [showImportModal, setShowImportModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedValue, setExpandedValue] = useState<{ type: string; value: string } | null>(null);
   const [copied, setCopied] = useState(false);
@@ -244,6 +252,21 @@ export default function Pins() {
     };
     checkEncryptionKey();
   }, [user]);
+
+  // Discover server-gated features (Import DAG button visibility)
+  useEffect(() => {
+    fetch('/api/features', { credentials: 'include' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((f) => {
+        if (f && typeof f.dagImport === 'boolean') {
+          setFeatures({
+            dagImport: f.dagImport,
+            dagImportMaxCarBytes: f.dagImportMaxCarBytes || 838860800,
+          });
+        }
+      })
+      .catch(() => { /* fail closed: button stays hidden */ });
+  }, []);
 
   // Timeout for download operations (5 minutes)
   const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
@@ -2644,9 +2667,16 @@ export default function Pins() {
           </p>
         </div>
         {activeTab === 'myPins' && (
-          <button onClick={() => setShowAddModal(true)} className="btn-primary">
-            + {t.pins.addPin}
-          </button>
+          <div className="flex items-center gap-2">
+            {features.dagImport && (
+              <button onClick={() => setShowImportModal(true)} className="btn-secondary">
+                {t.pins.importDag || 'Import DAG'}
+              </button>
+            )}
+            <button onClick={() => setShowAddModal(true)} className="btn-primary">
+              + {t.pins.addPin}
+            </button>
+          </div>
         )}
       </div>
 
@@ -2683,6 +2713,18 @@ export default function Pins() {
 
       {/* FxFiles Preview Modal */}
       {renderFxPreviewModal()}
+
+      {/* Import DAG (CAR upload) modal */}
+      <ImportDagModal
+        open={showImportModal}
+        maxCarBytes={features.dagImportMaxCarBytes}
+        onClose={() => setShowImportModal(false)}
+        onImported={() => {
+          setShowImportModal(false);
+          setPage(1);
+          void fetchPins();
+        }}
+      />
 
       {/* Copied toast notification */}
       {copied && (

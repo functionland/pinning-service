@@ -1,0 +1,470 @@
+package openapi
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ipfs-cluster/ipfs-cluster/api"
+	clusterapi "github.com/ipfs-cluster/ipfs-cluster/api/rest/client"
+	files "github.com/ipfs/boxo/files"
+	cid "github.com/ipfs/go-cid"
+)
+
+// fakeClusterClient implements just enough of clusterapi.Client for ImportDag:
+// AddMultiFile drains the multipart stream, optionally fails, and emits the
+// configured root — honoring the real client's contract (it closes out itself).
+type fakeClusterClient struct {
+	clusterapi.Client // embed: unimplemented methods panic if called
+
+	mu            sync.Mutex
+	addCalls      int
+	failAdd       bool
+	rootToEmit    cid.Cid
+	lastFormat    string
+	lastName      string
+	receivedBytes int64
+}
+
+func (f *fakeClusterClient) AddMultiFile(ctx context.Context, mfr *files.MultiFileReader, params api.AddParams, out chan<- api.AddedOutput) error {
+	defer close(out)
+
+	// Parse the multipart stream like the cluster server would and measure
+	// the actual file payload (the CARv1 bytes) inside it.
+	var payloadBytes int64
+	mpr := multipart.NewReader(mfr, mfr.Boundary())
+	for {
+		part, err := mpr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("fake cluster: bad multipart: %w", err)
+		}
+		n, _ := io.Copy(io.Discard, part)
+		payloadBytes += n
+		part.Close()
+	}
+
+	f.mu.Lock()
+	f.addCalls++
+	f.lastFormat = params.Format
+	f.lastName = params.Name
+	f.receivedBytes = payloadBytes
+	fail := f.failAdd
+	root := f.rootToEmit
+	f.mu.Unlock()
+
+	if fail {
+		return errors.New("fake cluster add failure")
+	}
+	out <- api.AddedOutput{Name: params.Name, Cid: api.NewCid(root)}
+	return nil
+}
+
+func (f *fakeClusterClient) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.addCalls
+}
+
+// fakeKubo serves POST /api/v0/dag/stat with a fixed TotalSize (or a 500).
+func fakeKubo(t *testing.T, totalSize int64, fail bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail {
+			http.Error(w, "dag stat broken", http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, `{"TotalSize": %d}`, totalSize)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newImportTestEnv wires a SQLite-backed service with a fake cluster client
+// and fake kubo, and seeds a session userA/tokenA.
+func newImportTestEnv(t *testing.T, fake *fakeClusterClient, kuboURL string) (*PinsAPIServiceSQLite, *SQLiteService) {
+	t.Helper()
+	dbsvc := newTestSQLiteSvc(t)
+	if _, err := dbsvc.db.ExecContext(context.Background(),
+		"INSERT INTO sessions (username, session_token) VALUES (?, ?)", "userA", "tokenA"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	svc := &PinsAPIServiceSQLite{db: dbsvc, ipfsClusterAPI: fake, ipfsHTTPURL: kuboURL}
+	return svc, dbsvc
+}
+
+// sacrificialCopy copies the fixture to a path the service may delete.
+func sacrificialCopy(t *testing.T, fixturePath string) string {
+	t.Helper()
+	data, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "upload.car")
+	if err := os.WriteFile(path, data, 0o666); err != nil {
+		t.Fatalf("copy fixture: %v", err)
+	}
+	return path
+}
+
+// importDone returns an onDone callback and a wait func that fails the test
+// if the import lifecycle doesn't finish in time.
+func importDone(t *testing.T) (func(), func()) {
+	t.Helper()
+	done := make(chan struct{})
+	return func() { close(done) }, func() {
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Fatal("import lifecycle did not finish (onDone not called)")
+		}
+	}
+}
+
+func pinRow(t *testing.T, dbsvc *SQLiteService, requestID string) (status string, size int64) {
+	t.Helper()
+	err := dbsvc.db.QueryRowContext(context.Background(),
+		"SELECT status, size FROM pins WHERE requestid = ?", requestID).Scan(&status, &size)
+	if err != nil {
+		t.Fatalf("query pin row %s: %v", requestID, err)
+	}
+	return status, size
+}
+
+// TestImportDag_QuotaCounted is THE core requirement: an imported DAG must be
+// pinned through the normal lifecycle and its size must land in pins.size so
+// storage/credit accounting picks it up automatically.
+func TestImportDag_QuotaCounted(t *testing.T) {
+	fx := buildValidCar(t, true)
+	const dagStatSize = int64(4242)
+
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, dagStatSize, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	carPath := sacrificialCopy(t, fx.path)
+	carSize := int64(len(mustRead(t, fx.path)))
+	onDone, wait := importDone(t)
+
+	resp, err := svc.ImportDag(authCtx("tokenA"), carPath, "my import", onDone)
+	if err != nil {
+		t.Fatalf("ImportDag: %v", err)
+	}
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("code = %d, want 202", resp.Code)
+	}
+	status, ok := resp.Body.(PinStatus)
+	if !ok {
+		t.Fatalf("body type = %T, want PinStatus", resp.Body)
+	}
+	if status.Pin.Cid != fx.root.String() {
+		t.Errorf("pin cid = %s, want %s", status.Pin.Cid, fx.root)
+	}
+	if status.Pin.Meta["source"] != "car_import" {
+		t.Errorf("meta source = %q, want car_import", status.Pin.Meta["source"])
+	}
+
+	wait()
+
+	// Async import completed: cluster got the CAR, row advanced, size landed.
+	if fake.calls() != 1 {
+		t.Errorf("cluster add calls = %d, want 1", fake.calls())
+	}
+	if fake.lastFormat != "car" {
+		t.Errorf("cluster add format = %q, want car", fake.lastFormat)
+	}
+	if fake.receivedBytes != carSize {
+		t.Errorf("cluster received %d bytes, want %d (whole v1 CAR)", fake.receivedBytes, carSize)
+	}
+	rowStatus, rowSize := pinRow(t, dbsvc, status.Requestid)
+	if rowStatus != "pinning" {
+		t.Errorf("row status = %q, want pinning", rowStatus)
+	}
+	if rowSize != dagStatSize {
+		t.Errorf("row size = %d, want %d (dag/stat)", rowSize, dagStatSize)
+	}
+
+	// Quota accounting is automatic: both the storage sum and the credit
+	// gatekeeper must now see the imported bytes.
+	usage, err := dbsvc.GetStorageByUser(context.Background(), "userA")
+	if err != nil {
+		t.Fatalf("GetStorageByUser: %v", err)
+	}
+	if usage.TotalSize != dagStatSize {
+		t.Errorf("GetStorageByUser = %d, want %d", usage.TotalSize, dagStatSize)
+	}
+	credit, err := dbsvc.GetCreditStatus(context.Background(), "userA")
+	if err != nil {
+		t.Fatalf("GetCreditStatus: %v", err)
+	}
+	if credit.CurrentBytes != dagStatSize {
+		t.Errorf("GetCreditStatus.CurrentBytes = %d, want %d", credit.CurrentBytes, dagStatSize)
+	}
+
+	// The service owned the temp CAR and must have removed it.
+	if _, err := os.Stat(carPath); !os.IsNotExist(err) {
+		t.Errorf("temp CAR still exists after import (stat err=%v)", err)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
+}
+
+// TestImportDag_SizeFallback: if dag/stat is unavailable the validated
+// unique-bytes sum is used — quota is never silently zero.
+func TestImportDag_SizeFallback(t *testing.T) {
+	fx := buildValidCar(t, true)
+
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, 0, true) // dag/stat 500s
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), sacrificialCopy(t, fx.path), "", onDone)
+	if err != nil {
+		t.Fatalf("ImportDag: %v", err)
+	}
+	status := resp.Body.(PinStatus)
+	wait()
+
+	_, rowSize := pinRow(t, dbsvc, status.Requestid)
+	if rowSize != fx.uniqueBytes {
+		t.Errorf("fallback size = %d, want validated unique bytes %d", rowSize, fx.uniqueBytes)
+	}
+}
+
+// TestImportDag_DedupAlreadyPinned: an actively pinned CID is returned as-is
+// (200), no import is performed, and the temp CAR is cleaned up.
+func TestImportDag_DedupAlreadyPinned(t *testing.T) {
+	fx := buildValidCar(t, true)
+
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, 1234, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	existingReq := addActivePin(t, dbsvc, "userA", fx.root.String(), "pinned")
+
+	carPath := sacrificialCopy(t, fx.path)
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), carPath, "", onDone)
+	if err != nil {
+		t.Fatalf("ImportDag: %v", err)
+	}
+	wait() // sync path must still fire onDone
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", resp.Code)
+	}
+	if got := resp.Body.(PinStatus).Requestid; got != existingReq {
+		t.Errorf("requestid = %s, want existing %s", got, existingReq)
+	}
+	if fake.calls() != 0 {
+		t.Errorf("cluster add calls = %d, want 0 (dedup skips import)", fake.calls())
+	}
+	if _, err := os.Stat(carPath); !os.IsNotExist(err) {
+		t.Errorf("temp CAR not cleaned up on dedup path")
+	}
+}
+
+// TestImportDag_HealsStuckPin: a failed/stuck row for the same CID is reused
+// and the import supplies the blocks.
+func TestImportDag_HealsStuckPin(t *testing.T) {
+	fx := buildValidCar(t, true)
+	const dagStatSize = int64(9999)
+
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, dagStatSize, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	stuckReq := addActivePin(t, dbsvc, "userA", fx.root.String(), "failed")
+
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), sacrificialCopy(t, fx.path), "", onDone)
+	if err != nil {
+		t.Fatalf("ImportDag: %v", err)
+	}
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("code = %d, want 202", resp.Code)
+	}
+	if got := resp.Body.(PinStatus).Requestid; got != stuckReq {
+		t.Errorf("requestid = %s, want reused %s", got, stuckReq)
+	}
+	wait()
+
+	if fake.calls() != 1 {
+		t.Errorf("cluster add calls = %d, want 1 (heal re-imports)", fake.calls())
+	}
+	rowStatus, rowSize := pinRow(t, dbsvc, stuckReq)
+	if rowStatus != "pinning" || rowSize != dagStatSize {
+		t.Errorf("healed row = (%s, %d), want (pinning, %d)", rowStatus, rowSize, dagStatSize)
+	}
+}
+
+// TestImportDag_ClusterFailure: a cluster add error marks the pin failed and
+// the temp CAR is removed.
+func TestImportDag_ClusterFailure(t *testing.T) {
+	fx := buildValidCar(t, true)
+
+	fake := &fakeClusterClient{rootToEmit: fx.root, failAdd: true}
+	kubo := fakeKubo(t, 1, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	carPath := sacrificialCopy(t, fx.path)
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), carPath, "", onDone)
+	if err != nil {
+		t.Fatalf("ImportDag: %v", err)
+	}
+	status := resp.Body.(PinStatus)
+	wait()
+
+	rowStatus, _ := pinRow(t, dbsvc, status.Requestid)
+	if rowStatus != "failed" {
+		t.Errorf("row status = %q, want failed", rowStatus)
+	}
+	if _, err := os.Stat(carPath); !os.IsNotExist(err) {
+		t.Errorf("temp CAR not cleaned up after cluster failure")
+	}
+}
+
+// TestImportDag_RootMismatch: cluster returning a different root than the CAR
+// header is treated as a failed import.
+func TestImportDag_RootMismatch(t *testing.T) {
+	fx := buildValidCar(t, true)
+	otherRoot := rawTestBlock(t, []byte("a different root entirely")).Cid()
+
+	fake := &fakeClusterClient{rootToEmit: otherRoot}
+	kubo := fakeKubo(t, 1, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), sacrificialCopy(t, fx.path), "", onDone)
+	if err != nil {
+		t.Fatalf("ImportDag: %v", err)
+	}
+	status := resp.Body.(PinStatus)
+	wait()
+
+	rowStatus, _ := pinRow(t, dbsvc, status.Requestid)
+	if rowStatus != "failed" {
+		t.Errorf("row status = %q, want failed (root mismatch)", rowStatus)
+	}
+}
+
+// TestImportDag_InvalidCar: validation failures are 400s, the temp file is
+// removed, and nothing reaches the cluster.
+func TestImportDag_InvalidCar(t *testing.T) {
+	fake := &fakeClusterClient{}
+	kubo := fakeKubo(t, 1, false)
+	svc, _ := newImportTestEnv(t, fake, kubo.URL)
+
+	junkPath := filepath.Join(t.TempDir(), "junk.car")
+	if err := os.WriteFile(junkPath, []byte("not a car"), 0o666); err != nil {
+		t.Fatalf("write junk: %v", err)
+	}
+
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), junkPath, "", onDone)
+	wait()
+
+	if err == nil || resp.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d (err=%v), want 400", resp.Code, err)
+	}
+	if fake.calls() != 0 {
+		t.Errorf("cluster add calls = %d, want 0", fake.calls())
+	}
+	if _, statErr := os.Stat(junkPath); !os.IsNotExist(statErr) {
+		t.Errorf("temp CAR not cleaned up on validation failure")
+	}
+}
+
+// TestImportDag_Unauthorized: no bearer → 401, temp removed, onDone called.
+func TestImportDag_Unauthorized(t *testing.T) {
+	fx := buildValidCar(t, true)
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, 1, false)
+	svc, _ := newImportTestEnv(t, fake, kubo.URL)
+
+	carPath := sacrificialCopy(t, fx.path)
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(context.Background(), carPath, "", onDone)
+	wait()
+
+	if err == nil || resp.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d (err=%v), want 401", resp.Code, err)
+	}
+	if _, statErr := os.Stat(carPath); !os.IsNotExist(statErr) {
+		t.Errorf("temp CAR not cleaned up on auth failure")
+	}
+}
+
+// TestImportDag_402_StrictPreflight: a free-tier user (zero FULA balance)
+// whose import would cross the free-tier boundary is rejected up front —
+// stricter than pin-by-CID, where the size is unknown until after pinning.
+func TestImportDag_402_StrictPreflight(t *testing.T) {
+	fx := buildValidCar(t, true)
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, 1, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	// Park the user just below the free tier: still CanUpload, but any
+	// non-trivial import would cross the boundary with no credits.
+	filler := addActivePin(t, dbsvc, "userA", "cidFiller", "pinned")
+	if err := dbsvc.UpdatePinSize(context.Background(), filler, DefaultFreeTierBytes-10); err != nil {
+		t.Fatalf("UpdatePinSize: %v", err)
+	}
+
+	carPath := sacrificialCopy(t, fx.path)
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), carPath, "", onDone)
+	wait()
+
+	if err == nil || resp.Code != http.StatusPaymentRequired {
+		t.Fatalf("code = %d (err=%v), want 402", resp.Code, err)
+	}
+	if fake.calls() != 0 {
+		t.Errorf("cluster add calls = %d, want 0", fake.calls())
+	}
+	if _, statErr := os.Stat(carPath); !os.IsNotExist(statErr) {
+		t.Errorf("temp CAR not cleaned up on 402 path")
+	}
+}
+
+// TestImportDag_402_OverFreeTier: a user already over the free tier with no
+// balance is blocked by the regular credit gate.
+func TestImportDag_402_OverFreeTier(t *testing.T) {
+	fx := buildValidCar(t, true)
+	fake := &fakeClusterClient{rootToEmit: fx.root}
+	kubo := fakeKubo(t, 1, false)
+	svc, dbsvc := newImportTestEnv(t, fake, kubo.URL)
+
+	filler := addActivePin(t, dbsvc, "userA", "cidFiller", "pinned")
+	if err := dbsvc.UpdatePinSize(context.Background(), filler, DefaultFreeTierBytes+10); err != nil {
+		t.Fatalf("UpdatePinSize: %v", err)
+	}
+
+	onDone, wait := importDone(t)
+	resp, err := svc.ImportDag(authCtx("tokenA"), sacrificialCopy(t, fx.path), "", onDone)
+	wait()
+
+	if err == nil || resp.Code != http.StatusPaymentRequired {
+		t.Fatalf("code = %d (err=%v), want 402", resp.Code, err)
+	}
+}

@@ -8,6 +8,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -198,6 +200,34 @@ func TestImportDagRouteDisambiguation(t *testing.T) {
 		if imports != 1 {
 			t.Fatalf("iteration %d: service saw %d imports, want exactly 1", i, imports)
 		}
+	}
+}
+
+// TestImportDagEndpoint_CustomSpoolDir: DAG_IMPORT_TMP_DIR routes the upload
+// spool to a configurable directory (created on demand) — the escape hatch
+// for systemd-hardened deployments where /tmp is read-only.
+func TestImportDagEndpoint_CustomSpoolDir(t *testing.T) {
+	t.Setenv("DAG_IMPORT_ENABLED", "true")
+	spool := filepath.Join(t.TempDir(), "nested", "spool") // does not exist yet
+	t.Setenv("DAG_IMPORT_TMP_DIR", spool)
+
+	service := NewMockPinsAPIService()
+	router := setupTestRouter(service)
+
+	body, contentType := buildCarMultipart(t, "", []byte("car payload"))
+	req := httptest.NewRequest(http.MethodPost, "/pins/import/car", body)
+	req.Header.Set("Content-Type", contentType)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("code = %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(spool); err != nil {
+		t.Errorf("spool dir was not created: %v", err)
+	}
+	if len(service.importedSizes) != 1 {
+		t.Fatalf("service saw %d imports, want 1", len(service.importedSizes))
 	}
 }
 

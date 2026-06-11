@@ -99,6 +99,22 @@ func carImportLimitsFromEnv() carImportLimits {
 	}
 }
 
+// dagImportSpoolDir returns the directory CAR uploads are spooled to and
+// makes sure it exists. Defaults to the OS temp dir; override with
+// DAG_IMPORT_TMP_DIR when the service runs under systemd hardening
+// (ProtectSystem=strict makes /tmp read-only unless the unit also sets
+// PrivateTmp=true or whitelists a path via ReadWritePaths).
+func dagImportSpoolDir() (string, error) {
+	dir := os.Getenv("DAG_IMPORT_TMP_DIR")
+	if dir == "" {
+		return os.TempDir(), nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 func envFloat(name string, def float64) float64 {
 	v := os.Getenv(name)
 	if v == "" {

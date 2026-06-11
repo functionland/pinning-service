@@ -392,12 +392,19 @@ func (s *PinsAPIServiceSQLite) GetPinByRequestId(ctx context.Context, requestid 
 		clusterStatus, err := s.getClusterStatus(ctx, pinStatus.Pin.Cid)
 		if err == nil {
 			newStatus := mapStatus(clusterStatus)
+			// Never downgrade an in-flight pin to failed just because the
+			// cluster has not registered it yet (see the postgres twin).
+			current := pinStatus.Status
+			if newStatus == FAILED && clusterStatus == "unpinned" && (current == QUEUED || current == PINNING) {
+				newStatus = current
+			}
 			pinStatus.Status = newStatus
-			// Persist the updated status to database
-			if updateErr := s.db.UpdatePinStatusAndSize(ctx, requestid, string(newStatus), 0); updateErr != nil {
-				log.Printf("Warning: failed to update pin status for %s: %v", requestid, updateErr)
-			} else {
-				log.Printf("Updated pin %s status to %s from cluster", requestid, newStatus)
+			if newStatus != current {
+				if updateErr := s.db.UpdatePinStatusAndSize(ctx, requestid, string(newStatus), 0); updateErr != nil {
+					log.Printf("Warning: failed to update pin status for %s: %v", requestid, updateErr)
+				} else {
+					log.Printf("Updated pin %s status to %s from cluster", requestid, newStatus)
+				}
 			}
 		}
 	}
@@ -609,11 +616,10 @@ func (s *PinsAPIServiceSQLite) getClusterStatus(ctx context.Context, cidStr stri
 		return "queued", err
 	}
 
-	for _, peerInfo := range pinInfo.PeerMap {
-		return peerInfo.Status.String(), nil
+	if len(pinInfo.PeerMap) == 0 {
+		return "queued", nil
 	}
-
-	return "queued", nil
+	return aggregateClusterStatus(pinInfo.PeerMap), nil
 }
 
 // pinToCluster sends a pin request to IPFS Cluster (and optionally IPFS directly)

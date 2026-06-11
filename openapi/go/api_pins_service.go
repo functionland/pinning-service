@@ -514,6 +514,51 @@ func (s *PinsAPIService) getPinStatusFromIPFSCluster(ctx context.Context, cidsWi
 
 	return pinStatuses, nil
 }
+// aggregateClusterStatus reduces a cluster Status() peer map to one status
+// string. The previous behavior — returning whichever peer Go's map iteration
+// yielded first — made every status check a lottery: a global status query
+// returns ALL cluster peers, most of which report "remote" ("allocated to
+// somebody else", mapped to queued) while the allocated peers report
+// pinned/pinning/unpinned, so the same pin could show pinned, queued or
+// failed on consecutive refreshes.
+//
+// Aggregation: "remote" entries are ignored entirely; among the rest the
+// best status wins — the content is pinned if ANY allocated peer holds it
+// (replication to the others continues in the background), it is pinning if
+// any peer is actively working, queued if queued anywhere, and error/unpinned
+// only when no peer reports anything better.
+func aggregateClusterStatus(peerMap map[string]api.PinInfoShort) string {
+	rank := func(status string) int {
+		switch status {
+		case "pinned":
+			return 6
+		case "pinning", "unpinning":
+			return 5
+		case "pin_queued", "unpin_queued", "queued":
+			return 4
+		case "pin_error", "unpin_error", "cluster_error", "unexpectedly_unpinned":
+			return 3
+		case "unpinned":
+			return 2
+		case "remote":
+			return 0 // not allocated to that peer; says nothing about the pin
+		default:
+			return 1
+		}
+	}
+
+	agg := "unpinned"
+	best := 0
+	for _, peerInfo := range peerMap {
+		st := peerInfo.Status.String()
+		if r := rank(st); r > best {
+			best = r
+			agg = st
+		}
+	}
+	return agg
+}
+
 func mapStatus(ipfsStatus string) Status {
 	switch ipfsStatus {
 	case "pin_error", "unpin_error", "failed":

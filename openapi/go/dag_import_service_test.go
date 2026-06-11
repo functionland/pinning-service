@@ -34,6 +34,15 @@ type fakeClusterClient struct {
 	lastFormat    string
 	lastName      string
 	receivedBytes int64
+	// statusPeerMap, when set, is served by Status() — see cluster_status_test.go.
+	statusPeerMap map[string]api.PinInfoShort
+}
+
+// Status serves the configured peer map (cluster global status query).
+func (f *fakeClusterClient) Status(ctx context.Context, ci api.Cid, local bool) (api.GlobalPinInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return api.GlobalPinInfo{Cid: ci, PeerMap: f.statusPeerMap}, nil
 }
 
 func (f *fakeClusterClient) AddMultiFile(ctx context.Context, mfr *files.MultiFileReader, params api.AddParams, out chan<- api.AddedOutput) error {

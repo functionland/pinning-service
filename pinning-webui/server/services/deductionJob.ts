@@ -63,8 +63,10 @@ function calculateHourlyDeduction(totalBytes: number): number {
   return billableGB * FULA_PER_GB_MONTH / HOURS_PER_MONTH;
 }
 
-// Process deduction for a single user
-async function processUserDeduction(userId: string, storageBytes: number): Promise<{
+// Process deduction for a single user.
+// Exported as a test seam: the FM-2 e2e/integration suites race two calls to
+// prove the (user, hour) idempotency gate under real Postgres.
+export async function processUserDeduction(userId: string, storageBytes: number): Promise<{
   deducted: boolean;
   amount: number;
   suspended: boolean;

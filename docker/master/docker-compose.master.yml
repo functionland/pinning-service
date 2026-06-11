@@ -1,0 +1,136 @@
+# Fula federated master — service stack (Phase 1.5, Stage A).
+#
+# Run via update-scripts/join-as-master.sh (it writes the .env this file
+# consumes and applies migrations first). Design notes:
+#  - pinning-api + webui use HOST networking and bind 127.0.0.1 like prod:
+#    nginx (or the operator's proxy) is the only public ingress; they reach
+#    the adopted kubo (:5001) and cluster writer REST (:9094) on localhost.
+#  - postgres publishes 127.0.0.1:5432 only (matches prod postgres-pinning).
+#  - every long-running service: restart policy + healthcheck = auto-heal.
+#  - kubo + the ipfs-cluster WRITER are NOT here: they are systemd-managed by
+#    fula-ota/update-scripts/phase-1-setup-writer.sh and ADOPTED (detected) by
+#    join-as-master.sh — never duplicated.
+#  - fula-gateway (the fula-api S3 backend) is an optional profile until its
+#    image exists on the box (docker/master/README — built from the fula-api
+#    repo); join-as-master.sh enables it automatically when the image is found.
+
+name: fula-master
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-pinning
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pinning_service}
+      POSTGRES_USER: ${POSTGRES_USER:-pinning_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env (join-as-master.sh writes it)}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pinning_user} -d ${POSTGRES_DB:-pinning_service}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  pinning-api:
+    build:
+      context: ../..
+      dockerfile: docker/master/Dockerfile.pinning-api
+    image: fula-pinning-api:master
+    container_name: fula-pinning-api
+    network_mode: host
+    environment:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-pinning_service}
+      POSTGRES_USER: ${POSTGRES_USER:-pinning_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PORT: ${PINNING_API_PORT:-6000}
+      BIND_HOST: ${PINNING_API_BIND:-127.0.0.1}
+      IPFS_API_ADDR: ${IPFS_API_ADDR:-/ip4/127.0.0.1/tcp/5001}
+      IPFS_CLUSTER_API_ADDR: ${IPFS_CLUSTER_API_ADDR:-/ip4/127.0.0.1/tcp/9094}
+      IPFS_HTTP_URL: ${IPFS_HTTP_URL:-http://127.0.0.1:5001}
+      ENABLE_IPFS_PINNING: ${ENABLE_IPFS_PINNING:-false}
+      SYSTEM_KEY: ${SYSTEM_KEY:-}
+      DAG_IMPORT_ENABLED: ${DAG_IMPORT_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${PINNING_API_PORT:-6000}"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    restart: unless-stopped
+
+  webui:
+    build:
+      context: ../..
+      dockerfile: docker/master/Dockerfile.webui
+    image: fula-pinning-webui:master
+    container_name: fula-pinning-webui
+    network_mode: host
+    environment:
+      NODE_ENV: production
+      WEBUI_PORT: ${WEBUI_PORT:-3001}
+      BIND_HOST: ${WEBUI_BIND:-127.0.0.1}
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-pinning_service}
+      POSTGRES_USER: ${POSTGRES_USER:-pinning_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # FM-2 federated-master safety (Phase 1.5): masters run with both ON.
+      BILLING_IDEMPOTENCY: ${BILLING_IDEMPOTENCY:-true}
+      CRON_LEADER_LEASE: ${CRON_LEADER_LEASE:-true}
+      VAULT_ADDRESS: ${VAULT_ADDRESS:-}
+      BASE_RPC_URL: ${BASE_RPC_URL:-https://mainnet.base.org}
+      ETHERSCAN_API_KEY: ${ETHERSCAN_API_KEY:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      FREE_TIER_BYTES: ${FREE_TIER_BYTES:-524288000}
+      FULA_PER_GB_MONTH: ${FULA_PER_GB_MONTH:-3}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${WEBUI_PORT:-3001}"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+
+  # Auto-update (same pattern as the fula-ota edge): watchtower restarts
+  # services whose images change. Scoped by label to this stack only.
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: fula-master-updater
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --label-enable --interval 3600
+    restart: unless-stopped
+
+  # Optional until the fula-gateway image is built from the fula-api repo.
+  # join-as-master.sh enables the profile when `docker image inspect
+  # fula-gateway` succeeds.
+  fula-gateway:
+    profiles: ["gateway"]
+    image: ${FULA_GATEWAY_IMAGE:-fula-gateway:latest}
+    container_name: fula-gateway-1
+    network_mode: host
+    env_file:
+      - path: ${FULA_GATEWAY_ENV_FILE:-/opt/fula-master/fula-gateway.env}
+        required: false
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${FULA_GATEWAY_PORT:-8080}"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  pgdata:

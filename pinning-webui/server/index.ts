@@ -125,11 +125,14 @@ async function main() {
         const vaultAddress = process.env.VAULT_ADDRESS || '';
         if (vaultAddress && vaultAddress !== '0x0000000000000000000000000000000000000000') {
           console.log(`[webui] VAULT_ADDRESS configured: ${vaultAddress}`);
-          console.log('[webui] Starting block scanner cron (every 10 minutes)...');
-          startBlockScanner(10 * 60 * 1000); // 10 minutes
+          // Intervals are env-overridable for e2e drills (defaults unchanged).
+          const scannerMs = parseInt(process.env.SCANNER_INTERVAL_MS || '', 10) || 10 * 60 * 1000;
+          const deductionMs = parseInt(process.env.DEDUCTION_INTERVAL_MS || '', 10) || 60 * 60 * 1000;
+          console.log(`[webui] Starting block scanner cron (every ${scannerMs / 1000}s)...`);
+          startBlockScanner(scannerMs);
 
-          console.log('[webui] Starting deduction job cron (every hour)...');
-          startDeductionJob(60 * 60 * 1000); // 1 hour
+          console.log(`[webui] Starting deduction job cron (every ${deductionMs / 1000}s)...`);
+          startDeductionJob(deductionMs);
         } else {
           console.log('[webui] VAULT_ADDRESS not configured - payment crons disabled');
         }

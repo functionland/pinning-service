@@ -1,0 +1,21 @@
+# Fula federated master — pinning-webui (billing UI + cron family).
+# Build context: repo root. Two-stage: full dev install to build the vite
+# client + esbuild server bundle, then a lean runtime with prod deps only
+# (dist/server.mjs externalizes pg, so node_modules must provide it).
+FROM node:22-alpine AS build
+WORKDIR /app
+COPY pinning-webui/package.json pinning-webui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY pinning-webui/ ./
+RUN npm run build
+
+FROM node:22-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+COPY pinning-webui/package.json pinning-webui/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+COPY --from=build /app/dist ./dist
+# Cron family (blockScanner/deductionJob) starts only when NODE_ENV=production
+# — see server/index.ts. Flags BILLING_IDEMPOTENCY / CRON_LEADER_LEASE come
+# from the compose env (default OFF in code; the master env turns them on).
+CMD ["node", "dist/server.mjs"]

@@ -11,6 +11,7 @@
 package openapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -187,10 +188,25 @@ func (c *PinsAPIController) ImportDag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the caller BEFORE acquiring a slot so the per-user limit can be
+	// enforced (the auth middleware has already validated the session, so this
+	// succeeds in production; "" falls back to global-only and the service
+	// 401s). Backend-agnostic via type assertion — the mock omits it.
+	userID := ""
+	if rv, ok := c.service.(interface {
+		ResolveUserID(context.Context) (string, error)
+	}); ok {
+		if uid, err := rv.ResolveUserID(r.Context()); err == nil {
+			userID = uid
+		}
+	}
+
 	// One slot per import for its WHOLE lifetime (spool + validate + async
 	// cluster add) — bounds temp-disk and cluster-stream amplification. The
+	// per-user cap (default 1) stops a single user from occupying every global
+	// slot and starving everyone for the up-to-30-minute import lifetime. The
 	// service releases the slot via onDone when all its work finishes.
-	release, ok := acquireImportSlot()
+	release, ok := acquireImportSlot(userID)
 	if !ok {
 		createErrorResponseJSON(w, createErrorResponse(http.StatusTooManyRequests, "TOO_MANY_REQUESTS", "too many concurrent DAG imports; retry shortly"))
 		return

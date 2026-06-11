@@ -208,7 +208,7 @@ func (s *PinsAPIServicePostgres) ImportDag(ctx context.Context, carPath string, 
 	stats, err := validateCARFile(ctx, carPath, lim)
 	if err != nil {
 		for _, sentinel := range []error{ErrCARInvalid, ErrCARNoRoots, ErrCARMultipleRoots, ErrCARRootMissing,
-			ErrCARIncomplete, ErrCARBlockTooLarge, ErrCARTooManyBlocks, ErrCARUnsupportedCodec} {
+			ErrCARIncomplete, ErrCARBlockTooLarge, ErrCARTooManyBlocks, ErrCARUnsupportedCodec, ErrCARBlockTooDeep} {
 			if errors.Is(err, sentinel) {
 				return carImportErrorResponse(err), err
 			}
@@ -579,6 +579,13 @@ func (s *PinsAPIServicePostgres) extractUserIDFromAuth(ctx context.Context) (str
 		return "", err
 	}
 	return s.db.GetUserIDFromToken(ctx, token, "extractUserIDFromAuth")
+}
+
+// ResolveUserID exposes the authenticated user id to the controller (for the
+// per-user import concurrency limit) without performing any work. Returns ""
+// when auth can't be resolved; the import handler will then 401 anyway.
+func (s *PinsAPIServicePostgres) ResolveUserID(ctx context.Context) (string, error) {
+	return s.extractUserIDFromAuth(ctx)
 }
 
 // pinOwnerMatches reports whether requestUserID (extracted from the bearer

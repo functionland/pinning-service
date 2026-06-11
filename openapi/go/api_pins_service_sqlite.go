@@ -201,7 +201,7 @@ func (s *PinsAPIServiceSQLite) ImportDag(ctx context.Context, carPath string, na
 	stats, err := validateCARFile(ctx, carPath, lim)
 	if err != nil {
 		for _, sentinel := range []error{ErrCARInvalid, ErrCARNoRoots, ErrCARMultipleRoots, ErrCARRootMissing,
-			ErrCARIncomplete, ErrCARBlockTooLarge, ErrCARTooManyBlocks, ErrCARUnsupportedCodec} {
+			ErrCARIncomplete, ErrCARBlockTooLarge, ErrCARTooManyBlocks, ErrCARUnsupportedCodec, ErrCARBlockTooDeep} {
 			if errors.Is(err, sentinel) {
 				return carImportErrorResponse(err), err
 			}
@@ -520,6 +520,12 @@ func (s *PinsAPIServiceSQLite) extractUserIDFromAuth(ctx context.Context) (strin
 		return "", err
 	}
 	return s.db.GetUserIDFromToken(ctx, token, "extractUserIDFromAuth")
+}
+
+// ResolveUserID exposes the authenticated user id to the controller (for the
+// per-user import concurrency limit). See the postgres twin.
+func (s *PinsAPIServiceSQLite) ResolveUserID(ctx context.Context) (string, error) {
+	return s.extractUserIDFromAuth(ctx)
 }
 
 func (s *PinsAPIServiceSQLite) cidExistsInIPFS(ctx context.Context, cidStr string) (bool, error) {

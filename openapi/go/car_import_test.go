@@ -25,7 +25,7 @@ import (
 // testCarLimits returns permissive limits for fixtures; individual tests
 // tighten specific fields.
 func testCarLimits() carImportLimits {
-	return carImportLimits{MaxCarBytes: 1 << 30, MaxBlockBytes: 2 << 20, MaxBlocks: 250000}
+	return carImportLimits{MaxCarBytes: 1 << 30, MaxBlockBytes: 2 << 20, MaxBlocks: 250000, MaxDagDepth: 1024}
 }
 
 // rawTestBlock builds a raw-codec (0x55) block over data.

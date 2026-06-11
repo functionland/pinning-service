@@ -341,12 +341,15 @@ func addCARToCluster(ctx context.Context, client clusterapi.Client, carPath stri
 	}
 	defer closeFn()
 
-	fileName := pinName
-	if fileName == "" {
-		fileName = "import.car"
-	}
+	// The multipart entry name MUST be a fixed, path-safe constant — never the
+	// pin name. Boxo's multipart parser (used by the cluster's FromMultipart)
+	// treats the part filename as a PATH: any '/' creates a nested directory,
+	// and the cluster's carAdder then rejects the upload with "expected CAR
+	// file is not of type file". Pin names regularly contain '/' here because
+	// the webui client-side-encrypts them to standard base64. The real pin
+	// name travels separately (and URL-encoded) in params.Name.
 	sliceDir := files.NewSliceDirectory([]files.DirEntry{
-		files.FileEntry(fileName, files.NewReaderFile(dataReader)),
+		files.FileEntry("import.car", files.NewReaderFile(dataReader)),
 	})
 	mfr := files.NewMultiFileReader(sliceDir, true, false)
 

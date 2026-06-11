@@ -415,9 +415,21 @@ func (s *PinsAPIServicePostgres) GetPinByRequestId(ctx context.Context, requesti
 		clusterStatus, err := s.getClusterStatus(ctx, pinStatus.Pin.Cid)
 		if err == nil {
 			newStatus := mapStatus(clusterStatus)
+			// Never downgrade an in-flight pin to failed just because the
+			// cluster has not registered it yet: an aggregate of "unpinned"
+			// while the row says queued/pinning means "not pinned YET" (a
+			// cluster add or pin submission is still running). Real failures
+			// are set by the pin/import goroutines, and genuine cluster
+			// errors arrive as pin_error → FAILED via mapStatus.
+			current := pinStatus.Status
+			if newStatus == FAILED && clusterStatus == "unpinned" && (current == QUEUED || current == PINNING) {
+				newStatus = current
+			}
 			pinStatus.Status = newStatus
-			if updateErr := s.db.UpdatePinStatusAndSize(ctx, requestid, string(newStatus), 0); updateErr != nil {
-				log.Printf("Warning: failed to update pin status for %s: %v", requestid, updateErr)
+			if newStatus != current {
+				if updateErr := s.db.UpdatePinStatusAndSize(ctx, requestid, string(newStatus), 0); updateErr != nil {
+					log.Printf("Warning: failed to update pin status for %s: %v", requestid, updateErr)
+				}
 			}
 		}
 	}
@@ -691,11 +703,10 @@ func (s *PinsAPIServicePostgres) getClusterStatus(ctx context.Context, cidStr st
 		return "queued", err
 	}
 
-	for _, peerInfo := range pinInfo.PeerMap {
-		return peerInfo.Status.String(), nil
+	if len(pinInfo.PeerMap) == 0 {
+		return "queued", nil
 	}
-
-	return "queued", nil
+	return aggregateClusterStatus(pinInfo.PeerMap), nil
 }
 
 func (s *PinsAPIServicePostgres) pinToCluster(ctx context.Context, cidStr string, name string) error {

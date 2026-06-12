@@ -38,6 +38,10 @@ pc_load_env "$ENV_FILE"
 # ---- gather params (interactive with saved defaults; non-interactive uses env/.env or halts) ----
 pc_prompt POSTGRES_PASSWORD "Postgres password for pinning_service" '^.{8,}$' secret
 pc_prompt SYSTEM_KEY "Admin SYSTEM_KEY for the pinning API" '^.{12,}$' secret
+# webui hard-requires these in production (server/index.ts FATALs without them).
+# Auto-generate once and persist — operator may override via env/.env.
+: "${JWT_SECRET:=$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
+: "${SESSION_SECRET:=$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
 : "${POSTGRES_DB:=pinning_service}"; : "${POSTGRES_USER:=pinning_user}"
 : "${BILLING_IDEMPOTENCY:=true}"; : "${CRON_LEADER_LEASE:=true}"
 : "${VAULT_ADDRESS:=}"; : "${WEBUI_PORT:=3001}"; : "${PINNING_API_PORT:=6000}"
@@ -89,7 +93,8 @@ else
   info "fula-gateway image not present — S3 gateway profile stays off (build it from the fula-api repo, then re-run)"
 fi
 
-pc_save_env "$ENV_FILE" POSTGRES_PASSWORD SYSTEM_KEY POSTGRES_DB POSTGRES_USER \
+pc_save_env "$ENV_FILE" POSTGRES_PASSWORD SYSTEM_KEY JWT_SECRET SESSION_SECRET \
+  POSTGRES_DB POSTGRES_USER \
   BILLING_IDEMPOTENCY CRON_LEADER_LEASE VAULT_ADDRESS WEBUI_PORT PINNING_API_PORT \
   IPFS_CLUSTER_API_ADDR IPFS_API_ADDR
 

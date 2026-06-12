@@ -83,6 +83,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-pinning_service}
       POSTGRES_USER: ${POSTGRES_USER:-pinning_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?set in .env (join-as-master.sh writes it)}
+      SESSION_SECRET: ${SESSION_SECRET:?set in .env (join-as-master.sh writes it)}
       # FM-2 federated-master safety (Phase 1.5): masters run with both ON.
       BILLING_IDEMPOTENCY: ${BILLING_IDEMPOTENCY:-true}
       CRON_LEADER_LEASE: ${CRON_LEADER_LEASE:-true}

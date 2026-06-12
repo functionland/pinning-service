@@ -152,6 +152,13 @@ for svc in fula-pinning-api fula-pinning-webui; do
   done
 done
 
+# ---- safeguard crons (signed pinset snapshots every 6h; replication sweep
+#      every 30 min) — idempotent installs ----
+bash "$SCRIPT_DIR/pinset-snapshot.sh" --install-cron
+bash "$SCRIPT_DIR/replication-sweep.sh" --install-cron
+# Take the first snapshot immediately so a restore path exists from minute one.
+OUT_DIR=/opt/fula-master/snapshots bash "$SCRIPT_DIR/pinset-snapshot.sh" || info "WARN: first snapshot failed (cluster busy?) — cron will retry"
+
 cat <<EOF
 [join-as-master] DONE (idempotent — re-run any time).
   pinning API : 127.0.0.1:$PINNING_API_PORT   webui: 127.0.0.1:$WEBUI_PORT

@@ -399,6 +399,8 @@ export interface Translations {
     getItOn: string;
     downloadOn: string;
     comingSoon: string;
+    accessOn?: string;
+    webVersion?: string;
     featureSecure: string;
     featureDecentralized: string;
     featureShare: string;

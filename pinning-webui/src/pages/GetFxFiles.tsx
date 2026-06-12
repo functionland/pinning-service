@@ -77,16 +77,39 @@ export default function GetFxFiles() {
             </div>
           </a>
 
-          {/* Windows - Coming Soon */}
-          <div className="flex items-center justify-center gap-3 w-full bg-gray-200 text-gray-500 rounded-xl px-6 py-4 cursor-not-allowed">
+          {/* Microsoft Store - Available */}
+          <a
+            href="https://apps.microsoft.com/detail/9nxl9kb8fbqq"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={trackDownloadClick}
+            className="flex items-center justify-center gap-3 w-full bg-gray-900 hover:bg-gray-800 text-white rounded-xl px-6 py-4 transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg"
+          >
             <svg className="w-8 h-8" viewBox="0 0 24 24" fill="currentColor">
               <path d="M3 12V6.75l6-1.32v6.48L3 12zm17-9v8.75l-10 .15V5.21L20 3zM3 13l6 .09v6.81l-6-1.15V13zm17 .25V22l-10-1.91V13.1l10 .15z"/>
             </svg>
             <div className="text-left">
-              <div className="text-xs opacity-60">{t.download?.comingSoon || 'COMING SOON'}</div>
+              <div className="text-xs opacity-80">{t.download?.getItOn || 'GET IT ON'}</div>
               <div className="text-lg font-semibold -mt-1">Windows</div>
             </div>
-          </div>
+          </a>
+
+          {/* Web Version - Available */}
+          <a
+            href="https://files.fx.land/app/"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={trackDownloadClick}
+            className="flex items-center justify-center gap-3 w-full bg-gray-900 hover:bg-gray-800 text-white rounded-xl px-6 py-4 transition-all transform hover:scale-[1.02] active:scale-[0.98] shadow-lg"
+          >
+            <svg className="w-8 h-8" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12,20L15.46,14H15.45C15.79,13.4 16,12.73 16,12C16,10.8 15.46,9.73 14.62,9H19.41C19.79,9.93 20,10.94 20,12A8,8 0 0,1 12,20M4,12C4,10.54 4.39,9.18 5.07,8L8.54,14H8.55C9.24,15.19 10.5,16 12,16C12.45,16 12.88,15.91 13.29,15.78L10.89,19.92C7,19.37 4,16.04 4,12M15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9A3,3 0 0,1 15,12M12,4C14.96,4 17.54,5.61 18.92,8H12C10.06,8 8.45,9.38 8.08,11.21L5.7,7.08C7.16,5.21 9.44,4 12,4M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z"/>
+            </svg>
+            <div className="text-left">
+              <div className="text-xs opacity-80">{t.download?.accessOn || 'ACCESS THE'}</div>
+              <div className="text-lg font-semibold -mt-1">{t.download?.webVersion || 'Web Version (Chrome)'}</div>
+            </div>
+          </a>
         </div>
 
         {/* Features */}

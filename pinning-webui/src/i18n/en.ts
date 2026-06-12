@@ -377,6 +377,8 @@ export const en: Translations = {
     getItOn: 'GET IT ON',
     downloadOn: 'DOWNLOAD ON THE',
     comingSoon: 'COMING SOON',
+    accessOn: 'ACCESS THE',
+    webVersion: 'Web Version (Chrome)',
     featureSecure: 'Secure',
     featureDecentralized: 'Decentralized',
     featureShare: 'Easy Share',

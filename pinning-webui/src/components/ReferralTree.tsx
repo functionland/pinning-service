@@ -313,7 +313,7 @@ function ReferralRow({
                 maxLevel={maxLevel}
                 isAdmin={isAdmin}
                 highlightUserId={highlightUserId}
-                ancestorIds={[...ancestorIds, userId]}
+                ancestorIds={[...ancestorIds, user.userId]}
               />
             </div>
           </td>

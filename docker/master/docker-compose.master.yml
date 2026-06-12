@@ -123,6 +123,12 @@ services:
     image: ${FULA_GATEWAY_IMAGE:-fula-gateway:latest}
     container_name: fula-gateway-1
     network_mode: host
+    # The gateway's durable state (pin queue, bucket-registry CID, local-retain
+    # backlog) lives at hardcoded /var/lib/fula-gateway — MUST be a volume or
+    # the S2 "no pin silently missed" safeguard degrades to fire-and-forget
+    # and the bucket registry resets on every restart.
+    volumes:
+      - fula-gateway-state:/var/lib/fula-gateway
     env_file:
       - path: ${FULA_GATEWAY_ENV_FILE:-/opt/fula-master/fula-gateway.env}
         required: false
@@ -136,3 +142,4 @@ services:
 
 volumes:
   pgdata:
+  fula-gateway-state:

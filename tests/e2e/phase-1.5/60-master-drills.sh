@@ -93,10 +93,10 @@ if docker run --rm --network host -v "$REPO/pinning-webui":/app -w /app \
      -e POSTGRES_HOST=127.0.0.1 -e POSTGRES_PORT=5432 \
      -e POSTGRES_DB="${POSTGRES_DB:-pinning_service}" -e POSTGRES_USER="${POSTGRES_USER:-pinning_user}" \
      -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-     node:22 bash -lc "npm ci --no-audit --no-fund >/dev/null 2>&1 && npx vitest run tests/fm2-billing-integration.test.ts 2>&1 | tail -6"; then
-  ok "D5 integration tests green on live Postgres"
+     node:22 bash -c "set -o pipefail; npm ci --no-audit --no-fund >/dev/null 2>&1 && npx vitest run tests/fm2-billing-integration.test.ts 2>&1 | tee /tmp/vitest.out | tail -6 && grep -q ' 2 passed' /tmp/vitest.out"; then
+  ok "D5 integration tests green on live Postgres (2 passed, none skipped)"
 else
-  bad "D5 integration tests failed"
+  bad "D5 integration tests failed (see output above)"
 fi
 
 echo "== D6 signed pinset snapshot: take, verify, tamper, restore =="
@@ -105,14 +105,18 @@ F="$(ls -1t /opt/fula-master/snapshots/pinset-*.json | head -1)"
 bash "$REPO/update-scripts/pinset-snapshot.sh" --verify "$F" >/dev/null 2>&1 && ok "D6 signature verifies" || bad "D6 signature verify failed"
 cp "$F" /tmp/tampered.json; cp "$F.sig" /tmp/tampered.json.sig; echo " " >> /tmp/tampered.json
 bash "$REPO/update-scripts/pinset-snapshot.sh" --verify /tmp/tampered.json >/dev/null 2>&1 && bad "D6 tampered file passed verify(!)" || ok "D6 tampered file REJECTED"
-CID_RESTORE="$(jq -r 'if type=="array" then .[0] else . end | .cid // .Cid' "$F")"
+# Snapshot is a JSON STREAM of pin objects — take the FIRST cid only.
+CID_RESTORE="$(jq -r 'if type=="array" then .[0] else . end | .cid // .Cid // empty' "$F" | head -1)"
 if [ -n "$CID_RESTORE" ] && [ "$CID_RESTORE" != null ]; then
   docker exec ipfs_cluster ipfs-cluster-ctl pin rm "$CID_RESTORE" >/dev/null 2>&1
   sleep 5
   bash "$REPO/update-scripts/pinset-snapshot.sh" --restore "$F" >/dev/null 2>&1
-  sleep 10
-  docker exec ipfs_cluster ipfs-cluster-ctl --enc=json status "$CID_RESTORE" 2>/dev/null | grep -qi '"pinned"' \
-    && ok "D6 unpinned CID restored from snapshot" || bad "D6 restore did not re-pin $CID_RESTORE"
+  restored=""
+  for i in $(seq 1 12); do
+    if docker exec ipfs_cluster ipfs-cluster-ctl --enc=json status "$CID_RESTORE" 2>/dev/null | grep -qi '"pinned"'; then restored=1; break; fi
+    sleep 5
+  done
+  [ -n "$restored" ] && ok "D6 unpinned CID restored from snapshot" || bad "D6 restore did not re-pin $CID_RESTORE (60s)"
 else
   bad "D6 no CID available in snapshot to drill restore"
 fi

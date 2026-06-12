@@ -93,7 +93,7 @@ if docker run --rm --network host -v "$REPO/pinning-webui":/app -w /app \
      -e POSTGRES_HOST=127.0.0.1 -e POSTGRES_PORT=5432 \
      -e POSTGRES_DB="${POSTGRES_DB:-pinning_service}" -e POSTGRES_USER="${POSTGRES_USER:-pinning_user}" \
      -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-     node:22 bash -c "set -o pipefail; npm ci --no-audit --no-fund >/dev/null 2>&1 && npx vitest run tests/fm2-billing-integration.test.ts 2>&1 | tee /tmp/vitest.out | tail -6 && grep -q ' 2 passed' /tmp/vitest.out"; then
+     node:22 bash -c "set -o pipefail; npm ci --no-audit --no-fund >/dev/null 2>&1 && npx vitest run tests/fm2-billing-integration.test.ts 2>&1 | tee /tmp/vitest.out | tail -6 && sed 's/\x1b\[[0-9;]*m//g' /tmp/vitest.out | grep -q '2 passed'"; then
   ok "D5 integration tests green on live Postgres (2 passed, none skipped)"
 else
   bad "D5 integration tests failed (see output above)"

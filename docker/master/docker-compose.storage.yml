@@ -1,0 +1,91 @@
+# Fula STORAGE-ONLY node (Phase 2.5, Stage B) — vetted third-party operator.
+#
+# Provides storage + verified byte ingress, with NO cluster write authority
+# and NO database/billing:
+#   - kubo (follower)
+#   - ipfs-cluster in FOLLOWER mode, trusting ONLY the master peer ids (never
+#     itself) — so this node REPLICATES the pinset but cannot mutate it
+#     (mass-unpin blast radius stays first-party until FM-3 ships)
+#   - fula-ingest — verifies client-declared blake3 CIDs before storing, and
+#     gates on a master's storage API (quota), so ingestion is never unmetered
+#
+# Run via update-scripts/join-as-storage-node.sh (writes the .env this reads).
+# Storage state lives on named volumes (kubo repo, cluster state).
+
+name: fula-storage
+
+services:
+  kubo:
+    image: ${KUBO_IMAGE:-ipfs/kubo:release}
+    container_name: ipfs_host
+    network_mode: host
+    environment:
+      IPFS_PROFILE: server
+    volumes:
+      - kubo-data:/data/ipfs
+    healthcheck:
+      test: ["CMD-SHELL", "ipfs --api=/ip4/127.0.0.1/tcp/5001 id >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    restart: unless-stopped
+
+  cluster:
+    image: ${CLUSTER_IMAGE:-ipfs/ipfs-cluster:stable}
+    container_name: ipfs_cluster
+    network_mode: host
+    environment:
+      IPFS_CLUSTER_PATH: /data/ipfs-cluster
+      CLUSTER_PEERNAME: ${CLUSTER_PEERNAME:-fula-storage}
+      CLUSTER_SECRET: ${CLUSTER_SECRET:?set in .env (join-as-storage-node.sh writes it)}
+      CLUSTER_CLUSTERNAME: ${CLUSTERNAME:?set in .env}
+      # FOLLOWER: replicates, no write authority. Trusts ONLY the masters.
+      CLUSTER_FOLLOWERMODE: "true"
+      CLUSTER_CRDT_TRUSTEDPEERS: ${MASTER_CLUSTER_PEERIDS:?comma-separated master peer ids}
+      CLUSTER_IPFSHTTP_NODEMULTIADDRESS: /ip4/127.0.0.1/tcp/5001
+      CLUSTER_RESTAPI_HTTPLISTENMULTIADDRESS: /ip4/127.0.0.1/tcp/9094
+      CLUSTER_MONITORPINGINTERVAL: 15s
+    # The official ipfs-cluster image entrypoint already wraps these daemon args.
+    command: ["daemon", "--upgrade", "--bootstrap", "${MASTER_CLUSTER_BOOTSTRAP:?master multiaddr}"]
+    volumes:
+      - cluster-data:/data/ipfs-cluster
+    depends_on:
+      kubo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  fula-ingest:
+    image: ${FULA_INGEST_IMAGE:-functionland/fula-ingest:latest}
+    container_name: fula-ingest
+    network_mode: host
+    environment:
+      INGEST_BIND: 0.0.0.0
+      INGEST_PORT: ${INGEST_PORT:-3601}
+      KUBO_API: http://127.0.0.1:5001
+      # Quota gate against a master's storage API — never unmetered ingestion.
+      STORAGE_API_URL: ${STORAGE_API_URL:?a master storage API, e.g. https://api.cloud.fx.land}
+      INGEST_QUOTA_MODE: ${INGEST_QUOTA_MODE:-open}
+      INGEST_MAX_BLOCK_BYTES: ${INGEST_MAX_BLOCK_BYTES:-4194304}
+    depends_on:
+      kubo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${INGEST_PORT:-3601}/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 15s
+    restart: unless-stopped
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: fula-storage-updater
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --label-enable --interval 3600
+    restart: unless-stopped
+
+volumes:
+  kubo-data:
+  cluster-data:

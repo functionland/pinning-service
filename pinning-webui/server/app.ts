@@ -53,7 +53,7 @@ import {
 } from './database/postgres.js';
 import {
   mintMcpToken,
-  decodeMcpJtiExp,
+  resolveRevocationTarget,
   resolveMcpTtlSeconds,
   MCP_TOKEN_USE,
 } from './mcpTokens.js';
@@ -1733,51 +1733,32 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
-  // Revoke a scoped MCP token by jti. The caller may pass either the raw
-  // `token` (we decode its jti+exp) or an explicit `{ jti, exp }`. A user may
-  // only revoke their OWN tokens — when a raw token is given we verify its sub
-  // matches the caller; an explicit jti is recorded against the caller's id.
+  // Revoke a scoped MCP token. The caller MUST present the still-valid raw
+  // `token` they want killed — the signature is cryptographically verified and
+  // its `sub` must match the caller (see resolveRevocationTarget). There is no
+  // revoke-by-bare-jti path: tokens are stateless/unstored, so bare-jti
+  // ownership can't be proven, and an already-expired token needs no revocation
+  // (it's dead by exp). Revocation == add jti to the list; the gateway rejects
+  // it until its short exp.
   app.post('/api/mcp/tokens/revoke', requireSessionOrBearer, async (req: Request, res: Response) => {
     try {
       const userId = mcpResolveUserId(req);
       if (!userId) {
         return res.status(401).json({ error: 'Authentication required.' });
       }
-
-      let jti: string | null = null;
-      let exp: number | null = null;
-
-      if (typeof req.body?.token === 'string' && req.body.token.length > 0) {
-        const decoded = decodeMcpJtiExp(req.body.token);
-        jti = decoded.jti;
-        exp = decoded.exp;
-        // Ownership: a raw token must belong to the caller. We re-derive sub
-        // from the token payload and compare. (Signature isn't re-checked here
-        // — revoking a forged/garbage jti is harmless; it just adds a row.)
-        const payloadPart = req.body.token.split('.')[1];
-        if (payloadPart) {
-          try {
-            const sub = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8')).sub;
-            if (sub && sub !== userId) {
-              return res.status(403).json({ error: 'Cannot revoke another user\'s token' });
-            }
-          } catch { /* malformed — fall through to validation below */ }
-        }
-      } else if (typeof req.body?.jti === 'string' && req.body.jti.length > 0) {
-        jti = req.body.jti;
-        // exp optional; default to now + max ttl so the row survives long
-        // enough to matter, then GC removes it.
-        exp = typeof req.body?.exp === 'number' ? req.body.exp : Math.floor(Date.now() / 1000) + 24 * 3600;
+      if (typeof req.body?.token !== 'string' || req.body.token.length === 0) {
+        return res.status(400).json({ error: 'Provide the token to revoke' });
       }
 
-      if (!jti) {
-        return res.status(400).json({ error: 'Provide a token or a jti to revoke' });
+      const target = resolveRevocationTarget(req.body.token, config.jwtSecret, userId);
+      if (!target.ok) {
+        return res.status(target.status).json({ error: target.error });
       }
 
-      const inserted = await revokeMcpJti(jti, userId, exp ?? Math.floor(Date.now() / 1000) + 24 * 3600, 'user_revoke');
-      console.log(`[webui] MCP token revoke by ${userId.slice(0, 8)}… jti=${jti.slice(0, 8)}… new=${inserted}`);
+      const inserted = await revokeMcpJti(target.jti, userId, target.exp, 'user_revoke');
+      console.log(`[webui] MCP token revoke by ${userId.slice(0, 8)}… jti=${target.jti.slice(0, 8)}… new=${inserted}`);
 
-      res.json({ revoked: true, jti, alreadyRevoked: !inserted });
+      res.json({ revoked: true, jti: target.jti, alreadyRevoked: !inserted });
     } catch (error) {
       console.error('[webui] Error revoking MCP token:', error);
       res.status(500).json({ error: 'Failed to revoke MCP token' });

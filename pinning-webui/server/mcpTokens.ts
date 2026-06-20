@@ -276,6 +276,46 @@ export function verifyMcpToken(
   return decoded as unknown as McpTokenClaims;
 }
 
+/**
+ * Decide what (if anything) a revoke request may revoke. SECURITY-CRITICAL:
+ * this is the access-control gate for revocation. It CRYPTOGRAPHICALLY VERIFIES
+ * the presented token before trusting any claim, so an attacker cannot take
+ * their own valid token, swap in a victim's `jti`, and have the (now-broken)
+ * signature pass — verification fails first.
+ *
+ * Returns either the revocation target (`jti`/`exp` from the VERIFIED claims)
+ * or an error with the HTTP status the handler should return:
+ *   - token fails verification (bad sig / expired / wrong kind) → 400
+ *   - token verifies but belongs to a different user            → 403
+ *
+ * There is deliberately NO "revoke by bare jti" path: MCP tokens are stateless
+ * and never stored server-side, so ownership of a bare jti cannot be
+ * established — a caller must PRESENT the still-valid token they want killed.
+ * (Already-expired tokens need no revocation: they are dead by `exp`.) A future
+ * "revoke all my tokens" would be a per-user epoch claim the gateway compares,
+ * not a bare-jti revoke.
+ */
+export function resolveRevocationTarget(
+  token: string,
+  jwtSecret: string,
+  callerUserId: string,
+):
+  | { ok: true; jti: string; exp: number; userId: string }
+  | { ok: false; status: 400 | 403; error: string } {
+  let claims: McpTokenClaims;
+  try {
+    claims = verifyMcpToken(token, jwtSecret);
+  } catch {
+    // Bad signature, expired, or not a well-formed MCP token. We don't leak
+    // which — a forged/tampered token is indistinguishable from junk here.
+    return { ok: false, status: 400, error: 'invalid or expired token' };
+  }
+  if (claims.sub !== callerUserId) {
+    return { ok: false, status: 403, error: 'cannot revoke another user\'s token' };
+  }
+  return { ok: true, jti: claims.jti, exp: claims.exp, userId: claims.sub };
+}
+
 /** Decode the JOSE header (base64url JSON) without verifying — for `typ`. */
 export function decodeJwtHeader(token: string): { alg?: string; typ?: string } | null {
   const part = token.split('.')[0];

@@ -21,6 +21,7 @@ import { emailToUserId } from '../server/utils/hash.js';
 import {
   mintMcpToken,
   verifyMcpToken,
+  resolveRevocationTarget,
   resolveMcpTtlSeconds,
   decodeMcpJtiExp,
   decodeJwtHeader,
@@ -193,6 +194,55 @@ describe('MCP scope claim — the P12 contract', () => {
   });
 });
 
+describe('resolveRevocationTarget — revocation access control (security-critical)', () => {
+  it('returns the jti+exp for the caller\'s OWN valid token', () => {
+    const { token, claims } = mintMcpToken(USER_ID, JWT_SECRET);
+    const r = resolveRevocationTarget(token, JWT_SECRET, USER_ID);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.jti).toBe(claims.jti);
+      expect(r.exp).toBe(claims.exp);
+      expect(r.userId).toBe(USER_ID);
+    }
+  });
+
+  it('REJECTS (403) a token belonging to a DIFFERENT user', () => {
+    const victimToken = mintMcpToken(USER_ID, JWT_SECRET).token;
+    const attackerId = emailToUserId('attacker@example.com');
+    const r = resolveRevocationTarget(victimToken, JWT_SECRET, attackerId);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe(403);
+  });
+
+  it('REJECTS (400) the swapped-jti attack: own token, payload edited to a victim jti', () => {
+    // Attacker holds a valid token, edits its payload to insert a victim's jti.
+    // Editing the payload breaks the HS256 signature → verification fails → 400.
+    const attackerId = emailToUserId('attacker@example.com');
+    const { token } = mintMcpToken(attackerId, JWT_SECRET);
+    const [h, p, s] = token.split('.');
+    const payload = JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
+    payload.jti = 'victims-jti-to-revoke';
+    const tampered = `${h}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.${s}`;
+    const r = resolveRevocationTarget(tampered, JWT_SECRET, attackerId);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe(400);
+  });
+
+  it('REJECTS (400) an expired token (already dead by exp — no revocation needed)', () => {
+    const past = Math.floor(Date.now() / 1000) - 10_000;
+    const { token } = mintMcpToken(USER_ID, JWT_SECRET, { nowSeconds: past, ttlSeconds: 60 });
+    const r = resolveRevocationTarget(token, JWT_SECRET, USER_ID);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe(400);
+  });
+
+  it('REJECTS (400) garbage / non-MCP input', () => {
+    const r = resolveRevocationTarget('not.a.jwt', JWT_SECRET, USER_ID);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe(400);
+  });
+});
+
 // ============================================================================
 // 2. INTEGRATION — the endpoints over HTTP (requires Postgres)
 // ============================================================================
@@ -356,12 +406,22 @@ describe.runIf(pgAvailable)('MCP token endpoints', () => {
     expect(res.status).toBe(401);
   });
 
-  it('revoke with neither token nor jti → 400', async () => {
+  it('revoke without a token → 400', async () => {
     const bearer = await makeBearer(USER_ID);
     const res = await request(app)
       .post('/api/mcp/tokens/revoke')
       .set('Authorization', `Bearer ${bearer}`)
       .send({});
+    expect(res.status).toBe(400);
+  });
+
+  it('revoke by bare jti is NOT supported → 400 (must present the token)', async () => {
+    const bearer = await makeBearer(USER_ID);
+    const minted = await request(app).post('/api/mcp/tokens').set('Authorization', `Bearer ${bearer}`).send({});
+    const res = await request(app)
+      .post('/api/mcp/tokens/revoke')
+      .set('Authorization', `Bearer ${bearer}`)
+      .send({ jti: minted.body.jti }); // bare jti — no token
     expect(res.status).toBe(400);
   });
 });

@@ -269,6 +269,33 @@ const testConfig: AppConfig = {
   systemKey: 'test-system-key-12345',
 };
 
+// Auth-boundary tests need NO database: an unauthenticated request is rejected
+// by requireSessionOrBearer before any query() runs. These ALWAYS execute
+// (the "Unauthenticated → 401" requirement must be a green test, not a skip).
+describe('MCP endpoints — auth boundary (no DB)', () => {
+  let app: Express;
+  beforeAll(() => {
+    app = createApp(testConfig, { skipRateLimit: true }).app;
+  });
+
+  it('POST /api/mcp/tokens → 401 unauthenticated', async () => {
+    const res = await request(app).post('/api/mcp/tokens').send({});
+    expect(res.status).toBe(401);
+  });
+  it('POST /api/mcp/tokens/refresh → 401 unauthenticated', async () => {
+    const res = await request(app).post('/api/mcp/tokens/refresh').send({});
+    expect(res.status).toBe(401);
+  });
+  it('POST /api/mcp/tokens/revoke → 401 unauthenticated', async () => {
+    const res = await request(app).post('/api/mcp/tokens/revoke').send({ token: 'x' });
+    expect(res.status).toBe(401);
+  });
+  it('GET /api/mcp/tokens/revocations → 401 without system key / admin', async () => {
+    const res = await request(app).get('/api/mcp/tokens/revocations');
+    expect(res.status).toBe(401);
+  });
+});
+
 describe.runIf(pgAvailable)('MCP token endpoints', () => {
   let app: Express;
 
@@ -294,11 +321,6 @@ describe.runIf(pgAvailable)('MCP token endpoints', () => {
   async function makeBearer(userId: string): Promise<string> {
     return createApiKey(userId, JWT_SECRET, generateJwtApiKey);
   }
-
-  it('POST /api/mcp/tokens → 401 when unauthenticated', async () => {
-    const res = await request(app).post('/api/mcp/tokens').send({});
-    expect(res.status).toBe(401);
-  });
 
   it('POST /api/mcp/tokens (Bearer) mints a scoped token for the user', async () => {
     const bearer = await makeBearer(USER_ID);

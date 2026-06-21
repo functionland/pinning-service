@@ -28,6 +28,8 @@ import {
   decodeMcpJtiExp,
   decodeJwtHeader,
   buildMcpScopeClaim,
+  normalizeMcpPubB64,
+  getCnfMcpPubB64,
   MCP_TOKEN_TYP,
   MCP_TOKEN_USE,
   MCP_TOKEN_ISS,
@@ -35,10 +37,33 @@ import {
   MCP_SCOPE_VERSION,
   MCP_WORKSPACE_BUCKET,
   MCP_WORKSPACE_PREFIX,
+  MCP_PUBKEY_BYTES,
   MCP_TOKEN_TTL_DEFAULT_SECONDS,
   MCP_TOKEN_TTL_MIN_SECONDS,
   MCP_TOKEN_TTL_MAX_SECONDS,
 } from '../server/mcpTokens.js';
+
+import {
+  validateGrantsPayload,
+  MCP_GRANTS_MAX_PER_REQUEST,
+} from '../server/mcpGrants.js';
+
+// A real 32-byte X25519-shaped public key, standard-base64 (FxFiles convention).
+const MCP_PUB_A = Buffer.from(Array.from({ length: 32 }, (_, i) => i + 1)).toString('base64');
+const MCP_PUB_B = Buffer.from(Array.from({ length: 32 }, (_, i) => 200 - i)).toString('base64');
+
+// A minimal serialized ShareToken (only the outer envelope matters to the store).
+function sampleTokenJson(scope = 'photos/2024'): string {
+  return JSON.stringify({ id: 'tok-' + scope, pathScope: scope, permissions: 'readOnly' });
+}
+function sampleGrant(scope = 'photos/2024', expires_at?: number | null) {
+  return {
+    scope,
+    permissions: { can_read: true, can_write: false, can_delete: false },
+    token_json: sampleTokenJson(scope),
+    ...(expires_at !== undefined ? { expires_at } : {}),
+  };
+}
 
 const JWT_SECRET = 'test-jwt-secret-for-testing-only';
 // A 64-hex user_id, the real shape (SHA-256 of an email).
@@ -199,6 +224,181 @@ describe('MCP scope claim — the P12 contract', () => {
   });
 });
 
+// ============================================================================
+// 1b. CONNECTION-BINDING cnf claim (P15a) — always runs, no database
+// ============================================================================
+
+describe('normalizeMcpPubB64 — strict 32-byte pubkey validation', () => {
+  it('accepts standard-base64 of a 32-byte key and returns canonical form', () => {
+    expect(normalizeMcpPubB64(MCP_PUB_A)).toBe(MCP_PUB_A);
+    // round-trips to exactly 32 bytes
+    expect(Buffer.from(normalizeMcpPubB64(MCP_PUB_A)!, 'base64').length).toBe(MCP_PUBKEY_BYTES);
+  });
+
+  it('accepts the url-safe alphabet and normalizes it to standard base64', () => {
+    const urlSafe = MCP_PUB_A.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const norm = normalizeMcpPubB64(urlSafe);
+    expect(norm).toBe(MCP_PUB_A); // canonical standard form, padded
+  });
+
+  it('REJECTS a wrong-size key (16 bytes), empty, non-string, and junk', () => {
+    const sixteen = Buffer.alloc(16, 7).toString('base64');
+    expect(normalizeMcpPubB64(sixteen)).toBeNull();
+    const fortyEight = Buffer.alloc(48, 7).toString('base64');
+    expect(normalizeMcpPubB64(fortyEight)).toBeNull();
+    expect(normalizeMcpPubB64('')).toBeNull();
+    expect(normalizeMcpPubB64(undefined)).toBeNull();
+    expect(normalizeMcpPubB64(null)).toBeNull();
+    expect(normalizeMcpPubB64(123 as unknown)).toBeNull();
+    expect(normalizeMcpPubB64('not base64!!! ***')).toBeNull();
+  });
+});
+
+describe('connection-bound mint + verify (cnf claim)', () => {
+  it('mintMcpToken with mcpPubB64 embeds a top-level cnf SIBLING of mcp', () => {
+    const { token, claims } = mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: MCP_PUB_A });
+    expect(claims.cnf).toEqual({ mcp_pub_b64: MCP_PUB_A });
+
+    // Decode raw payload: cnf is at the TOP LEVEL, not under mcp.
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    expect(decoded.cnf).toEqual({ mcp_pub_b64: MCP_PUB_A });
+    expect(decoded.mcp.cnf).toBeUndefined(); // never a child of mcp
+    expect(decoded.mcp.v).toBe(1); // mcp claim unchanged
+  });
+
+  it('default mint (no mcpPubB64) produces NO cnf key — P11 byte-compat', () => {
+    const { token, claims } = mintMcpToken(USER_ID, JWT_SECRET);
+    expect(claims.cnf).toBeUndefined();
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    expect('cnf' in decoded).toBe(false);
+  });
+
+  it('verifyMcpToken exposes cnf.mcp_pub_b64 via getCnfMcpPubB64', () => {
+    const { token } = mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: MCP_PUB_A });
+    const claims = verifyMcpToken(token, JWT_SECRET);
+    expect(getCnfMcpPubB64(claims)).toBe(MCP_PUB_A);
+  });
+
+  it('verifyMcpToken on an UNBOUND token returns null connection (no crash)', () => {
+    const { token } = mintMcpToken(USER_ID, JWT_SECRET);
+    const claims = verifyMcpToken(token, JWT_SECRET);
+    expect(claims.cnf).toBeUndefined();
+    expect(getCnfMcpPubB64(claims)).toBeNull();
+  });
+
+  it('mintMcpToken FAILS CLOSED on a malformed mcpPubB64 (never issues unbound-as-bound)', () => {
+    expect(() => mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: 'too-short' })).toThrow(/mcp_pub_b64/);
+    const sixteen = Buffer.alloc(16, 1).toString('base64');
+    expect(() => mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: sixteen })).toThrow(/32-byte/);
+  });
+
+  it('verifyMcpToken REJECTS a token carrying a malformed cnf (tamper guard)', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const forged = jwt.sign(
+      {
+        iss: MCP_TOKEN_ISS, aud: MCP_TOKEN_AUD, sub: USER_ID, jti: 'x',
+        iat: now, nbf: now, exp: now + 600, token_use: MCP_TOKEN_USE,
+        mcp: { v: 1, scopes: [{ bucket: MCP_WORKSPACE_BUCKET, prefix: MCP_WORKSPACE_PREFIX, perms: ['read'] }] },
+        cnf: { mcp_pub_b64: 'not-a-32-byte-key' },
+      },
+      JWT_SECRET,
+      { algorithm: 'HS256', header: { alg: 'HS256', typ: MCP_TOKEN_TYP } },
+    );
+    expect(() => verifyMcpToken(forged, JWT_SECRET)).toThrow(/cnf/);
+  });
+
+  it('two tokens bound to DIFFERENT connections expose different cnf', () => {
+    const a = verifyMcpToken(mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: MCP_PUB_A }).token, JWT_SECRET);
+    const b = verifyMcpToken(mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: MCP_PUB_B }).token, JWT_SECRET);
+    expect(getCnfMcpPubB64(a)).toBe(MCP_PUB_A);
+    expect(getCnfMcpPubB64(b)).toBe(MCP_PUB_B);
+    expect(getCnfMcpPubB64(a)).not.toBe(getCnfMcpPubB64(b));
+  });
+});
+
+// ============================================================================
+// 1c. GRANT PAYLOAD VALIDATION (P15a) — pure, always runs, no database
+// ============================================================================
+
+describe('validateGrantsPayload — request-shape validation (pure)', () => {
+  it('accepts a well-formed payload and normalizes the pubkey', () => {
+    const r = validateGrantsPayload({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant()] });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.mcpPubB64).toBe(MCP_PUB_A);
+      expect(r.value.grants).toHaveLength(1);
+      expect(r.value.grants[0].permissions).toEqual({ can_read: true, can_write: false, can_delete: false });
+      expect(r.value.grants[0].expires_at).toBeNull(); // omitted ⇒ null
+    }
+  });
+
+  it('carries a numeric expires_at through (floored)', () => {
+    const r = validateGrantsPayload({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant('x', 1893456000.9)] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.grants[0].expires_at).toBe(1893456000);
+  });
+
+  it('REJECTS a wrong-size / missing pubkey (400)', () => {
+    const sixteen = Buffer.alloc(16, 1).toString('base64');
+    const r1 = validateGrantsPayload({ mcp_pub_b64: sixteen, grants: [sampleGrant()] });
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) expect(r1.status).toBe(400);
+    const r2 = validateGrantsPayload({ grants: [sampleGrant()] });
+    expect(r2.ok).toBe(false);
+  });
+
+  it('REJECTS permissions missing one of the three bools (400)', () => {
+    const bad = { scope: 's', permissions: { can_read: true, can_write: false }, token_json: sampleTokenJson() };
+    const r = validateGrantsPayload({ mcp_pub_b64: MCP_PUB_A, grants: [bad] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.status).toBe(400);
+      expect(r.error).toMatch(/permissions/);
+    }
+  });
+
+  it('REJECTS a non-boolean permission value (400)', () => {
+    const bad = { scope: 's', permissions: { can_read: 'yes', can_write: false, can_delete: false }, token_json: sampleTokenJson() };
+    const r = validateGrantsPayload({ mcp_pub_b64: MCP_PUB_A, grants: [bad] });
+    expect(r.ok).toBe(false);
+  });
+
+  it('REJECTS a token_json that is not valid JSON (400)', () => {
+    const bad = { scope: 's', permissions: { can_read: true, can_write: false, can_delete: false }, token_json: 'not-json{{{' };
+    const r = validateGrantsPayload({ mcp_pub_b64: MCP_PUB_A, grants: [bad] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/JSON/);
+  });
+
+  it('REJECTS an empty scope and an empty grants array (400)', () => {
+    const r1 = validateGrantsPayload({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant('')] });
+    expect(r1.ok).toBe(false);
+    const r2 = validateGrantsPayload({ mcp_pub_b64: MCP_PUB_A, grants: [] });
+    expect(r2.ok).toBe(false);
+  });
+
+  it('REJECTS a non-object body / non-array grants (400)', () => {
+    expect(validateGrantsPayload(null).ok).toBe(false);
+    expect(validateGrantsPayload('x').ok).toBe(false);
+    expect(validateGrantsPayload({ mcp_pub_b64: MCP_PUB_A, grants: 'nope' }).ok).toBe(false);
+  });
+
+  it('accepts exactly the cap (1000) and REJECTS one over (413)', () => {
+    const atCap = Array.from({ length: MCP_GRANTS_MAX_PER_REQUEST }, (_, i) => sampleGrant('s' + i));
+    const ok = validateGrantsPayload({ mcp_pub_b64: MCP_PUB_A, grants: atCap });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.value.grants).toHaveLength(1000);
+
+    const overCap = Array.from({ length: MCP_GRANTS_MAX_PER_REQUEST + 1 }, (_, i) => sampleGrant('s' + i));
+    const over = validateGrantsPayload({ mcp_pub_b64: MCP_PUB_A, grants: overCap });
+    expect(over.ok).toBe(false);
+    if (!over.ok) {
+      expect(over.status).toBe(413);
+      expect(over.error).toMatch(/1000/);
+    }
+  });
+});
+
 describe('resolveRevocationTarget — revocation access control (security-critical)', () => {
   it('returns the jti+exp for the caller\'s OWN valid token', () => {
     const { token, claims } = mintMcpToken(USER_ID, JWT_SECRET);
@@ -298,6 +498,35 @@ describe('MCP endpoints — auth boundary (no DB)', () => {
   it('GET /api/mcp/tokens/revocations → 401 without system key / admin', async () => {
     const res = await request(app).get('/api/mcp/tokens/revocations');
     expect(res.status).toBe(401);
+  });
+
+  // P15a grant endpoints — auth boundary (no DB needed).
+  it('POST /api/mcp/grants → 401 unauthenticated', async () => {
+    const res = await request(app).post('/api/mcp/grants').send({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant()] });
+    expect(res.status).toBe(401);
+  });
+  it('POST /api/mcp/grants/revoke → 401 unauthenticated', async () => {
+    const res = await request(app).post('/api/mcp/grants/revoke').send({ id: 'x' });
+    expect(res.status).toBe(401);
+  });
+  it('GET /api/mcp/grants → 401 without a Bearer MCP token', async () => {
+    const res = await request(app).get('/api/mcp/grants');
+    expect(res.status).toBe(401);
+  });
+  it('GET /api/mcp/grants → 401 when the Bearer is a storage JWT (not an MCP token)', async () => {
+    // A broad storage JWT must NOT be honoured as an MCP token (token-confusion guard).
+    const storageToken = generateJwtApiKey(USER_ID, JWT_SECRET);
+    const res = await request(app).get('/api/mcp/grants').set('Authorization', `Bearer ${storageToken}`);
+    expect(res.status).toBe(401);
+  });
+  it('GET /api/mcp/grants → empty for a VALID but UNBOUND token (no cnf) — the security boundary, no DB', async () => {
+    // SECURITY: an unbound token has no connection identity, so it must get an
+    // EMPTY grant set, never all the user's grants. cnf-null is checked before
+    // any DB access, so this runs green without Postgres.
+    const unbound = mintMcpToken(USER_ID, JWT_SECRET).token; // no mcpPubB64 ⇒ no cnf
+    const res = await request(app).get('/api/mcp/grants').set('Authorization', `Bearer ${unbound}`);
+    expect(res.status).toBe(200);
+    expect(res.body.grants).toEqual([]);
   });
 });
 
@@ -450,5 +679,170 @@ describe.runIf(pgAvailable)('MCP token endpoints', () => {
       .set('Authorization', `Bearer ${bearer}`)
       .send({ jti: minted.body.jti }); // bare jti — no token
     expect(res.status).toBe(400);
+  });
+});
+
+// ============================================================================
+// 3. INTEGRATION — the P15a grant endpoints over HTTP (requires Postgres)
+// ============================================================================
+
+describe.runIf(pgAvailable)('MCP grant endpoints', () => {
+  let app: Express;
+
+  beforeAll(async () => {
+    const result = createApp(testConfig, { skipRateLimit: true });
+    app = result.app;
+    // GET does a revocation lookup, so BOTH tables must exist.
+    const { createMcpGrantsTable, createMcpRevocationTable } = await import('../server/database/postgres.js');
+    await createMcpGrantsTable();
+    await createMcpRevocationTable();
+  });
+
+  afterAll(async () => {
+    await closePool();
+  });
+
+  beforeEach(async () => {
+    await query('DELETE FROM mcp_grants').catch(() => {});
+    await query('DELETE FROM mcp_revoked_tokens').catch(() => {});
+    await query('DELETE FROM api_keys').catch(() => {});
+  });
+
+  async function makeBearer(userId: string): Promise<string> {
+    return createApiKey(userId, JWT_SECRET, generateJwtApiKey);
+  }
+  // A connection-bound MCP JWT for fetching grants.
+  function mcpBound(userId: string, pub: string): string {
+    return mintMcpToken(userId, JWT_SECRET, { mcpPubB64: pub }).token;
+  }
+
+  it('POST inserts grants and returns ids (201)', async () => {
+    const bearer = await makeBearer(USER_ID);
+    const res = await request(app)
+      .post('/api/mcp/grants')
+      .set('Authorization', `Bearer ${bearer}`)
+      .send({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant('a/1'), sampleGrant('a/2')] });
+    expect(res.status).toBe(201);
+    expect(res.body.inserted).toBe(2);
+    expect(res.body.ids).toHaveLength(2);
+  });
+
+  it('POST rejects a malformed payload (400) and the over-cap request (413)', async () => {
+    const bearer = await makeBearer(USER_ID);
+    const bad = await request(app)
+      .post('/api/mcp/grants')
+      .set('Authorization', `Bearer ${bearer}`)
+      .send({ mcp_pub_b64: MCP_PUB_A, grants: [{ scope: 's', permissions: { can_read: true } }] });
+    expect(bad.status).toBe(400);
+  });
+
+  // ── THE leak-prevention assertion ──────────────────────────────────────
+  it('GET returns ONLY connection A grants, NEVER connection B (cross-agent isolation)', async () => {
+    const bearer = await makeBearer(USER_ID);
+    // Same user publishes grants for TWO different connections.
+    await request(app).post('/api/mcp/grants').set('Authorization', `Bearer ${bearer}`)
+      .send({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant('A/photos'), sampleGrant('A/docs')] });
+    await request(app).post('/api/mcp/grants').set('Authorization', `Bearer ${bearer}`)
+      .send({ mcp_pub_b64: MCP_PUB_B, grants: [sampleGrant('B/secret')] });
+
+    // Connection A's MCP fetches with its OWN bound token.
+    const resA = await request(app).get('/api/mcp/grants').set('Authorization', `Bearer ${mcpBound(USER_ID, MCP_PUB_A)}`);
+    expect(resA.status).toBe(200);
+    // Assert SET membership (bulk insert shares created_at ⇒ order is non-deterministic).
+    const scopesA = new Set(resA.body.grants.map((g: any) => g.scope));
+    expect(scopesA).toEqual(new Set(['A/photos', 'A/docs']));
+    expect(scopesA.has('B/secret')).toBe(false); // ← the boundary: B's path is invisible to A
+
+    // Connection B sees only its own.
+    const resB = await request(app).get('/api/mcp/grants').set('Authorization', `Bearer ${mcpBound(USER_ID, MCP_PUB_B)}`);
+    const scopesB = new Set(resB.body.grants.map((g: any) => g.scope));
+    expect(scopesB).toEqual(new Set(['B/secret']));
+    expect(scopesB.has('A/photos')).toBe(false);
+
+    // The returned rows carry the full envelope the MCP needs to merge.
+    const one = resA.body.grants[0];
+    expect(one).toHaveProperty('id');
+    expect(one).toHaveProperty('token_json');
+    expect(one.permissions).toEqual({ can_read: true, can_write: false, can_delete: false });
+  });
+
+  it('GET excludes a revoked grant row', async () => {
+    const bearer = await makeBearer(USER_ID);
+    const post = await request(app).post('/api/mcp/grants').set('Authorization', `Bearer ${bearer}`)
+      .send({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant('keep'), sampleGrant('drop')] });
+    expect(post.status).toBe(201);
+
+    // Revoke the "drop" grant by (mcp_pub_b64, scope).
+    const rev = await request(app).post('/api/mcp/grants/revoke').set('Authorization', `Bearer ${bearer}`)
+      .send({ mcp_pub_b64: MCP_PUB_A, scope: 'drop' });
+    expect(rev.status).toBe(200);
+    expect(rev.body.revoked).toBe(1);
+
+    const got = await request(app).get('/api/mcp/grants').set('Authorization', `Bearer ${mcpBound(USER_ID, MCP_PUB_A)}`);
+    const scopes = got.body.grants.map((g: any) => g.scope);
+    expect(scopes).toContain('keep');
+    expect(scopes).not.toContain('drop');
+  });
+
+  it('revoke by id drops exactly that row', async () => {
+    const bearer = await makeBearer(USER_ID);
+    const post = await request(app).post('/api/mcp/grants').set('Authorization', `Bearer ${bearer}`)
+      .send({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant('one'), sampleGrant('two')] });
+    const idToRevoke = post.body.ids[0];
+
+    const rev = await request(app).post('/api/mcp/grants/revoke').set('Authorization', `Bearer ${bearer}`)
+      .send({ id: idToRevoke });
+    expect(rev.status).toBe(200);
+    expect(rev.body.revoked).toBe(1);
+
+    const got = await request(app).get('/api/mcp/grants').set('Authorization', `Bearer ${mcpBound(USER_ID, MCP_PUB_A)}`);
+    expect(got.body.grants).toHaveLength(1); // one of the two remains
+  });
+
+  it('GET excludes an EXPIRED grant', async () => {
+    const bearer = await makeBearer(USER_ID);
+    const past = Math.floor(Date.now() / 1000) - 100;
+    const future = Math.floor(Date.now() / 1000) + 10_000;
+    await request(app).post('/api/mcp/grants').set('Authorization', `Bearer ${bearer}`)
+      .send({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant('alive', future), sampleGrant('dead', past)] });
+
+    const got = await request(app).get('/api/mcp/grants').set('Authorization', `Bearer ${mcpBound(USER_ID, MCP_PUB_A)}`);
+    const scopes = got.body.grants.map((g: any) => g.scope);
+    expect(scopes).toContain('alive');
+    expect(scopes).not.toContain('dead');
+  });
+
+  it('GET with a REVOKED MCP token → 401 (revocation enforced on the fetch path)', async () => {
+    const bearer = await makeBearer(USER_ID);
+    await request(app).post('/api/mcp/grants').set('Authorization', `Bearer ${bearer}`)
+      .send({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant('x')] });
+
+    const bound = mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: MCP_PUB_A });
+    // Revoke that exact token via the token-revoke endpoint.
+    const rev = await request(app).post('/api/mcp/tokens/revoke').set('Authorization', `Bearer ${bearer}`)
+      .send({ token: bound.token });
+    expect(rev.status).toBe(200);
+
+    const got = await request(app).get('/api/mcp/grants').set('Authorization', `Bearer ${bound.token}`);
+    expect(got.status).toBe(401);
+  });
+
+  it("a user cannot revoke ANOTHER user's grant by id (user-scoped)", async () => {
+    const victimBearer = await makeBearer(USER_ID);
+    const post = await request(app).post('/api/mcp/grants').set('Authorization', `Bearer ${victimBearer}`)
+      .send({ mcp_pub_b64: MCP_PUB_A, grants: [sampleGrant('victim')] });
+    const victimGrantId = post.body.ids[0];
+
+    const attackerId = emailToUserId('attacker@example.com');
+    const attackerBearer = await makeBearer(attackerId);
+    const rev = await request(app).post('/api/mcp/grants/revoke').set('Authorization', `Bearer ${attackerBearer}`)
+      .send({ id: victimGrantId });
+    // Revoke is user-scoped: attacker's revoke matches 0 of the victim's rows.
+    expect(rev.status).toBe(200);
+    expect(rev.body.revoked).toBe(0);
+
+    // Victim's grant is still live.
+    const got = await request(app).get('/api/mcp/grants').set('Authorization', `Bearer ${mcpBound(USER_ID, MCP_PUB_A)}`);
+    expect(got.body.grants.map((g: any) => g.scope)).toContain('victim');
   });
 });

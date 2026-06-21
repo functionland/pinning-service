@@ -134,6 +134,20 @@ export interface McpScopeClaim {
   scopes: McpScopeEntry[];
 }
 
+/**
+ * Connection-binding confirmation claim (RFC 7800 §3.x, "cnf"). When present it
+ * pins the token to a specific MCP connection by carrying the MCP's X25519
+ * public key (base64 of the raw 32 bytes). This is what the P15a grant store
+ * reads to scope a `GET /api/mcp/grants` to a single connection — it is the
+ * security boundary preventing one agent from enumerating another agent's
+ * granted paths. It is a SIBLING of `mcp`, never a child, so the P12 gateway
+ * (which only parses `mcp.*`) is wholly unaffected: `cnf` is just an unknown
+ * top-level claim it ignores. ADDITIVE — absent ⇒ no binding (older flow).
+ */
+export interface McpCnfClaim {
+  mcp_pub_b64: string;
+}
+
 export interface McpTokenClaims {
   iss: string;
   aud: string;
@@ -144,6 +158,42 @@ export interface McpTokenClaims {
   exp: number;
   token_use: string;
   mcp: McpScopeClaim;
+  /** Present only when the token is connection-bound (see McpCnfClaim). */
+  cnf?: McpCnfClaim;
+}
+
+/** Length in raw bytes of an X25519 public key. */
+export const MCP_PUBKEY_BYTES = 32;
+
+/**
+ * Validate that `s` is the base64 of a 32-byte X25519 public key and return the
+ * canonical (standard-base64) string form, or `null` if invalid. FxFiles encodes
+ * recipient public keys with STANDARD base64 (`base64Encode`), so that is the
+ * canonical form we store; we also accept the URL-safe alphabet defensively, but
+ * the real invariant enforced everywhere is the decoded length === 32 bytes.
+ *
+ * Node's base64 decoder is lenient (it silently drops characters outside the
+ * alphabet), so we additionally gate the input with a strict character/shape
+ * check AND round-trip the re-encoding to reject anything that doesn't decode
+ * cleanly to exactly 32 bytes.
+ */
+export function normalizeMcpPubB64(s: unknown): string | null {
+  if (typeof s !== 'string' || s.length === 0) return null;
+  // 32 bytes → 44 base64 chars (with one '=' pad) for standard/url-safe.
+  // Accept both alphabets; allow optional padding.
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(s)) return null;
+  // Translate url-safe → standard so Buffer decodes uniformly.
+  const std = s.replace(/-/g, '+').replace(/_/g, '/');
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(std, 'base64');
+  } catch {
+    return null;
+  }
+  if (buf.length !== MCP_PUBKEY_BYTES) return null;
+  // Round-trip: the canonical standard-base64 re-encoding must decode back to
+  // the same 32 bytes. This rejects lenient-decoder false positives.
+  return buf.toString('base64');
 }
 
 /**
@@ -200,11 +250,35 @@ export interface MintMcpTokenResult {
 export function mintMcpToken(
   userId: string,
   jwtSecret: string,
-  opts?: { ttlSeconds?: number; perms?: McpPerm[]; bucket?: string; jti?: string; nowSeconds?: number },
+  opts?: {
+    ttlSeconds?: number;
+    perms?: McpPerm[];
+    bucket?: string;
+    jti?: string;
+    nowSeconds?: number;
+    /**
+     * OPTIONAL connection binding: base64 of the MCP's 32-byte X25519 pubkey.
+     * When provided, a top-level `cnf: { mcp_pub_b64 }` claim is embedded (RFC
+     * 7800 key-binding). FAIL-CLOSED: if present but not a valid 32-byte b64
+     * key, this throws — we never silently issue an UNBOUND token that the
+     * caller believes is bound. Absent ⇒ no `cnf` (older P11 flow, unchanged).
+     */
+    mcpPubB64?: string;
+  },
 ): MintMcpTokenResult {
   const now = opts?.nowSeconds ?? Math.floor(Date.now() / 1000);
   const ttl = resolveMcpTtlSeconds(opts?.ttlSeconds);
   const jti = opts?.jti ?? uuidv4();
+
+  let cnf: McpCnfClaim | undefined;
+  if (opts?.mcpPubB64 !== undefined) {
+    const normalized = normalizeMcpPubB64(opts.mcpPubB64);
+    if (!normalized) {
+      // Fail closed — do not mint an unbound token masquerading as bound.
+      throw new Error('mcp token: mcp_pub_b64 must be base64 of a 32-byte key');
+    }
+    cnf = { mcp_pub_b64: normalized };
+  }
 
   const claims: McpTokenClaims = {
     iss: MCP_TOKEN_ISS,
@@ -216,6 +290,9 @@ export function mintMcpToken(
     exp: now + ttl,
     token_use: MCP_TOKEN_USE,
     mcp: buildMcpScopeClaim(opts?.perms, opts?.bucket),
+    // `cnf` is a SIBLING of `mcp` (top-level). Emitted ONLY when bound so the
+    // default mint path stays byte-compatible with P11 (no `cnf` key at all).
+    ...(cnf ? { cnf } : {}),
   };
 
   // Sign the fully-formed claim set (we own iat/nbf/exp explicitly so the
@@ -283,7 +360,33 @@ export function verifyMcpToken(
   if (opts?.expectedSub && sub !== opts.expectedSub) {
     throw new Error('mcp token: sub mismatch');
   }
+
+  // `cnf` is OPTIONAL (additive). If present it MUST be a valid 32-byte pubkey
+  // b64 — a malformed cnf is a tampered/forged token, reject it. We rewrite the
+  // claim to the canonical (normalized) form so downstream string-equality
+  // against the stored grant row is exact regardless of b64 alphabet/padding.
+  const rawCnf = decoded.cnf as { mcp_pub_b64?: unknown } | undefined;
+  if (rawCnf !== undefined) {
+    const normalized = normalizeMcpPubB64(rawCnf?.mcp_pub_b64);
+    if (!normalized) {
+      throw new Error('mcp token: cnf.mcp_pub_b64 must be base64 of a 32-byte key');
+    }
+    (decoded as Record<string, unknown>).cnf = { mcp_pub_b64: normalized };
+  }
+
   return decoded as unknown as McpTokenClaims;
+}
+
+/**
+ * Extract the connection-binding pubkey from VERIFIED claims, or `null` when the
+ * token is unbound (no `cnf`). The grant store calls this and treats `null` as
+ * "no connection identity" → return zero grants (NEVER all the user's grants).
+ * Read this only off the result of `verifyMcpToken` — never off an unverified
+ * decode — so the binding cannot be spoofed.
+ */
+export function getCnfMcpPubB64(claims: McpTokenClaims): string | null {
+  const v = claims.cnf?.mcp_pub_b64;
+  return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
 /**

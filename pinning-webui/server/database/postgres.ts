@@ -870,6 +870,195 @@ export async function gcExpiredMcpRevocations(graceSeconds = 600, nowSeconds?: n
   return result.rowCount || 0;
 }
 
+// ============================================
+// MCP grant store (Phase 15a)
+// ============================================
+//
+// A "grant" lets a user hand a PAIRED MCP (AI) connection scoped access to their
+// REAL files. Each grant row holds a per-file `ShareToken` (the JSON whose
+// path_scope/permissions/expiry/id are PLAINTEXT; only the DEK inside is
+// HPKE-sealed to the MCP's X25519 pubkey, so storing it server-side is safe —
+// only the MCP secret can unwrap it). FxFiles publishes a batch (one token per
+// file in a folder/tag) under the user's id, bound to a connection pubkey
+// (`mcp_pub_b64`). The stateless MCP later GETs ITS grants and merges them.
+//
+// SECURITY BOUNDARY: grants are fetched ONLY by (user_id, mcp_pub_b64), where
+// the pubkey comes from the VERIFIED token `cnf` claim — see app.ts GET
+// /api/mcp/grants. This prevents agent A from enumerating agent B's granted
+// paths (a cross-agent metadata leak). `permissions` here are REAL-file ops
+// {can_read,can_write,can_delete} — distinct from the JWT `mcp` scope perms.
+
+export interface McpGrantRow {
+  id: string;
+  scope: string;
+  permissions: { can_read: boolean; can_write: boolean; can_delete: boolean };
+  token_json: string;
+  expires_at: number | null;
+}
+
+/** A grant to insert (id is generated server-side; user_id/pubkey passed separately). */
+export interface McpGrantInput {
+  scope: string;
+  permissions: { can_read: boolean; can_write: boolean; can_delete: boolean };
+  token_json: string;
+  expires_at?: number | null;
+}
+
+export async function createMcpGrantsTable(): Promise<void> {
+  await query(`
+    CREATE TABLE IF NOT EXISTS mcp_grants (
+      id UUID PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      mcp_pub_b64 VARCHAR(64) NOT NULL,
+      scope TEXT NOT NULL,
+      permissions JSONB NOT NULL,
+      token_json TEXT NOT NULL,
+      expires_at BIGINT,
+      revoked BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  // The hot path is listActiveGrantsForConnection(user_id, mcp_pub_b64) — index it.
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_mcp_grants_conn
+      ON mcp_grants(user_id, mcp_pub_b64)
+  `);
+  // GC sweep filters by expires_at.
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_mcp_grants_expires ON mcp_grants(expires_at)
+  `);
+}
+
+/**
+ * Bulk-insert grant rows for one (userId, mcpPubB64) connection. Each row gets a
+ * fresh UUID (generated in JS so we don't depend on pgcrypto). Returns the
+ * created ids (so the caller/user can later revoke by id). Uses a single
+ * multi-row INSERT for folder-scale efficiency. Caller is responsible for
+ * shape-validation + the per-request cap (see app.ts validateGrantsPayload).
+ */
+export async function insertMcpGrants(
+  userId: string,
+  mcpPubB64: string,
+  grants: McpGrantInput[],
+): Promise<string[]> {
+  if (grants.length === 0) return [];
+  const { v4: uuidv4 } = await import('uuid');
+
+  const ids: string[] = [];
+  const values: unknown[] = [];
+  const placeholders: string[] = [];
+  // 7 bound columns per row: id, user_id, mcp_pub_b64, scope, permissions, token_json, expires_at.
+  grants.forEach((g, i) => {
+    const id = uuidv4();
+    ids.push(id);
+    const base = i * 7;
+    placeholders.push(
+      `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`,
+    );
+    values.push(
+      id,
+      userId,
+      mcpPubB64,
+      g.scope,
+      JSON.stringify(g.permissions),
+      g.token_json,
+      g.expires_at ?? null,
+    );
+  });
+
+  await query(
+    `INSERT INTO mcp_grants
+       (id, user_id, mcp_pub_b64, scope, permissions, token_json, expires_at)
+     VALUES ${placeholders.join(', ')}`,
+    values,
+  );
+  return ids;
+}
+
+/**
+ * THE SECURITY-CRITICAL READ. List the active (not revoked, not expired) grants
+ * for exactly ONE connection: (userId, mcpPubB64). Both arguments MUST come from
+ * the VERIFIED MCP-JWT (sub + cnf.mcp_pub_b64) — never from a request param or
+ * header — so one agent cannot read another's grants. `nowSeconds` lets tests
+ * pin the clock. Never returns token rows for any other connection.
+ */
+export async function listActiveGrantsForConnection(
+  userId: string,
+  mcpPubB64: string,
+  nowSeconds?: number,
+): Promise<McpGrantRow[]> {
+  const now = nowSeconds ?? Math.floor(Date.now() / 1000);
+  const result = await query<{
+    id: string;
+    scope: string;
+    permissions: { can_read: boolean; can_write: boolean; can_delete: boolean };
+    token_json: string;
+    expires_at: string | number | null;
+  }>(
+    `SELECT id, scope, permissions, token_json, expires_at
+       FROM mcp_grants
+      WHERE user_id = $1
+        AND mcp_pub_b64 = $2
+        AND NOT revoked
+        AND (expires_at IS NULL OR expires_at > $3)
+      ORDER BY created_at ASC`,
+    [userId, mcpPubB64, now],
+  );
+  return result.rows.map((r) => ({
+    id: r.id,
+    scope: r.scope,
+    permissions: r.permissions,
+    token_json: r.token_json,
+    // pg returns BIGINT as string; normalize to number|null.
+    expires_at: r.expires_at == null ? null : Number(r.expires_at),
+  }));
+}
+
+/**
+ * Revoke grants for a user. Two scoping modes (the caller picks ONE):
+ *   - by `id`: revoke that single grant row.
+ *   - by `(mcpPubB64, scope)`: revoke all rows matching that connection+scope
+ *     (e.g. "stop sharing this folder with this agent").
+ * Always also constrained by `user_id = $1` so a user can only revoke THEIR OWN
+ * grants. Idempotent (re-revoking an already-revoked row is a no-op). Returns
+ * the number of rows newly affected.
+ */
+export async function revokeMcpGrant(
+  userId: string,
+  target: { id: string } | { mcpPubB64: string; scope: string },
+): Promise<number> {
+  let result;
+  if ('id' in target) {
+    result = await query(
+      'UPDATE mcp_grants SET revoked = TRUE WHERE user_id = $1 AND id = $2 AND NOT revoked',
+      [userId, target.id],
+    );
+  } else {
+    result = await query(
+      'UPDATE mcp_grants SET revoked = TRUE WHERE user_id = $1 AND mcp_pub_b64 = $2 AND scope = $3 AND NOT revoked',
+      [userId, target.mcpPubB64, target.scope],
+    );
+  }
+  return result.rowCount || 0;
+}
+
+/**
+ * GC grant rows that expired more than `graceSeconds` ago (default 600s).
+ * Revoked rows are kept until their token would have expired too (so a revoked
+ * grant with no expiry is retained — harmless, and preserves an audit trail);
+ * an explicit sweep of revoked rows can be added later if volume warrants.
+ * Returns the number of rows removed.
+ */
+export async function gcExpiredGrants(graceSeconds = 600, nowSeconds?: number): Promise<number> {
+  const now = nowSeconds ?? Math.floor(Date.now() / 1000);
+  const cutoff = now - graceSeconds;
+  const result = await query(
+    'DELETE FROM mcp_grants WHERE expires_at IS NOT NULL AND expires_at < $1',
+    [cutoff],
+  );
+  return result.rowCount || 0;
+}
+
 export default {
   createPostgresPool,
   getPool,
@@ -908,4 +1097,9 @@ export default {
   isMcpJtiRevoked,
   listRevokedMcpJtis,
   gcExpiredMcpRevocations,
+  createMcpGrantsTable,
+  insertMcpGrants,
+  listActiveGrantsForConnection,
+  revokeMcpGrant,
+  gcExpiredGrants,
 };

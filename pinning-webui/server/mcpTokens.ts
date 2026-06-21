@@ -34,7 +34,8 @@
  *       "scopes": [
  *         {
  *           "bucket": "fula-ai-workspace",
- *           "prefix": "<64-hex user_id>/",  // SERVER-DERIVED from sub; never client input
+ *           "prefix": "ai/",                // CONSTANT — the AI-workspace key
+ *                                           // namespace the MCP writes under
  *           "perms": ["read", "write", "list"]
  *         }
  *       ]
@@ -56,10 +57,15 @@
  *  9. mcp.v       === 1   (REJECT unknown major versions — fail closed)
  * 10. mcp.scopes is a non-empty array; for v1 exactly one scope entry.
  * 11. For each scope: bucket is a known AI-workspace bucket, perms ⊆
- *       {"read","write","list"}, and prefix === `${sub}/` EXACTLY.
- *       P12 must INDEPENDENTLY re-derive the expected prefix from `sub` and
- *       compare — it must NOT trust the embedded prefix blindly. This is what
- *       keeps user A's token off user B's objects.
+ *       {"read","write","list"}, and prefix === "ai/" EXACTLY (literal string
+ *       equality against the constant — NOT a per-key authorization rule). `ai/`
+ *       is the AI-workspace key namespace the
+ *       MCP actually writes under (keys are `ai/<category>/...` in
+ *       `fula-ai-workspace`; the gateway stores keys verbatim), so this prefix
+ *       must be the constant for real MCP ops to pass. CROSS-USER ISOLATION
+ *       does NOT come from this prefix — it comes from the gateway opening
+ *       buckets per `(hashed_user_id, bucket)` plus the JWT `sub`. P12 must
+ *       enforce `prefix === "ai/"`; it does NOT re-derive a per-user prefix.
  * 12. jti present AND not in the revocation set (see revocation section).
  *
  * Token-confusion guard: the existing long-lived storage JWTs share JWT_SECRET
@@ -83,8 +89,8 @@
  * FORWARD COMPATIBILITY
  * ────────────────────────────────────────────────────────────────────────────
  *  • `mcp.v` is the MAJOR version. Bump it for any breaking change (perm
- *    semantics, prefix derivation, multi-bucket). A gateway pinned to v1 MUST
- *    reject v2+.
+ *    semantics, the prefix value/rule, multi-bucket). A gateway pinned to v1
+ *    MUST reject v2+.
  *  • Multiple scope entries are reserved for a future version; v1 emits and a
  *    v1 gateway enforces exactly one. (The array shape is intentional so the
  *    contract doesn't have to change to support it later.)
@@ -104,6 +110,9 @@ export const MCP_SCOPE_VERSION = 1 as const;
 
 /** The single AI-workspace bucket an MCP token is scoped to in v1. */
 export const MCP_WORKSPACE_BUCKET = 'fula-ai-workspace';
+
+/** The AI-workspace key namespace the MCP writes under; matches fula-mcp store.rs. */
+export const MCP_WORKSPACE_PREFIX = 'ai/';
 
 /** Exhaustive v1 permission vocabulary. */
 export const MCP_PERMS = ['read', 'write', 'list'] as const;
@@ -138,13 +147,14 @@ export interface McpTokenClaims {
 }
 
 /**
- * Build the per-user scope claim. The prefix is DERIVED FROM `userId` here and
- * is the only thing that bounds the token to the user's own workspace — it must
- * never come from client input. `userId` is a 64-char hex string (no spaces,
- * no slashes, no `:`), so `${userId}/` is an unambiguous prefix boundary.
+ * Build the v1 scope claim. The prefix is the CONSTANT `ai/` (MCP_WORKSPACE_PREFIX)
+ * — the AI-workspace key namespace the MCP writes under (keys are `ai/<category>/...`
+ * in `fula-ai-workspace`; the gateway stores them verbatim), so a per-user prefix
+ * would reject every real MCP op. CROSS-USER ISOLATION is NOT this prefix's job: it
+ * comes from the gateway opening buckets per `(hashed_user_id, bucket)` plus the JWT
+ * `sub`. P12 enforces `prefix === "ai/"` (literal string equality on the claim).
  */
 export function buildMcpScopeClaim(
-  userId: string,
   perms: McpPerm[] = [...MCP_PERMS],
   bucket: string = MCP_WORKSPACE_BUCKET,
 ): McpScopeClaim {
@@ -153,7 +163,7 @@ export function buildMcpScopeClaim(
     scopes: [
       {
         bucket,
-        prefix: `${userId}/`,
+        prefix: MCP_WORKSPACE_PREFIX,
         perms,
       },
     ],
@@ -205,7 +215,7 @@ export function mintMcpToken(
     nbf: now,
     exp: now + ttl,
     token_use: MCP_TOKEN_USE,
-    mcp: buildMcpScopeClaim(userId, opts?.perms, opts?.bucket),
+    mcp: buildMcpScopeClaim(opts?.perms, opts?.bucket),
   };
 
   // Sign the fully-formed claim set (we own iat/nbf/exp explicitly so the
@@ -263,8 +273,8 @@ export function verifyMcpToken(
   }
   const sub = String(decoded.sub);
   for (const s of mcp.scopes) {
-    if (s.prefix !== `${sub}/`) {
-      throw new Error('mcp token: prefix does not match sub');
+    if (s.prefix !== MCP_WORKSPACE_PREFIX) {
+      throw new Error('mcp token: prefix must be the ai/ workspace namespace');
     }
     if (!Array.isArray(s.perms) || s.perms.some((p) => !MCP_PERMS.includes(p as McpPerm))) {
       throw new Error('mcp token: unknown perm');

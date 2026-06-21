@@ -5,7 +5,9 @@
  *  1. PURE-LOGIC tests (always run, no DB) — these PIN THE P12 CONTRACT: the
  *     exact scope-claim shape, mint/verify round-trip, TTL clamping, the
  *     token-confusion guard (a broad storage JWT must NOT pass as an MCP
- *     token), and the prefix/sub isolation invariant.
+ *     token), and the constant-prefix invariant (prefix === "ai/", the
+ *     AI-workspace key namespace; cross-user isolation is the gateway's
+ *     per-user bucket namespacing + the JWT `sub`, not the key prefix).
  *  2. INTEGRATION tests (describe.runIf(pgAvailable)) — the actual endpoints
  *     (mint / refresh / revoke / revocations) over HTTP, authenticated with a
  *     Bearer API-key. Skipped automatically when Postgres isn't reachable
@@ -32,6 +34,7 @@ import {
   MCP_TOKEN_AUD,
   MCP_SCOPE_VERSION,
   MCP_WORKSPACE_BUCKET,
+  MCP_WORKSPACE_PREFIX,
   MCP_TOKEN_TTL_DEFAULT_SECONDS,
   MCP_TOKEN_TTL_MIN_SECONDS,
   MCP_TOKEN_TTL_MAX_SECONDS,
@@ -46,12 +49,12 @@ const USER_ID = emailToUserId('mcp-test@example.com');
 // ============================================================================
 
 describe('MCP scope claim — the P12 contract', () => {
-  it('buildMcpScopeClaim derives prefix from userId and defaults to all perms', () => {
-    const claim = buildMcpScopeClaim(USER_ID);
+  it('buildMcpScopeClaim sets the constant ai/ prefix and defaults to all perms', () => {
+    const claim = buildMcpScopeClaim();
     expect(claim.v).toBe(MCP_SCOPE_VERSION);
     expect(claim.scopes).toHaveLength(1);
     expect(claim.scopes[0].bucket).toBe(MCP_WORKSPACE_BUCKET);
-    expect(claim.scopes[0].prefix).toBe(`${USER_ID}/`);
+    expect(claim.scopes[0].prefix).toBe(MCP_WORKSPACE_PREFIX);
     expect(claim.scopes[0].perms).toEqual(['read', 'write', 'list']);
   });
 
@@ -84,7 +87,7 @@ describe('MCP scope claim — the P12 contract', () => {
     expect(decoded.mcp.v).toBe(1);
     expect(decoded.mcp.scopes[0]).toEqual({
       bucket: MCP_WORKSPACE_BUCKET,
-      prefix: `${USER_ID}/`,
+      prefix: MCP_WORKSPACE_PREFIX,
       perms: ['read', 'write', 'list'],
     });
 
@@ -97,7 +100,7 @@ describe('MCP scope claim — the P12 contract', () => {
     const { token } = mintMcpToken(USER_ID, JWT_SECRET);
     const claims = verifyMcpToken(token, JWT_SECRET, { expectedSub: USER_ID });
     expect(claims.sub).toBe(USER_ID);
-    expect(claims.mcp.scopes[0].prefix).toBe(`${USER_ID}/`);
+    expect(claims.mcp.scopes[0].prefix).toBe(MCP_WORKSPACE_PREFIX);
   });
 
   it('verifyMcpToken REJECTS a broad storage JWT (token-confusion guard)', () => {
@@ -119,10 +122,12 @@ describe('MCP scope claim — the P12 contract', () => {
     expect(() => verifyMcpToken(token, JWT_SECRET)).toThrow();
   });
 
-  it('verifyMcpToken REJECTS a token whose embedded prefix does not match sub (cross-user)', () => {
-    // Hand-craft a token where the prefix belongs to a DIFFERENT user — the
-    // exact attack the prefix-binding defends against.
-    const otherUser = emailToUserId('victim@example.com');
+  it('verifyMcpToken REJECTS a token whose prefix is not the constant ai/ namespace', () => {
+    // The prefix is a fixed contract value (the AI-workspace key namespace).
+    // A token carrying ANY other prefix — including a per-user `${sub}/`, which
+    // would never match the MCP's real `ai/<category>/...` keys — is invalid.
+    // (Cross-user isolation is the gateway's per-user bucket namespacing + the
+    // JWT `sub`, NOT the key prefix; the prefix rule just pins the namespace.)
     const now = Math.floor(Date.now() / 1000);
     const forged = jwt.sign(
       {
@@ -134,7 +139,7 @@ describe('MCP scope claim — the P12 contract', () => {
         nbf: now,
         exp: now + 600,
         token_use: MCP_TOKEN_USE,
-        mcp: { v: 1, scopes: [{ bucket: MCP_WORKSPACE_BUCKET, prefix: `${otherUser}/`, perms: ['read'] }] },
+        mcp: { v: 1, scopes: [{ bucket: MCP_WORKSPACE_BUCKET, prefix: `${USER_ID}/`, perms: ['read'] }] },
       },
       JWT_SECRET,
       { algorithm: 'HS256', header: { alg: 'HS256', typ: MCP_TOKEN_TYP } },
@@ -148,7 +153,7 @@ describe('MCP scope claim — the P12 contract', () => {
       {
         iss: MCP_TOKEN_ISS, aud: MCP_TOKEN_AUD, sub: USER_ID, jti: 'x',
         iat: now, nbf: now, exp: now + 600, token_use: MCP_TOKEN_USE,
-        mcp: { v: 2, scopes: [{ bucket: MCP_WORKSPACE_BUCKET, prefix: `${USER_ID}/`, perms: ['read'] }] },
+        mcp: { v: 2, scopes: [{ bucket: MCP_WORKSPACE_BUCKET, prefix: MCP_WORKSPACE_PREFIX, perms: ['read'] }] },
       },
       JWT_SECRET,
       { algorithm: 'HS256', header: { alg: 'HS256', typ: MCP_TOKEN_TYP } },
@@ -163,7 +168,7 @@ describe('MCP scope claim — the P12 contract', () => {
       {
         iss: MCP_TOKEN_ISS, aud: MCP_TOKEN_AUD, sub: USER_ID, jti: 'x',
         iat: now, nbf: now, exp: now + 48 * 3600, token_use: MCP_TOKEN_USE,
-        mcp: { v: 1, scopes: [{ bucket: MCP_WORKSPACE_BUCKET, prefix: `${USER_ID}/`, perms: ['read'] }] },
+        mcp: { v: 1, scopes: [{ bucket: MCP_WORKSPACE_BUCKET, prefix: MCP_WORKSPACE_PREFIX, perms: ['read'] }] },
       },
       JWT_SECRET,
       { algorithm: 'HS256', header: { alg: 'HS256', typ: MCP_TOKEN_TYP } },
@@ -334,7 +339,7 @@ describe.runIf(pgAvailable)('MCP token endpoints', () => {
     expect(res.body.jti).toBeDefined();
     expect(res.body.tokenType).toBe(MCP_TOKEN_USE);
     expect(res.body.scope.v).toBe(1);
-    expect(res.body.scope.scopes[0].prefix).toBe(`${USER_ID}/`);
+    expect(res.body.scope.scopes[0].prefix).toBe(MCP_WORKSPACE_PREFIX);
 
     // The returned token is a real, verifiable MCP token bound to the user.
     const claims = verifyMcpToken(res.body.token, JWT_SECRET, { expectedSub: USER_ID });

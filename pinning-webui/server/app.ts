@@ -46,7 +46,17 @@ import {
   getUserCompany,
   updateUserCompany,
   encryptApiKey,
+  createMcpRevocationTable,
+  revokeMcpJti,
+  isMcpJtiRevoked,
+  listRevokedMcpJtis,
 } from './database/postgres.js';
+import {
+  mintMcpToken,
+  resolveRevocationTarget,
+  resolveMcpTtlSeconds,
+  MCP_TOKEN_USE,
+} from './mcpTokens.js';
 import { getEnabledChains, processTransfer } from './services/blockScanner.js';
 import {
   buildSignedTranscript,
@@ -149,6 +159,11 @@ export interface AppConfig {
   // matches the nginx client_max_body_size on the webui vhost).
   dagImportEnabled?: boolean;
   dagImportMaxCarBytes?: number;
+  // Phase 11 — scoped MCP-JWT issuer. Lifetime (seconds) of the short-lived
+  // scoped token minted at POST /api/mcp/tokens for a user's paired MCP agent.
+  // Default 3600 (1h); clamped to [60, 86400] by resolveMcpTtlSeconds.
+  // Env: MCP_TOKEN_TTL_SECONDS.
+  mcpTokenTtlSeconds?: number;
 }
 
 // Database operations type (async for PostgreSQL)
@@ -238,6 +253,16 @@ export async function initializeDatabase(): Promise<void> {
     console.log('[webui] collab_manifests table ready');
   } catch (error) {
     console.error('[webui] Failed to create collab_manifests table:', error);
+  }
+
+  // Phase 11 — MCP scoped-token revocation list. Stateless MCP JWTs carry the
+  // only authorization state here; a revoked jti is rejected by the gateway
+  // until its short exp.
+  try {
+    await createMcpRevocationTable();
+    console.log('[webui] mcp_revoked_tokens table ready');
+  } catch (error) {
+    console.error('[webui] Failed to create mcp_revoked_tokens table:', error);
   }
 
   // Zero-knowledge migration: add user_id columns (SHA-256 hash of email)
@@ -1638,6 +1663,126 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     } catch (error) {
       console.error('[webui] Error getting active API key:', error);
       res.status(500).json({ error: 'Failed to get API key' });
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Phase 11 — Scoped MCP-JWT issuer
+  //
+  // Mints a SHORT-LIVED, bucket/prefix-SCOPED JWT for the authenticated user's
+  // paired MCP agent. The agent presents this token to the Fula S3 gateway,
+  // which parses + enforces the `mcp` scope claim (see server/mcpTokens.ts for
+  // the full contract). Auth is session (webui) OR Bearer API-key (FxFiles
+  // native, P13) — `requireSessionOrBearer`. The minted token is STATELESS:
+  // it is NOT stored in api_keys; the only server state is the revocation list.
+  //
+  // Helper: resolve the caller's user_id from either auth path.
+  function mcpResolveUserId(req: Request): string | undefined {
+    // `requireSessionOrBearer` sets req.apiUser for Bearer; session for webui.
+    return req.session.user?.userId ?? req.apiUser?.userId;
+  }
+
+  // Shared mint+respond used by both POST /api/mcp/tokens and .../refresh.
+  // (Refresh is a fresh mint — revocation == stop refreshing + short exp; the
+  // prior jti is intentionally left to expire, see the revoke route docs.)
+  async function mcpIssueAndRespond(req: Request, res: Response): Promise<void> {
+    const userId = mcpResolveUserId(req);
+    if (!userId) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    // Allow a per-request ttl override only DOWNWARD via body.ttlSeconds; it is
+    // clamped to [60, 86400] regardless. Default comes from config.
+    const requestedTtl =
+      typeof req.body?.ttlSeconds === 'number' ? req.body.ttlSeconds : config.mcpTokenTtlSeconds;
+    const ttlSeconds = resolveMcpTtlSeconds(requestedTtl);
+
+    const { token, claims } = mintMcpToken(userId, config.jwtSecret, { ttlSeconds });
+
+    console.log(`[webui] MCP token issued for ${userId.slice(0, 8)}… jti=${claims.jti.slice(0, 8)}… exp=${claims.exp}`);
+
+    res.json({
+      token,
+      jti: claims.jti,
+      expiresAt: claims.exp, // unix seconds
+      tokenType: MCP_TOKEN_USE,
+      scope: claims.mcp, // structured scope claim, mirrored for the client
+    });
+  }
+
+  // Mint a new scoped MCP token.
+  app.post('/api/mcp/tokens', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      await mcpIssueAndRespond(req, res);
+    } catch (error) {
+      console.error('[webui] Error issuing MCP token:', error);
+      res.status(500).json({ error: 'Failed to issue MCP token' });
+    }
+  });
+
+  // Refresh == mint a fresh short-lived token (same scope). The client calls
+  // this before its current token expires. The previous token is NOT revoked
+  // here; it simply expires on its own short exp. Use the revoke route to kill
+  // a token immediately.
+  app.post('/api/mcp/tokens/refresh', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      await mcpIssueAndRespond(req, res);
+    } catch (error) {
+      console.error('[webui] Error refreshing MCP token:', error);
+      res.status(500).json({ error: 'Failed to refresh MCP token' });
+    }
+  });
+
+  // Revoke a scoped MCP token. The caller MUST present the still-valid raw
+  // `token` they want killed — the signature is cryptographically verified and
+  // its `sub` must match the caller (see resolveRevocationTarget). There is no
+  // revoke-by-bare-jti path: tokens are stateless/unstored, so bare-jti
+  // ownership can't be proven, and an already-expired token needs no revocation
+  // (it's dead by exp). Revocation == add jti to the list; the gateway rejects
+  // it until its short exp.
+  app.post('/api/mcp/tokens/revoke', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      const userId = mcpResolveUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      if (typeof req.body?.token !== 'string' || req.body.token.length === 0) {
+        return res.status(400).json({ error: 'Provide the token to revoke' });
+      }
+
+      const target = resolveRevocationTarget(req.body.token, config.jwtSecret, userId);
+      if (!target.ok) {
+        return res.status(target.status).json({ error: target.error });
+      }
+
+      const inserted = await revokeMcpJti(target.jti, userId, target.exp, 'user_revoke');
+      console.log(`[webui] MCP token revoke by ${userId.slice(0, 8)}… jti=${target.jti.slice(0, 8)}… new=${inserted}`);
+
+      res.json({ revoked: true, jti: target.jti, alreadyRevoked: !inserted });
+    } catch (error) {
+      console.error('[webui] Error revoking MCP token:', error);
+      res.status(500).json({ error: 'Failed to revoke MCP token' });
+    }
+  });
+
+  // Revocation lookup for the gateway (P12). Returns the set of currently
+  // revoked, still-unexpired jtis. The gateway SHOULD cache this briefly (5–30s
+  // recommended) and treat the short token exp as the backstop. Authenticated
+  // with the system key (server-to-server) — same gate as other internal
+  // endpoints — OR an admin session. A single-jti probe is supported via
+  // ?jti=… for a cheap point check.
+  app.get('/api/mcp/tokens/revocations', requireAdminOrSystemKey, async (req: Request, res: Response) => {
+    try {
+      const probe = typeof req.query.jti === 'string' ? req.query.jti : undefined;
+      if (probe) {
+        const revoked = await isMcpJtiRevoked(probe);
+        return res.json({ jti: probe, revoked });
+      }
+      const jtis = await listRevokedMcpJtis();
+      res.json({ revoked: jtis, count: jtis.length });
+    } catch (error) {
+      console.error('[webui] Error listing MCP revocations:', error);
+      res.status(500).json({ error: 'Failed to list revocations' });
     }
   });
 

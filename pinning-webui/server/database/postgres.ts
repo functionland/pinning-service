@@ -787,6 +787,89 @@ export async function updateUserCompany(userId: string, company: string | null):
   return (result.rowCount || 0) > 0;
 }
 
+// ============================================
+// MCP scoped-token revocation (Phase 11)
+// ============================================
+//
+// MCP tokens (server/mcpTokens.ts) are stateless short-lived JWTs; the ONLY
+// server-side state for them is this revoked-jti list. A token is honoured by
+// the gateway (P12) until its short `exp` OR until its `jti` lands here. We
+// keep `exp` per row so expired rows can be GC'd — once a jti's token has
+// expired the row is pure noise (the exp alone rejects the token).
+
+export async function createMcpRevocationTable(): Promise<void> {
+  await query(`
+    CREATE TABLE IF NOT EXISTS mcp_revoked_tokens (
+      jti VARCHAR(64) PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      exp BIGINT NOT NULL,
+      revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reason TEXT
+    )
+  `);
+  // Index for the GC sweep (delete WHERE exp < cutoff).
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_mcp_revoked_tokens_exp ON mcp_revoked_tokens(exp)
+  `);
+}
+
+/**
+ * Revoke a single MCP token by jti. Idempotent — revoking an already-revoked
+ * jti is a no-op (keeps the original revoked_at). `exp` is the token's own exp
+ * (unix seconds) so the row can be GC'd after it.
+ * Returns true if a NEW row was inserted (first revoke), false if already present.
+ */
+export async function revokeMcpJti(
+  jti: string,
+  userId: string,
+  exp: number,
+  reason?: string,
+): Promise<boolean> {
+  const result = await query(
+    `INSERT INTO mcp_revoked_tokens (jti, user_id, exp, reason)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (jti) DO NOTHING`,
+    [jti, userId, exp, reason ?? null]
+  );
+  return (result.rowCount || 0) > 0;
+}
+
+/** True if `jti` is in the revocation list. */
+export async function isMcpJtiRevoked(jti: string): Promise<boolean> {
+  const result = await query<{ exists: boolean }>(
+    'SELECT EXISTS(SELECT 1 FROM mcp_revoked_tokens WHERE jti = $1) AS exists',
+    [jti]
+  );
+  return result.rows[0]?.exists === true;
+}
+
+/**
+ * List currently-revoked (still-unexpired) jtis the gateway should reject.
+ * Filters out rows whose token has already expired (those are rejected by exp
+ * alone), so the gateway's cached set stays small. `nowSeconds` lets tests pin
+ * the clock.
+ */
+export async function listRevokedMcpJtis(nowSeconds?: number): Promise<string[]> {
+  const now = nowSeconds ?? Math.floor(Date.now() / 1000);
+  const result = await query<{ jti: string }>(
+    'SELECT jti FROM mcp_revoked_tokens WHERE exp >= $1 ORDER BY revoked_at DESC',
+    [now]
+  );
+  return result.rows.map((r) => r.jti);
+}
+
+/**
+ * GC revocation rows whose token expired more than `graceSeconds` ago (default
+ * 600s past exp, comfortably beyond any clock skew + gateway cache TTL).
+ * Returns the number of rows removed.
+ */
+export async function gcExpiredMcpRevocations(graceSeconds = 600, nowSeconds?: number): Promise<number> {
+  const now = nowSeconds ?? Math.floor(Date.now() / 1000);
+  const cutoff = now - graceSeconds;
+  const result = await query('DELETE FROM mcp_revoked_tokens WHERE exp < $1', [cutoff]);
+  return result.rowCount || 0;
+}
+
 export default {
   createPostgresPool,
   getPool,
@@ -820,4 +903,9 @@ export default {
   updateUserCompany,
   encryptApiKey,
   decryptApiKey,
+  createMcpRevocationTable,
+  revokeMcpJti,
+  isMcpJtiRevoked,
+  listRevokedMcpJtis,
+  gcExpiredMcpRevocations,
 };

@@ -54,6 +54,8 @@ const config: AppConfig = {
   // appear/disappear together.
   dagImportEnabled: ['true', '1'].includes((process.env.DAG_IMPORT_ENABLED || '').toLowerCase()),
   dagImportMaxCarBytes: parseInt(process.env.DAG_IMPORT_MAX_CAR_BYTES || '838860800', 10),
+  // Phase 11 — scoped MCP-JWT lifetime (seconds); default 1h, clamped [60,86400].
+  mcpTokenTtlSeconds: parseInt(process.env.MCP_TOKEN_TTL_SECONDS || '3600', 10),
 };
 
 // Refuse to start with default secrets in production

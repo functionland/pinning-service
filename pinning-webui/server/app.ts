@@ -55,6 +55,7 @@ import {
   mintMcpToken,
   resolveRevocationTarget,
   resolveMcpTtlSeconds,
+  normalizeMcpPubB64,
   MCP_TOKEN_USE,
 } from './mcpTokens.js';
 import { getEnabledChains, processTransfer } from './services/blockScanner.js';
@@ -1697,9 +1698,29 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       typeof req.body?.ttlSeconds === 'number' ? req.body.ttlSeconds : config.mcpTokenTtlSeconds;
     const ttlSeconds = resolveMcpTtlSeconds(requestedTtl);
 
-    const { token, claims } = mintMcpToken(userId, config.jwtSecret, { ttlSeconds });
+    // OPTIONAL connection binding (P15a): base64 of the MCP's 32-byte X25519
+    // pubkey. When present, mintMcpToken embeds a top-level `cnf` claim that the
+    // grant store reads to scope GET /api/mcp/grants to this connection. Absent
+    // ⇒ unbound token (P11 behaviour, can mint/refresh/revoke but not fetch
+    // grants). FAIL-CLOSED: a present-but-malformed key is a 400 — we never
+    // issue an unbound token the caller believes is bound.
+    const rawPub = req.body?.mcp_pub_b64;
+    if (rawPub !== undefined && typeof rawPub !== 'string') {
+      res.status(400).json({ error: 'mcp_pub_b64 must be a base64 string' });
+      return;
+    }
+    const mcpPubB64 = typeof rawPub === 'string' && rawPub.length > 0 ? rawPub : undefined;
+    if (mcpPubB64 !== undefined && normalizeMcpPubB64(mcpPubB64) === null) {
+      res.status(400).json({ error: 'mcp_pub_b64 must be base64 of a 32-byte X25519 public key' });
+      return;
+    }
 
-    console.log(`[webui] MCP token issued for ${userId.slice(0, 8)}… jti=${claims.jti.slice(0, 8)}… exp=${claims.exp}`);
+    const { token, claims } = mintMcpToken(userId, config.jwtSecret, { ttlSeconds, mcpPubB64 });
+
+    console.log(
+      `[webui] MCP token issued for ${userId.slice(0, 8)}… jti=${claims.jti.slice(0, 8)}… exp=${claims.exp}` +
+        (claims.cnf ? ` cnf=${claims.cnf.mcp_pub_b64.slice(0, 8)}…` : ''),
+    );
 
     res.json({
       token,
@@ -1707,6 +1728,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       expiresAt: claims.exp, // unix seconds
       tokenType: MCP_TOKEN_USE,
       scope: claims.mcp, // structured scope claim, mirrored for the client
+      // Echo the bound connection so the client can confirm the binding.
+      ...(claims.cnf ? { cnf: claims.cnf } : {}),
     });
   }
 

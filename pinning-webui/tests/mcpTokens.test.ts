@@ -28,6 +28,8 @@ import {
   decodeMcpJtiExp,
   decodeJwtHeader,
   buildMcpScopeClaim,
+  normalizeMcpPubB64,
+  getCnfMcpPubB64,
   MCP_TOKEN_TYP,
   MCP_TOKEN_USE,
   MCP_TOKEN_ISS,
@@ -35,10 +37,15 @@ import {
   MCP_SCOPE_VERSION,
   MCP_WORKSPACE_BUCKET,
   MCP_WORKSPACE_PREFIX,
+  MCP_PUBKEY_BYTES,
   MCP_TOKEN_TTL_DEFAULT_SECONDS,
   MCP_TOKEN_TTL_MIN_SECONDS,
   MCP_TOKEN_TTL_MAX_SECONDS,
 } from '../server/mcpTokens.js';
+
+// A real 32-byte X25519-shaped public key, standard-base64 (FxFiles convention).
+const MCP_PUB_A = Buffer.from(Array.from({ length: 32 }, (_, i) => i + 1)).toString('base64');
+const MCP_PUB_B = Buffer.from(Array.from({ length: 32 }, (_, i) => 200 - i)).toString('base64');
 
 const JWT_SECRET = 'test-jwt-secret-for-testing-only';
 // A 64-hex user_id, the real shape (SHA-256 of an email).
@@ -196,6 +203,98 @@ describe('MCP scope claim — the P12 contract', () => {
     const a = mintMcpToken(USER_ID, JWT_SECRET);
     const b = mintMcpToken(USER_ID, JWT_SECRET);
     expect(a.claims.jti).not.toBe(b.claims.jti);
+  });
+});
+
+// ============================================================================
+// 1b. CONNECTION-BINDING cnf claim (P15a) — always runs, no database
+// ============================================================================
+
+describe('normalizeMcpPubB64 — strict 32-byte pubkey validation', () => {
+  it('accepts standard-base64 of a 32-byte key and returns canonical form', () => {
+    expect(normalizeMcpPubB64(MCP_PUB_A)).toBe(MCP_PUB_A);
+    // round-trips to exactly 32 bytes
+    expect(Buffer.from(normalizeMcpPubB64(MCP_PUB_A)!, 'base64').length).toBe(MCP_PUBKEY_BYTES);
+  });
+
+  it('accepts the url-safe alphabet and normalizes it to standard base64', () => {
+    const urlSafe = MCP_PUB_A.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const norm = normalizeMcpPubB64(urlSafe);
+    expect(norm).toBe(MCP_PUB_A); // canonical standard form, padded
+  });
+
+  it('REJECTS a wrong-size key (16 bytes), empty, non-string, and junk', () => {
+    const sixteen = Buffer.alloc(16, 7).toString('base64');
+    expect(normalizeMcpPubB64(sixteen)).toBeNull();
+    const fortyEight = Buffer.alloc(48, 7).toString('base64');
+    expect(normalizeMcpPubB64(fortyEight)).toBeNull();
+    expect(normalizeMcpPubB64('')).toBeNull();
+    expect(normalizeMcpPubB64(undefined)).toBeNull();
+    expect(normalizeMcpPubB64(null)).toBeNull();
+    expect(normalizeMcpPubB64(123 as unknown)).toBeNull();
+    expect(normalizeMcpPubB64('not base64!!! ***')).toBeNull();
+  });
+});
+
+describe('connection-bound mint + verify (cnf claim)', () => {
+  it('mintMcpToken with mcpPubB64 embeds a top-level cnf SIBLING of mcp', () => {
+    const { token, claims } = mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: MCP_PUB_A });
+    expect(claims.cnf).toEqual({ mcp_pub_b64: MCP_PUB_A });
+
+    // Decode raw payload: cnf is at the TOP LEVEL, not under mcp.
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    expect(decoded.cnf).toEqual({ mcp_pub_b64: MCP_PUB_A });
+    expect(decoded.mcp.cnf).toBeUndefined(); // never a child of mcp
+    expect(decoded.mcp.v).toBe(1); // mcp claim unchanged
+  });
+
+  it('default mint (no mcpPubB64) produces NO cnf key — P11 byte-compat', () => {
+    const { token, claims } = mintMcpToken(USER_ID, JWT_SECRET);
+    expect(claims.cnf).toBeUndefined();
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    expect('cnf' in decoded).toBe(false);
+  });
+
+  it('verifyMcpToken exposes cnf.mcp_pub_b64 via getCnfMcpPubB64', () => {
+    const { token } = mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: MCP_PUB_A });
+    const claims = verifyMcpToken(token, JWT_SECRET);
+    expect(getCnfMcpPubB64(claims)).toBe(MCP_PUB_A);
+  });
+
+  it('verifyMcpToken on an UNBOUND token returns null connection (no crash)', () => {
+    const { token } = mintMcpToken(USER_ID, JWT_SECRET);
+    const claims = verifyMcpToken(token, JWT_SECRET);
+    expect(claims.cnf).toBeUndefined();
+    expect(getCnfMcpPubB64(claims)).toBeNull();
+  });
+
+  it('mintMcpToken FAILS CLOSED on a malformed mcpPubB64 (never issues unbound-as-bound)', () => {
+    expect(() => mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: 'too-short' })).toThrow(/mcp_pub_b64/);
+    const sixteen = Buffer.alloc(16, 1).toString('base64');
+    expect(() => mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: sixteen })).toThrow(/32-byte/);
+  });
+
+  it('verifyMcpToken REJECTS a token carrying a malformed cnf (tamper guard)', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const forged = jwt.sign(
+      {
+        iss: MCP_TOKEN_ISS, aud: MCP_TOKEN_AUD, sub: USER_ID, jti: 'x',
+        iat: now, nbf: now, exp: now + 600, token_use: MCP_TOKEN_USE,
+        mcp: { v: 1, scopes: [{ bucket: MCP_WORKSPACE_BUCKET, prefix: MCP_WORKSPACE_PREFIX, perms: ['read'] }] },
+        cnf: { mcp_pub_b64: 'not-a-32-byte-key' },
+      },
+      JWT_SECRET,
+      { algorithm: 'HS256', header: { alg: 'HS256', typ: MCP_TOKEN_TYP } },
+    );
+    expect(() => verifyMcpToken(forged, JWT_SECRET)).toThrow(/cnf/);
+  });
+
+  it('two tokens bound to DIFFERENT connections expose different cnf', () => {
+    const a = verifyMcpToken(mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: MCP_PUB_A }).token, JWT_SECRET);
+    const b = verifyMcpToken(mintMcpToken(USER_ID, JWT_SECRET, { mcpPubB64: MCP_PUB_B }).token, JWT_SECRET);
+    expect(getCnfMcpPubB64(a)).toBe(MCP_PUB_A);
+    expect(getCnfMcpPubB64(b)).toBe(MCP_PUB_B);
+    expect(getCnfMcpPubB64(a)).not.toBe(getCnfMcpPubB64(b));
   });
 });
 

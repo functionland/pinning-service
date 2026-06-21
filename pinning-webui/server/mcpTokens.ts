@@ -57,8 +57,9 @@
  *  9. mcp.v       === 1   (REJECT unknown major versions — fail closed)
  * 10. mcp.scopes is a non-empty array; for v1 exactly one scope entry.
  * 11. For each scope: bucket is a known AI-workspace bucket, perms ⊆
- *       {"read","write","list"}, and prefix === "ai/" EXACTLY (segment-boundary,
- *       i.e. the literal constant). `ai/` is the AI-workspace key namespace the
+ *       {"read","write","list"}, and prefix === "ai/" EXACTLY (literal string
+ *       equality against the constant — NOT a per-key authorization rule). `ai/`
+ *       is the AI-workspace key namespace the
  *       MCP actually writes under (keys are `ai/<category>/...` in
  *       `fula-ai-workspace`; the gateway stores keys verbatim), so this prefix
  *       must be the constant for real MCP ops to pass. CROSS-USER ISOLATION
@@ -151,7 +152,7 @@ export interface McpTokenClaims {
  * in `fula-ai-workspace`; the gateway stores them verbatim), so a per-user prefix
  * would reject every real MCP op. CROSS-USER ISOLATION is NOT this prefix's job: it
  * comes from the gateway opening buckets per `(hashed_user_id, bucket)` plus the JWT
- * `sub`. P12 enforces `prefix === "ai/"` (segment-boundary).
+ * `sub`. P12 enforces `prefix === "ai/"` (literal string equality on the claim).
  */
 export function buildMcpScopeClaim(
   perms: McpPerm[] = [...MCP_PERMS],

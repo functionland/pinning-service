@@ -947,7 +947,7 @@ export async function insertMcpGrants(
   const ids: string[] = [];
   const values: unknown[] = [];
   const placeholders: string[] = [];
-  // 6 bound columns per row: id, user_id, mcp_pub_b64, scope, permissions, token_json, expires_at = 7
+  // 7 bound columns per row: id, user_id, mcp_pub_b64, scope, permissions, token_json, expires_at.
   grants.forEach((g, i) => {
     const id = uuidv4();
     ids.push(id);

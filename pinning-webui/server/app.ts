@@ -50,6 +50,7 @@ import {
   revokeMcpJti,
   isMcpJtiRevoked,
   listRevokedMcpJtis,
+  createMcpGrantsTable,
 } from './database/postgres.js';
 import {
   mintMcpToken,
@@ -264,6 +265,16 @@ export async function initializeDatabase(): Promise<void> {
     console.log('[webui] mcp_revoked_tokens table ready');
   } catch (error) {
     console.error('[webui] Failed to create mcp_revoked_tokens table:', error);
+  }
+
+  // Phase 15a — MCP grant store. Holds per-file ShareTokens a user grants to a
+  // paired MCP connection (sealed to the MCP pubkey); the stateless MCP fetches
+  // its grants scoped by the verified token's cnf binding.
+  try {
+    await createMcpGrantsTable();
+    console.log('[webui] mcp_grants table ready');
+  } catch (error) {
+    console.error('[webui] Failed to create mcp_grants table:', error);
   }
 
   // Zero-knowledge migration: add user_id columns (SHA-256 hash of email)

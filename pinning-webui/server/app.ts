@@ -46,7 +46,25 @@ import {
   getUserCompany,
   updateUserCompany,
   encryptApiKey,
+  createMcpRevocationTable,
+  revokeMcpJti,
+  isMcpJtiRevoked,
+  listRevokedMcpJtis,
+  createMcpGrantsTable,
+  insertMcpGrants,
+  listActiveGrantsForConnection,
+  revokeMcpGrant,
 } from './database/postgres.js';
+import {
+  mintMcpToken,
+  verifyMcpToken,
+  resolveRevocationTarget,
+  resolveMcpTtlSeconds,
+  normalizeMcpPubB64,
+  getCnfMcpPubB64,
+  MCP_TOKEN_USE,
+} from './mcpTokens.js';
+import { validateGrantsPayload } from './mcpGrants.js';
 import { getEnabledChains, processTransfer } from './services/blockScanner.js';
 import {
   buildSignedTranscript,
@@ -149,6 +167,11 @@ export interface AppConfig {
   // matches the nginx client_max_body_size on the webui vhost).
   dagImportEnabled?: boolean;
   dagImportMaxCarBytes?: number;
+  // Phase 11 — scoped MCP-JWT issuer. Lifetime (seconds) of the short-lived
+  // scoped token minted at POST /api/mcp/tokens for a user's paired MCP agent.
+  // Default 3600 (1h); clamped to [60, 86400] by resolveMcpTtlSeconds.
+  // Env: MCP_TOKEN_TTL_SECONDS.
+  mcpTokenTtlSeconds?: number;
 }
 
 // Database operations type (async for PostgreSQL)
@@ -238,6 +261,26 @@ export async function initializeDatabase(): Promise<void> {
     console.log('[webui] collab_manifests table ready');
   } catch (error) {
     console.error('[webui] Failed to create collab_manifests table:', error);
+  }
+
+  // Phase 11 — MCP scoped-token revocation list. Stateless MCP JWTs carry the
+  // only authorization state here; a revoked jti is rejected by the gateway
+  // until its short exp.
+  try {
+    await createMcpRevocationTable();
+    console.log('[webui] mcp_revoked_tokens table ready');
+  } catch (error) {
+    console.error('[webui] Failed to create mcp_revoked_tokens table:', error);
+  }
+
+  // Phase 15a — MCP grant store. Holds per-file ShareTokens a user grants to a
+  // paired MCP connection (sealed to the MCP pubkey); the stateless MCP fetches
+  // its grants scoped by the verified token's cnf binding.
+  try {
+    await createMcpGrantsTable();
+    console.log('[webui] mcp_grants table ready');
+  } catch (error) {
+    console.error('[webui] Failed to create mcp_grants table:', error);
   }
 
   // Zero-knowledge migration: add user_id columns (SHA-256 hash of email)
@@ -1638,6 +1681,285 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     } catch (error) {
       console.error('[webui] Error getting active API key:', error);
       res.status(500).json({ error: 'Failed to get API key' });
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Phase 11 — Scoped MCP-JWT issuer
+  //
+  // Mints a SHORT-LIVED, bucket/prefix-SCOPED JWT for the authenticated user's
+  // paired MCP agent. The agent presents this token to the Fula S3 gateway,
+  // which parses + enforces the `mcp` scope claim (see server/mcpTokens.ts for
+  // the full contract). Auth is session (webui) OR Bearer API-key (FxFiles
+  // native, P13) — `requireSessionOrBearer`. The minted token is STATELESS:
+  // it is NOT stored in api_keys; the only server state is the revocation list.
+  //
+  // Helper: resolve the caller's user_id from either auth path.
+  function mcpResolveUserId(req: Request): string | undefined {
+    // `requireSessionOrBearer` sets req.apiUser for Bearer; session for webui.
+    return req.session.user?.userId ?? req.apiUser?.userId;
+  }
+
+  // Shared mint+respond used by both POST /api/mcp/tokens and .../refresh.
+  // (Refresh is a fresh mint — revocation == stop refreshing + short exp; the
+  // prior jti is intentionally left to expire, see the revoke route docs.)
+  async function mcpIssueAndRespond(req: Request, res: Response): Promise<void> {
+    const userId = mcpResolveUserId(req);
+    if (!userId) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    // Allow a per-request ttl override only DOWNWARD via body.ttlSeconds; it is
+    // clamped to [60, 86400] regardless. Default comes from config.
+    const requestedTtl =
+      typeof req.body?.ttlSeconds === 'number' ? req.body.ttlSeconds : config.mcpTokenTtlSeconds;
+    const ttlSeconds = resolveMcpTtlSeconds(requestedTtl);
+
+    // OPTIONAL connection binding (P15a): base64 of the MCP's 32-byte X25519
+    // pubkey. When present, mintMcpToken embeds a top-level `cnf` claim that the
+    // grant store reads to scope GET /api/mcp/grants to this connection. Absent
+    // ⇒ unbound token (P11 behaviour, can mint/refresh/revoke but not fetch
+    // grants). FAIL-CLOSED: a present-but-malformed key is a 400 — we never
+    // issue an unbound token the caller believes is bound.
+    const rawPub = req.body?.mcp_pub_b64;
+    if (rawPub !== undefined && typeof rawPub !== 'string') {
+      res.status(400).json({ error: 'mcp_pub_b64 must be a base64 string' });
+      return;
+    }
+    const mcpPubB64 = typeof rawPub === 'string' && rawPub.length > 0 ? rawPub : undefined;
+    if (mcpPubB64 !== undefined && normalizeMcpPubB64(mcpPubB64) === null) {
+      res.status(400).json({ error: 'mcp_pub_b64 must be base64 of a 32-byte X25519 public key' });
+      return;
+    }
+
+    const { token, claims } = mintMcpToken(userId, config.jwtSecret, { ttlSeconds, mcpPubB64 });
+
+    console.log(
+      `[webui] MCP token issued for ${userId.slice(0, 8)}… jti=${claims.jti.slice(0, 8)}… exp=${claims.exp}` +
+        (claims.cnf ? ` cnf=${claims.cnf.mcp_pub_b64.slice(0, 8)}…` : ''),
+    );
+
+    res.json({
+      token,
+      jti: claims.jti,
+      expiresAt: claims.exp, // unix seconds
+      tokenType: MCP_TOKEN_USE,
+      scope: claims.mcp, // structured scope claim, mirrored for the client
+      // Echo the bound connection so the client can confirm the binding.
+      ...(claims.cnf ? { cnf: claims.cnf } : {}),
+    });
+  }
+
+  // Mint a new scoped MCP token.
+  app.post('/api/mcp/tokens', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      await mcpIssueAndRespond(req, res);
+    } catch (error) {
+      console.error('[webui] Error issuing MCP token:', error);
+      res.status(500).json({ error: 'Failed to issue MCP token' });
+    }
+  });
+
+  // Refresh == mint a fresh short-lived token (same scope). The client calls
+  // this before its current token expires. The previous token is NOT revoked
+  // here; it simply expires on its own short exp. Use the revoke route to kill
+  // a token immediately.
+  app.post('/api/mcp/tokens/refresh', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      await mcpIssueAndRespond(req, res);
+    } catch (error) {
+      console.error('[webui] Error refreshing MCP token:', error);
+      res.status(500).json({ error: 'Failed to refresh MCP token' });
+    }
+  });
+
+  // Revoke a scoped MCP token. The caller MUST present the still-valid raw
+  // `token` they want killed — the signature is cryptographically verified and
+  // its `sub` must match the caller (see resolveRevocationTarget). There is no
+  // revoke-by-bare-jti path: tokens are stateless/unstored, so bare-jti
+  // ownership can't be proven, and an already-expired token needs no revocation
+  // (it's dead by exp). Revocation == add jti to the list; the gateway rejects
+  // it until its short exp.
+  app.post('/api/mcp/tokens/revoke', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      const userId = mcpResolveUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      if (typeof req.body?.token !== 'string' || req.body.token.length === 0) {
+        return res.status(400).json({ error: 'Provide the token to revoke' });
+      }
+
+      const target = resolveRevocationTarget(req.body.token, config.jwtSecret, userId);
+      if (!target.ok) {
+        return res.status(target.status).json({ error: target.error });
+      }
+
+      const inserted = await revokeMcpJti(target.jti, userId, target.exp, 'user_revoke');
+      console.log(`[webui] MCP token revoke by ${userId.slice(0, 8)}… jti=${target.jti.slice(0, 8)}… new=${inserted}`);
+
+      res.json({ revoked: true, jti: target.jti, alreadyRevoked: !inserted });
+    } catch (error) {
+      console.error('[webui] Error revoking MCP token:', error);
+      res.status(500).json({ error: 'Failed to revoke MCP token' });
+    }
+  });
+
+  // Revocation lookup for the gateway (P12). Returns the set of currently
+  // revoked, still-unexpired jtis. The gateway SHOULD cache this briefly (5–30s
+  // recommended) and treat the short token exp as the backstop. Authenticated
+  // with the system key (server-to-server) — same gate as other internal
+  // endpoints — OR an admin session. A single-jti probe is supported via
+  // ?jti=… for a cheap point check.
+  app.get('/api/mcp/tokens/revocations', requireAdminOrSystemKey, async (req: Request, res: Response) => {
+    try {
+      const probe = typeof req.query.jti === 'string' ? req.query.jti : undefined;
+      if (probe) {
+        const revoked = await isMcpJtiRevoked(probe);
+        return res.json({ jti: probe, revoked });
+      }
+      const jtis = await listRevokedMcpJtis();
+      res.json({ revoked: jtis, count: jtis.length });
+    } catch (error) {
+      console.error('[webui] Error listing MCP revocations:', error);
+      res.status(500).json({ error: 'Failed to list revocations' });
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Phase 15a — MCP grant store
+  // ────────────────────────────────────────────────────────────────────────
+  //
+  // A user GRANTS a paired MCP connection scoped access to their REAL files by
+  // publishing per-file ShareTokens (sealed to the MCP pubkey) here; the
+  // stateless MCP later FETCHES its grants. Publish/revoke are authed as the
+  // USER (session or Bearer API-key — FxFiles publishes via Bearer). The fetch
+  // is authed with the MCP's own scoped JWT, and is scoped to the connection
+  // identity (`cnf`) baked into that verified JWT — the SECURITY BOUNDARY that
+  // stops agent A reading agent B's granted paths.
+
+  // POST /api/mcp/grants — the user publishes grants for a connection pubkey.
+  app.post('/api/mcp/grants', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      const userId = mcpResolveUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+
+      const validated = validateGrantsPayload(req.body);
+      if (!validated.ok) {
+        return res.status(validated.status).json({ error: validated.error });
+      }
+      const { mcpPubB64, grants } = validated.value;
+
+      const ids = await insertMcpGrants(userId, mcpPubB64, grants);
+
+      // Audit: counts + a pubkey PREFIX only — never token_json (carries the
+      // sealed DEK) and never the full key.
+      console.log(
+        `[webui] MCP grants published by ${userId.slice(0, 8)}… conn=${mcpPubB64.slice(0, 8)}… count=${ids.length}`,
+      );
+
+      res.status(201).json({ inserted: ids.length, ids });
+    } catch (error) {
+      console.error('[webui] Error publishing MCP grants:', error);
+      res.status(500).json({ error: 'Failed to publish grants' });
+    }
+  });
+
+  // GET /api/mcp/grants — the MCP fetches ITS grants. Auth is the MCP's own
+  // scoped JWT (NOT a user session / API-key): verify it, then return ONLY the
+  // grants for (sub, cnf.mcp_pub_b64), both read off the VERIFIED claims. This
+  // is a distinct auth path from requireSessionOrBearer (which checks api_keys).
+  app.get('/api/mcp/grants', async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'MCP scoped JWT required (Bearer).' });
+      }
+      const raw = authHeader.substring(7);
+
+      let claims;
+      try {
+        claims = verifyMcpToken(raw, config.jwtSecret);
+      } catch {
+        return res.status(401).json({ error: 'Invalid or expired MCP token.' });
+      }
+
+      // SECURITY BOUNDARY: the connection identity comes ONLY from the verified
+      // `cnf` claim. An unbound token (no cnf) has no connection identity, so it
+      // gets ZERO grants — NEVER all the user's grants. Checked FIRST (cheap,
+      // no DB): an unbound token returns nothing regardless of revocation state,
+      // so short-circuiting here is strictly safe AND keeps this boundary
+      // assertion runnable without Postgres.
+      const mcpPubB64 = getCnfMcpPubB64(claims);
+      if (!mcpPubB64) {
+        return res.json({ grants: [] });
+      }
+
+      // Revocation check — verifyMcpToken does NOT consult the revoked-jti list,
+      // so a revoked token could otherwise still enumerate granted paths until
+      // its short exp. Fail closed (treat a revocation-store error as denied).
+      try {
+        if (await isMcpJtiRevoked(claims.jti)) {
+          return res.status(401).json({ error: 'Token revoked.' });
+        }
+      } catch (err) {
+        console.error('[webui] MCP grants: revocation check failed, denying:', err);
+        return res.status(503).json({ error: 'Revocation check unavailable.' });
+      }
+
+      const rows = await listActiveGrantsForConnection(claims.sub, mcpPubB64);
+      res.json({
+        grants: rows.map((r) => ({
+          id: r.id,
+          scope: r.scope,
+          permissions: r.permissions,
+          token_json: r.token_json,
+          expires_at: r.expires_at,
+        })),
+      });
+    } catch (error) {
+      console.error('[webui] Error fetching MCP grants:', error);
+      res.status(500).json({ error: 'Failed to fetch grants' });
+    }
+  });
+
+  // POST /api/mcp/grants/revoke — the user revokes grants. Either a single row
+  // by `{ id }`, or all rows for `{ mcp_pub_b64, scope }`. User-scoped (a user
+  // can only revoke their own grants).
+  app.post('/api/mcp/grants/revoke', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      const userId = mcpResolveUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+
+      const body = req.body ?? {};
+      let target: { id: string } | { mcpPubB64: string; scope: string };
+      if (typeof body.id === 'string' && body.id.length > 0) {
+        target = { id: body.id };
+      } else if (typeof body.mcp_pub_b64 === 'string' && typeof body.scope === 'string' && body.scope.length > 0) {
+        const norm = normalizeMcpPubB64(body.mcp_pub_b64);
+        if (!norm) {
+          return res.status(400).json({ error: 'mcp_pub_b64 must be base64 of a 32-byte X25519 public key' });
+        }
+        target = { mcpPubB64: norm, scope: body.scope };
+      } else {
+        return res.status(400).json({ error: 'Provide { id } or { mcp_pub_b64, scope } to revoke' });
+      }
+
+      const revokedCount = await revokeMcpGrant(userId, target);
+      console.log(
+        `[webui] MCP grants revoked by ${userId.slice(0, 8)}… ` +
+          ('id' in target ? `id=${target.id.slice(0, 8)}…` : `conn=${target.mcpPubB64.slice(0, 8)}… scope=${target.scope}`) +
+          ` count=${revokedCount}`,
+      );
+
+      res.json({ revoked: revokedCount });
+    } catch (error) {
+      console.error('[webui] Error revoking MCP grants:', error);
+      res.status(500).json({ error: 'Failed to revoke grants' });
     }
   });
 

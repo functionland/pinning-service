@@ -54,6 +54,7 @@ import {
   insertMcpGrants,
   listActiveGrantsForConnection,
   revokeMcpGrant,
+  createMcpConnectionsTable,
 } from './database/postgres.js';
 import {
   mintMcpToken,
@@ -281,6 +282,17 @@ export async function initializeDatabase(): Promise<void> {
     console.log('[webui] mcp_grants table ready');
   } catch (error) {
     console.error('[webui] Failed to create mcp_grants table:', error);
+  }
+
+  // MCP connection registry. A paired connection stores a long-lived refresh
+  // token (hash only) + its frozen scope so the client can re-mint its
+  // short-lived workspace JWT without re-pairing; revocation flips a flag the
+  // gateway polls. See server/database/postgres.ts for the security invariant.
+  try {
+    await createMcpConnectionsTable();
+    console.log('[webui] mcp_connections table ready');
+  } catch (error) {
+    console.error('[webui] Failed to create mcp_connections table:', error);
   }
 
   // Zero-knowledge migration: add user_id columns (SHA-256 hash of email)

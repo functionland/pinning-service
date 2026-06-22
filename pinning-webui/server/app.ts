@@ -55,6 +55,12 @@ import {
   listActiveGrantsForConnection,
   revokeMcpGrant,
   createMcpConnectionsTable,
+  insertMcpConnection,
+  findMcpConnectionByRefreshHash,
+  touchMcpConnectionRefreshed,
+  revokeMcpConnection,
+  listMcpConnectionsForUser,
+  listRevokedConnectionPubkeys,
 } from './database/postgres.js';
 import {
   mintMcpToken,
@@ -66,6 +72,7 @@ import {
   MCP_TOKEN_USE,
 } from './mcpTokens.js';
 import { validateGrantsPayload } from './mcpGrants.js';
+import { newRefreshToken, hashRefreshToken, mintFromConnection } from './mcpConnections.js';
 import { getEnabledChains, processTransfer } from './services/blockScanner.js';
 import {
   buildSignedTranscript,
@@ -1715,7 +1722,18 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Shared mint+respond used by both POST /api/mcp/tokens and .../refresh.
   // (Refresh is a fresh mint — revocation == stop refreshing + short exp; the
   // prior jti is intentionally left to expire, see the revoke route docs.)
-  async function mcpIssueAndRespond(req: Request, res: Response): Promise<void> {
+  //
+  // `registerConnection` is true ONLY from the real-mint route (POST
+  // /api/mcp/tokens). When true AND the request binds a connection (a valid
+  // `mcp_pub_b64`), we ALSO register an `mcp_connections` row + issue a
+  // long-lived REFRESH TOKEN (returned once). The legacy session-authed refresh
+  // route passes false so it can NEVER spawn connection rows / refresh tokens —
+  // it stays a pure re-mint of the caller's (session/bearer) identity.
+  async function mcpIssueAndRespond(
+    req: Request,
+    res: Response,
+    registerConnection = false,
+  ): Promise<void> {
     const userId = mcpResolveUserId(req);
     if (!userId) {
       res.status(401).json({ error: 'Authentication required.' });
@@ -1746,9 +1764,36 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
     const { token, claims } = mintMcpToken(userId, config.jwtSecret, { ttlSeconds, mcpPubB64 });
 
+    // Connection registration (real-mint route only, and only for a bound
+    // request). We persist the connection's FROZEN scope (claims.mcp — the
+    // resolved scope, NOT anything else from the request) so a later refresh can
+    // re-mint EXACTLY this scope. The refresh token's plaintext is returned ONCE
+    // here; only its sha256 hash is stored.
+    let refreshToken: string | undefined;
+    let connectionId: string | undefined;
+    if (registerConnection && mcpPubB64) {
+      const rt = newRefreshToken();
+      connectionId = uuidv4();
+      const label = typeof req.body?.label === 'string' && req.body.label.length > 0
+        ? req.body.label.slice(0, 200)
+        : null;
+      await insertMcpConnection({
+        id: connectionId,
+        userId,
+        // Persist the NORMALIZED (canonical) pubkey so the gateway-revoked feed
+        // and the cnf in the JWT compare byte-for-byte regardless of b64 form.
+        mcpPubB64: claims.cnf!.mcp_pub_b64,
+        label,
+        refreshTokenHash: rt.hash,
+        scope: claims.mcp, // the resolved scope claim — frozen for refresh
+      });
+      refreshToken = rt.token;
+    }
+
     console.log(
       `[webui] MCP token issued for ${userId.slice(0, 8)}… jti=${claims.jti.slice(0, 8)}… exp=${claims.exp}` +
-        (claims.cnf ? ` cnf=${claims.cnf.mcp_pub_b64.slice(0, 8)}…` : ''),
+        (claims.cnf ? ` cnf=${claims.cnf.mcp_pub_b64.slice(0, 8)}…` : '') +
+        (connectionId ? ` conn=${connectionId.slice(0, 8)}…` : ''),
     );
 
     res.json({
@@ -1759,13 +1804,18 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       scope: claims.mcp, // structured scope claim, mirrored for the client
       // Echo the bound connection so the client can confirm the binding.
       ...(claims.cnf ? { cnf: claims.cnf } : {}),
+      // Connection refresh credential — present ONLY on the real-mint route for
+      // a bound request. FxFiles stores this in the connection bundle and uses
+      // it to re-mint without re-pairing. Shown ONCE; never re-derivable.
+      ...(refreshToken ? { refreshToken, connectionId } : {}),
     });
   }
 
-  // Mint a new scoped MCP token.
+  // Mint a new scoped MCP token. `registerConnection=true`: a bound request
+  // (with mcp_pub_b64) also registers a connection + returns a refresh token.
   app.post('/api/mcp/tokens', requireSessionOrBearer, async (req: Request, res: Response) => {
     try {
-      await mcpIssueAndRespond(req, res);
+      await mcpIssueAndRespond(req, res, true);
     } catch (error) {
       console.error('[webui] Error issuing MCP token:', error);
       res.status(500).json({ error: 'Failed to issue MCP token' });
@@ -1775,10 +1825,12 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Refresh == mint a fresh short-lived token (same scope). The client calls
   // this before its current token expires. The previous token is NOT revoked
   // here; it simply expires on its own short exp. Use the revoke route to kill
-  // a token immediately.
+  // a token immediately. registerConnection=false: this NEVER creates a
+  // connection row / refresh token (that is the dedicated refresh-connection
+  // route's job). It re-mints against the caller's session/bearer identity.
   app.post('/api/mcp/tokens/refresh', requireSessionOrBearer, async (req: Request, res: Response) => {
     try {
-      await mcpIssueAndRespond(req, res);
+      await mcpIssueAndRespond(req, res, false);
     } catch (error) {
       console.error('[webui] Error refreshing MCP token:', error);
       res.status(500).json({ error: 'Failed to refresh MCP token' });
@@ -1835,6 +1887,154 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     } catch (error) {
       console.error('[webui] Error listing MCP revocations:', error);
       res.status(500).json({ error: 'Failed to list revocations' });
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // MCP connection lifecycle — scoped refresh + enforced revocation
+  // ────────────────────────────────────────────────────────────────────────
+  //
+  // A paired connection (registered at mint time, see mcpIssueAndRespond) holds
+  // a long-lived REFRESH TOKEN that re-mints THIS connection's short-lived
+  // workspace JWT without re-pairing. The user can list/revoke their
+  // connections; the gateway polls a revoked-pubkey feed to deny a revoked
+  // connection's JWT by its `cnf` binding.
+
+  // Per-connection rate limit for the unauthenticated refresh endpoint: a simple
+  // in-memory token bucket keyed by the refresh-token hash (so it survives even
+  // though there's no session). Generous — a well-behaved client refreshes at
+  // most ~hourly. Honors skipRateLimit so the pg-gated tests (which refresh
+  // repeatedly) don't self-trip. In-memory is acceptable: a single webui process
+  // owns refresh, and the floor is the short JWT exp + revocation anyway.
+  const REFRESH_BUCKET_CAPACITY = 30; // burst
+  const REFRESH_BUCKET_REFILL_PER_SEC = 30 / 60; // ~30/min sustained
+  const refreshBuckets = new Map<string, { tokens: number; last: number }>();
+  function refreshRateLimitOk(hash: string): boolean {
+    if (options?.skipRateLimit) return true;
+    const now = Date.now();
+    const b = refreshBuckets.get(hash) ?? { tokens: REFRESH_BUCKET_CAPACITY, last: now };
+    // Refill since last seen.
+    const elapsedSec = (now - b.last) / 1000;
+    b.tokens = Math.min(REFRESH_BUCKET_CAPACITY, b.tokens + elapsedSec * REFRESH_BUCKET_REFILL_PER_SEC);
+    b.last = now;
+    if (b.tokens < 1) {
+      refreshBuckets.set(hash, b);
+      return false;
+    }
+    b.tokens -= 1;
+    refreshBuckets.set(hash, b);
+    return true;
+  }
+
+  // Refresh-by-token — the connection's refresh token IS the credential, so this
+  // endpoint is DELIBERATELY UNAUTHENTICATED (no session / no Bearer). The flow:
+  // sha256(refresh_token) → find the connection → if missing/revoked → 401 →
+  // else re-mint a fresh JWT from the connection's STORED scope (NEVER from the
+  // request) with a new jti, and bump last_refreshed_at.
+  //
+  // SECURITY INVARIANT: mintFromConnection reads scope ONLY off the stored row,
+  // so a tampered/widened request body cannot widen the issued token, and the
+  // refresh token can never yield a broader-scoped token or the account
+  // credential. The endpoint accepts ONLY { refresh_token } — nothing in the
+  // body influences scope, ttl, perms, bucket, or the bound pubkey.
+  app.post('/api/mcp/tokens/refresh-connection', async (req: Request, res: Response) => {
+    try {
+      const refreshTokenRaw = req.body?.refresh_token;
+      if (typeof refreshTokenRaw !== 'string' || refreshTokenRaw.length === 0) {
+        return res.status(400).json({ error: 'Provide refresh_token' });
+      }
+
+      const hash = hashRefreshToken(refreshTokenRaw);
+
+      if (!refreshRateLimitOk(hash)) {
+        return res.status(429).json({ error: 'Too many refreshes; slow down.' });
+      }
+
+      const conn = await findMcpConnectionByRefreshHash(hash);
+      // Same 401 for "no such token" and "revoked" — don't disclose which.
+      if (!conn || conn.revoked) {
+        return res.status(401).json({ error: 'Invalid or revoked refresh token.' });
+      }
+
+      // Re-mint PINNED to the stored scope (perms/bucket extracted explicitly;
+      // the cnf binding re-applied). A fresh jti each time.
+      const { token, claims } = mintFromConnection(
+        { user_id: conn.user_id, mcp_pub_b64: conn.mcp_pub_b64, scope: conn.scope },
+        config.jwtSecret,
+      );
+
+      // Best-effort bookkeeping — never fail an already-minted token over it.
+      try {
+        await touchMcpConnectionRefreshed(conn.id);
+      } catch (err) {
+        console.error('[webui] refresh-connection: last_refreshed_at bump failed (non-fatal):', err);
+      }
+
+      console.log(
+        `[webui] MCP connection refresh conn=${conn.id.slice(0, 8)}… ` +
+          `user=${conn.user_id.slice(0, 8)}… jti=${claims.jti.slice(0, 8)}… exp=${claims.exp}`,
+      );
+
+      res.json({ token, jti: claims.jti, expiresAt: claims.exp });
+    } catch (error) {
+      console.error('[webui] Error refreshing MCP connection:', error);
+      res.status(500).json({ error: 'Failed to refresh connection' });
+    }
+  });
+
+  // List the caller's connections (management UI). User-scoped (session or
+  // Bearer). NEVER returns the refresh token or its hash.
+  app.get('/api/mcp/connections', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      const userId = mcpResolveUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      const connections = await listMcpConnectionsForUser(userId);
+      res.json({ connections });
+    } catch (error) {
+      console.error('[webui] Error listing MCP connections:', error);
+      res.status(500).json({ error: 'Failed to list connections' });
+    }
+  });
+
+  // Revoke one of the caller's connections by id. User-scoped: a user can only
+  // revoke THEIR OWN connection (revokeMcpConnection filters by user_id). After
+  // this, the connection's refresh token is dead (refresh → 401) and the gateway
+  // will deny its in-flight JWT once it polls the revoked-pubkey feed.
+  app.post('/api/mcp/connections/:id/revoke', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      const userId = mcpResolveUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      const id = req.params.id;
+      if (typeof id !== 'string' || id.length === 0) {
+        return res.status(400).json({ error: 'Provide a connection id' });
+      }
+      const revoked = await revokeMcpConnection(userId, id);
+      console.log(
+        `[webui] MCP connection revoke by ${userId.slice(0, 8)}… id=${id.slice(0, 8)}… new=${revoked}`,
+      );
+      res.json({ revoked: true, alreadyRevoked: !revoked });
+    } catch (error) {
+      console.error('[webui] Error revoking MCP connection:', error);
+      res.status(500).json({ error: 'Failed to revoke connection' });
+    }
+  });
+
+  // Gateway-pollable revoked-connections feed. Same internal/system-key auth as
+  // /api/mcp/tokens/revocations (server-to-server, OR admin session). Returns the
+  // pubkeys of revoked connections; the gateway denies any MCP JWT whose
+  // `cnf.mcp_pub_b64` is in this set (until the JWT's own short exp). The gateway
+  // SHOULD cache this briefly (5–30s) and treat the short exp as the backstop.
+  app.get('/api/mcp/connections/revoked', requireAdminOrSystemKey, async (_req: Request, res: Response) => {
+    try {
+      const revoked_pubkeys = await listRevokedConnectionPubkeys();
+      res.json({ revoked_pubkeys, count: revoked_pubkeys.length });
+    } catch (error) {
+      console.error('[webui] Error listing revoked MCP connections:', error);
+      res.status(500).json({ error: 'Failed to list revoked connections' });
     }
   });
 

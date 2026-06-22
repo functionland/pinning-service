@@ -16,6 +16,10 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
+  "overrides": {
+    "ws": "^8.21.0",
+    "uuid": "$uuid"
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.962.0",
     "@functionland/fula-client": "^0.6.6",

@@ -1901,28 +1901,30 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // connection's JWT by its `cnf` binding.
 
   // Per-connection rate limit for the unauthenticated refresh endpoint: a simple
-  // in-memory token bucket keyed by the refresh-token hash (so it survives even
-  // though there's no session). Generous — a well-behaved client refreshes at
-  // most ~hourly. Honors skipRateLimit so the pg-gated tests (which refresh
-  // repeatedly) don't self-trip. In-memory is acceptable: a single webui process
-  // owns refresh, and the floor is the short JWT exp + revocation anyway.
+  // in-memory token bucket keyed by the CONNECTION id (NOT the request-supplied
+  // token hash — so an attacker spraying unknown tokens cannot grow this Map; we
+  // only ever bucket a successfully-resolved connection). Generous — a
+  // well-behaved client refreshes at most ~hourly. Honors skipRateLimit so the
+  // pg-gated tests (which refresh repeatedly) don't self-trip. In-memory is
+  // acceptable: a single webui process owns refresh, the global /api/ IP limiter
+  // backstops spray, and the floor is the short JWT exp + revocation anyway.
   const REFRESH_BUCKET_CAPACITY = 30; // burst
   const REFRESH_BUCKET_REFILL_PER_SEC = 30 / 60; // ~30/min sustained
   const refreshBuckets = new Map<string, { tokens: number; last: number }>();
-  function refreshRateLimitOk(hash: string): boolean {
+  function refreshRateLimitOk(connId: string): boolean {
     if (options?.skipRateLimit) return true;
     const now = Date.now();
-    const b = refreshBuckets.get(hash) ?? { tokens: REFRESH_BUCKET_CAPACITY, last: now };
+    const b = refreshBuckets.get(connId) ?? { tokens: REFRESH_BUCKET_CAPACITY, last: now };
     // Refill since last seen.
     const elapsedSec = (now - b.last) / 1000;
     b.tokens = Math.min(REFRESH_BUCKET_CAPACITY, b.tokens + elapsedSec * REFRESH_BUCKET_REFILL_PER_SEC);
     b.last = now;
     if (b.tokens < 1) {
-      refreshBuckets.set(hash, b);
+      refreshBuckets.set(connId, b);
       return false;
     }
     b.tokens -= 1;
-    refreshBuckets.set(hash, b);
+    refreshBuckets.set(connId, b);
     return true;
   }
 
@@ -1946,21 +1948,27 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
 
       const hash = hashRefreshToken(refreshTokenRaw);
 
-      if (!refreshRateLimitOk(hash)) {
-        return res.status(429).json({ error: 'Too many refreshes; slow down.' });
-      }
-
       const conn = await findMcpConnectionByRefreshHash(hash);
-      // Same 401 for "no such token" and "revoked" — don't disclose which.
+      // Same 401 for "no such token" and "revoked" — don't disclose which. (We
+      // look up BEFORE rate-limiting so unknown tokens can't grow the limiter
+      // Map; the global /api/ IP limiter caps spray volume.)
       if (!conn || conn.revoked) {
         return res.status(401).json({ error: 'Invalid or revoked refresh token.' });
       }
 
+      // Per-connection throttle, keyed by the resolved connection id.
+      if (!refreshRateLimitOk(conn.id)) {
+        return res.status(429).json({ error: 'Too many refreshes; slow down.' });
+      }
+
       // Re-mint PINNED to the stored scope (perms/bucket extracted explicitly;
-      // the cnf binding re-applied). A fresh jti each time.
+      // the cnf binding re-applied). A fresh jti each time. TTL parity with the
+      // real-mint path (config default; clamped inside mint).
       const { token, claims } = mintFromConnection(
         { user_id: conn.user_id, mcp_pub_b64: conn.mcp_pub_b64, scope: conn.scope },
         config.jwtSecret,
+        undefined,
+        config.mcpTokenTtlSeconds,
       );
 
       // Best-effort bookkeeping — never fail an already-minted token over it.

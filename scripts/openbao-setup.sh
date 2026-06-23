@@ -574,12 +574,12 @@ harden_ufw() {
     || die "Failed to allow port 80 (needed for Let's Encrypt HTTP-01). Halting." 3
   ok "UFW: port 80 allowed (ACME HTTP-01)."
 
-  # 3) HTTPS — provisionally open here; step 5 REPLACES this with Cloudflare-only
-  #    rules. We add a tagged temporary allow so OpenBao is reachable for init even
-  #    if step 5's CF fetch is deferred; step 5 removes it.
-  run ufw allow 443/tcp comment "openbao-https-temp" \
-    || die "Failed to allow port 443. Halting." 3
-  log "UFW: port 443 provisionally allowed (step 5 narrows this to Cloudflare only)."
+  # 3) HTTPS (443) is deliberately NOT opened here. Step 5 is the SOLE owner of all
+  #    443 rules and opens it ONLY for Cloudflare's IP ranges. This guarantees 443 is
+  #    never world-open, even transiently or if step 5's CF fetch later fails (it
+  #    halts instead of falling back to open). main() always runs step 5 before any
+  #    init, so OpenBao is reachable via Cloudflare from the moment it's needed.
+  log "UFW: 443 left closed here; step 5 opens it for Cloudflare CIDRs only."
 
   # 4) Enable LAST.
   if ufw status 2>/dev/null | grep -qi '^Status: active'; then
@@ -784,11 +784,18 @@ storage "raft" {
 
 # Plain HTTP on the internal listener; Caddy terminates TLS. Published to the host
 # loopback only (see docker-compose.yml) so this is never on the public interface.
+#
+# We deliberately do NOT set x_forwarded_for_authorized_addrs: OpenBao runs on the
+# docker bridge, so the source IP it sees for Caddy's proxied connection is the
+# bridge GATEWAY (e.g. 172.17.0.1), not 127.0.0.1. Setting authorized_addrs would
+# activate x_forwarded_for_reject_not_authorized (default true) with a value that
+# can't match -> 400 on every request. The cost of omitting it: the audit log's
+# remote_address shows the gateway, not the real client. That is acceptable given
+# the loopback-only trust boundary. (For accurate client IPs, use the Cloudflare
+# Tunnel upgrade in the README, not XFF.)
 listener "tcp" {
-  address                          = "0.0.0.0:8200"
-  tls_disable                      = true
-  # Trust X-Forwarded-For only from the loopback proxy (Caddy on the host).
-  x_forwarded_for_authorized_addrs = "127.0.0.1/32"
+  address     = "0.0.0.0:8200"
+  tls_disable = true
 }
 
 api_addr     = "http://127.0.0.1:8200"
@@ -847,7 +854,12 @@ services:
       - ${BAO_DATA_DIR}:/openbao/data
       - ${BAO_LOGS_DIR}:/openbao/logs
       - ${BAO_CONFIG_DIR}:/openbao/config:ro
-    # Raft + disable_mlock => no IPC_LOCK needed; tighten the rest.
+    # Raft + disable_mlock => zero Linux caps required (port 8200 > 1024 so no
+    # NET_BIND_SERVICE; writes to bind-mounts it owns as uid 100; image USER is
+    # already 'openbao' so no root->user privilege drop). cap_drop: ALL is the
+    # logical completion of disable_mlock. If OpenBao ever fails to start, the
+    # command 'docker logs openbao' names the cause — add back ONLY the cap it
+    # names (or remove this cap_drop); do not pre-guess the set. Validate on VPS.
     cap_drop:
       - ALL
     security_opt:
@@ -932,8 +944,8 @@ restrict_443_to_cloudflare() {
   # Reconcile idempotently: delete every previously-tagged CF rule, then re-add the
   # current set. This prevents rule accumulation across re-runs.
   delete_tagged_ufw_rules "$UFW_CF_COMMENT"
-  # Also remove the provisional world-open 443 rule from step 3 so the FINAL state is
-  # Cloudflare-only (not "open + CF").
+  # Defensive: also remove any stray world-open 443 rule a PRIOR version of this
+  # script may have created, so the FINAL state is strictly Cloudflare-only.
   delete_tagged_ufw_rules "openbao-https-temp"
 
   local cidr count=0
@@ -1004,11 +1016,16 @@ WORKER_SECRET_ID=""  # printed once in step 8
 # bao_exec <args...> : run the bao CLI inside the openbao container. Optionally
 # authenticated by exporting BAO_TOKEN via the caller's environment of THIS function
 # (we pass -e BAO_TOKEN explicitly only when ROOT_TOKEN is set).
+# NOTE: `-i` is REQUIRED so that callers piping data in (e.g. `policy write NAME -`
+# reading HCL from stdin) actually reach the container's stdin. Without -i, docker
+# does not forward the pipe and `policy write -` would silently write an EMPTY
+# policy. -i is harmless for the non-stdin calls (no TTY is allocated). No -t (we
+# never want a TTY in non-interactive/CI contexts).
 bao_exec() {
   if [ -n "${ROOT_TOKEN:-}" ]; then
-    docker exec -e "BAO_ADDR=http://127.0.0.1:8200" -e "BAO_TOKEN=${ROOT_TOKEN}" openbao bao "$@"
+    docker exec -i -e "BAO_ADDR=http://127.0.0.1:8200" -e "BAO_TOKEN=${ROOT_TOKEN}" openbao bao "$@"
   else
-    docker exec -e "BAO_ADDR=http://127.0.0.1:8200" openbao bao "$@"
+    docker exec -i -e "BAO_ADDR=http://127.0.0.1:8200" openbao bao "$@"
   fi
 }
 
@@ -1222,11 +1239,13 @@ configure_approle() {
     ok "approle auth enabled."
   fi
 
+  # NOTE: we do NOT pass secret_id_bound_cidrs / token_bound_cidrs — OpenBao can
+  # reject an empty-string CIDR as invalid, and "unbound" is the default anyway.
+  # (To pin the Worker's source CIDRs later, set them to real Cloudflare ranges.)
   bao_exec write "auth/approle/role/${OPENBAO_APPROLE_NAME}" \
       token_policies="${OPENBAO_POLICY_NAME}" \
       token_ttl=20m token_max_ttl=1h \
       secret_id_ttl=720h secret_id_num_uses=0 token_num_uses=0 \
-      secret_id_bound_cidrs="" token_bound_cidrs="" \
     || die "Failed to create/update AppRole '${OPENBAO_APPROLE_NAME}'. Halting." 3
   ok "AppRole '${OPENBAO_APPROLE_NAME}' bound to policy '${OPENBAO_POLICY_NAME}' (token TTL 20m/1h, secret-id TTL 30d)."
 

@@ -176,12 +176,21 @@ firewall, SSH, sysctl, and installs packages. Before any real deployment:
      (no global `443 ALLOW`).
    - `https://<domain>/v1/sys/health` answers (cert valid).
    - The audit log exists at `/opt/openbao/openbao/logs/openbao_audit.log`.
+   - **The Worker policy is non-empty** (guards against a silently-empty policy):
+     `docker exec openbao bao policy read fula-mcp-worker`
+     must show BOTH `transit/encrypt/...` and `transit/decrypt/...` with
+     `capabilities = ["update"]`. If it's empty, the Worker would get 403.
 5. **Crucially**, deploy a throwaway Worker and confirm it can actually reach
    `transit/decrypt` **through** the Cloudflare allowlist. If the Worker's egress is
    *not* in the published ranges, the allowlist will block your own Worker — switch to
    the Cloudflare Tunnel approach below.
 6. Re-run the script on the same box to confirm **idempotency** (everything reports
    "already …", nothing duplicates, `operator init` is skipped).
+
+If OpenBao does not come up, `docker logs openbao` names the cause. The container
+drops **all** Linux capabilities (`cap_drop: ALL`) because, with `disable_mlock`, it
+needs none; if a future image revision needs one, the log will name it — add back
+only that capability (or remove the `cap_drop` line), don't pre-guess the set.
 
 ---
 

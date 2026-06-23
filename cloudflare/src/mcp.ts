@@ -62,20 +62,36 @@ export interface FulaAuthProps {
 }
 
 /**
- * Resolve the authenticated Fula user_id from the current MCP auth context, or
- * null if there is no identity (which in production cannot happen — the OAuth
- * provider 401s before dispatch — so a null indicates misconfiguration).
- * Prefers the precomputed `props.userId`; recomputes from email as the source of
- * truth (both yield the same SHA-256(lowercased email) hex).
+ * Resolve the Fula user_id from a set of decrypted OAuth grant `props` — the
+ * LOAD-SIDE keying for the H2/H3 capability seam. This MUST agree, for the same
+ * human, with the STORE-SIDE keying in `capability.ts handleCapability` (which
+ * uses `emailToUserId(props.email)`), or an AI would OAuth-connect yet every tool
+ * call would fail "no capability found". Both sides read the SAME grant `props`
+ * (set once at federation, `google.ts` → `{ email, userId: emailToUserId(email) }`),
+ * so preferring the precomputed `props.userId` here yields the same value the
+ * store side derived. Recomputes from email when `props.userId` is absent/ill-
+ * shaped (the email is the source of truth). Returns null when there is no
+ * identity at all. Factored out (vs inlined in `resolveUserId`) so the seam test
+ * can drive the REAL load-side derivation rather than a copy of it.
  */
-async function resolveUserId(): Promise<string | null> {
-  const auth = getMcpAuthContext();
-  const props = auth?.props as FulaAuthProps | undefined;
+export async function resolveUserIdFromProps(
+  props: FulaAuthProps | undefined,
+): Promise<string | null> {
   if (!props?.email) return null;
   if (typeof props.userId === "string" && props.userId.length === 64) {
     return props.userId;
   }
   return emailToUserId(props.email);
+}
+
+/**
+ * Resolve the authenticated Fula user_id from the current MCP auth context, or
+ * null if there is no identity (which in production cannot happen — the OAuth
+ * provider 401s before dispatch — so a null indicates misconfiguration).
+ */
+async function resolveUserId(): Promise<string | null> {
+  const auth = getMcpAuthContext();
+  return resolveUserIdFromProps(auth?.props as FulaAuthProps | undefined);
 }
 
 /** Wrap a tool body with identity resolution + a uniform "not authenticated". */

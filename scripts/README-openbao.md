@@ -45,7 +45,8 @@ the KEK that protects all of them stays in OpenBao.
 3. **OS hardening** — UFW (default-deny incoming, **SSH allowed first + rate-limited**,
    80 for ACME, 443 later narrowed to Cloudflare), `fail2ban` sshd jail on the real
    SSH port, `unattended-upgrades`, Docker-safe `sysctl`, and SSH hardening
-   (root login off; password auth off **only when a non-root key already exists**).
+   (**root login AND password auth disabled only when a non-root key already
+   exists** — otherwise both are left enabled, with a warning, to avoid lockout).
 4. **OpenBao + Caddy** via Docker Compose. Caddy gets a Let's Encrypt certificate and
    reverse-proxies to OpenBao. OpenBao uses **integrated raft** storage, a **file
    audit device** (persisted), and is **not** run in `-dev` mode.
@@ -99,9 +100,11 @@ The script will **not** lock you out of SSH:
 - UFW order is load-bearing: it **allows SSH first** (`ufw limit` = rate-limited) — and
   additionally pins an allow rule for **your current client IP** — **before** enabling
   default-deny. It never runs `ufw reset`.
-- SSH password auth is disabled **only if** a **non-root** user already has a non-empty
-  `~/.ssh/authorized_keys` with a valid key line. Otherwise it **warns and skips** that
-  step so you can't strand yourself. Root login is always disabled.
+- **Both** SSH password auth **and** root login are disabled **only if** a **non-root**
+  user already has a non-empty `~/.ssh/authorized_keys` with a valid key line. Otherwise
+  the script **warns and leaves both enabled** so you can't strand yourself (on a
+  root-only fresh VPS, disabling root login with no other account = lockout). Create a
+  non-root sudo user with a key, then re-run to finish hardening.
 - The sshd change is written as a **drop-in** and validated with `sshd -t`; on failure
   the drop-in is removed and SSH is left untouched. The service is **reloaded, not
   restarted**, so existing sessions survive.

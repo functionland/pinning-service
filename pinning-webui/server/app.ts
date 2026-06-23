@@ -4094,6 +4094,23 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       return next();
     }
 
+    // L1b: also accept the system key presented as `Authorization: Bearer <key>`.
+    // The Rust gateway's connection-revocation poller authenticates this feed via
+    // bearer_auth(FULA_MCP_REVOCATION_INTERNAL_TOKEN), not the X-System-Key header.
+    // A normal user JWT api-key never equals config.systemKey, so the length-guard
+    // + timingSafeEqual leaves user bearers rejected (the auth-boundary test holds).
+    const authHeader = req.header('Authorization') || req.header('authorization');
+    if (authHeader && config.systemKey) {
+      const m = /^Bearer\s+(.+)$/i.exec(authHeader);
+      const bearerKey = m ? m[1] : undefined;
+      if (bearerKey &&
+          bearerKey.length === config.systemKey.length &&
+          crypto.timingSafeEqual(Buffer.from(bearerKey), Buffer.from(config.systemKey))) {
+        (req as any).isSystemCall = true;
+        return next();
+      }
+    }
+
     // Fall back to admin session authentication
     if (!req.session.user) {
       return res.status(401).json({ error: 'Unauthorized' });

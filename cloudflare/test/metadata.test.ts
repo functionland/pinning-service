@@ -25,6 +25,17 @@ async function getJson(path: string): Promise<{ status: number; json: any }> {
   return { status: res.status, json };
 }
 
+async function getStatus(path: string): Promise<number> {
+  const ctx = createExecutionContext();
+  const res = await worker.fetch(
+    new Request(`http://localhost${path}`, { method: "GET" }),
+    env as never,
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  return res.status;
+}
+
 describe("RFC 9728 — protected-resource metadata", () => {
   it("advertises the resource identifier and authorization server", async () => {
     const { status, json } = await getJson("/.well-known/oauth-protected-resource");
@@ -65,5 +76,43 @@ describe("RFC 8414 — authorization-server metadata", () => {
     // set in wrangler.toml / vitest miniflare). If this is false here, the compat
     // flag is not active in the test runtime — that's the thing to fix.
     expect(json.client_id_metadata_document_supported).toBe(true);
+  });
+});
+
+describe("PKCE S256 is ENFORCED at /authorize (not just advertised)", () => {
+  // These exercise the actual rejection path in the library's parseAuthRequest
+  // (the plain-PKCE / implicit-flow guards run BEFORE client lookup), surfaced by
+  // our defaultHandler as a 4xx. This is the runtime counterpart to the metadata
+  // assertions above — the task lists "PKCE-plain rejected" as a SEPARATE check.
+  const base =
+    "/authorize?response_type=code&client_id=test-client" +
+    "&redirect_uri=https%3A%2F%2Fclient.example%2Fcb&state=xyz" +
+    "&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+  it("REJECTS code_challenge_method=plain", async () => {
+    // allowPlainPKCE:false ⇒ parseAuthRequest throws ⇒ handler returns 400.
+    const status = await getStatus(`${base}&code_challenge_method=plain`);
+    expect(status).toBeGreaterThanOrEqual(400);
+    expect(status).toBeLessThan(500);
+  });
+
+  it("REJECTS an OMITTED code_challenge_method (defaults to plain)", async () => {
+    // The library defaults an absent method to "plain" — so omitting it must ALSO
+    // be rejected. (An S256 client therefore MUST send code_challenge_method=S256.)
+    const status = await getStatus(base);
+    expect(status).toBeGreaterThanOrEqual(400);
+    expect(status).toBeLessThan(500);
+  });
+
+  it("REJECTS the implicit flow (response_type=token)", async () => {
+    // allowImplicitFlow:false ⇒ parseAuthRequest throws on response_type=token.
+    const implicit =
+      "/authorize?response_type=token&client_id=test-client" +
+      "&redirect_uri=https%3A%2F%2Fclient.example%2Fcb&state=xyz" +
+      "&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM" +
+      "&code_challenge_method=S256";
+    const status = await getStatus(implicit);
+    expect(status).toBeGreaterThanOrEqual(400);
+    expect(status).toBeLessThan(500);
   });
 });

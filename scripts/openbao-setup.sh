@@ -589,7 +589,8 @@ harden_ufw() {
     ok "UFW enabled (default-deny incoming)."
   fi
 
-  printf '%s\n' "${C_GRN}${C_BLD}  ✔ You can still SSH in: UFW allows ${SSH_PORT}/tcp (rate-limited)${SSH_CLIENT_IP:+ and your IP ${SSH_CLIENT_IP}}.${C_RST}"
+  printf '%s\n' "${C_GRN}${C_BLD}  ✔ Firewall keeps SSH reachable: UFW allows ${SSH_PORT}/tcp (rate-limited)${SSH_CLIENT_IP:+ and your IP ${SSH_CLIENT_IP}}.${C_RST}"
+  log "  (SSH *auth* hardening — root login / password auth — is decided later, gated on a non-root key.)"
 }
 
 # ---- fail2ban -----------------------------------------------------------
@@ -668,28 +669,37 @@ EOF
 harden_sshd() {
   log "Hardening SSH (drop-in: ${SSHD_DROPIN})."
 
-  local disable_passwords="no" keyfile=""
+  # LOCKOUT RULE: disabling BOTH password auth AND root login on a host where the
+  # only way in is root-with-a-password (the default on most fresh VPSes) would
+  # strand the operator. So we gate *both* on the same precondition: a NON-root user
+  # already has a usable authorized_keys. If absent, we keep root login AND password
+  # auth enabled and tell the operator how to finish hardening on a re-run.
+  local harden_login="no" keyfile=""
   if keyfile="$(has_nonroot_authorized_key)"; then
-    disable_passwords="yes"
-    ok "Found a non-root SSH key (${keyfile}) — safe to disable password auth."
+    harden_login="yes"
+    ok "Found a non-root SSH key (${keyfile}) — safe to disable root login + password auth."
   else
     warn "No non-root user has an authorized_keys with a valid key."
-    warn "SKIPPING 'PasswordAuthentication no' to avoid locking you out."
-    warn "  -> Add your key first:  ssh-copy-id <youruser>@${OPENBAO_DOMAIN:-this-host}"
+    warn "Leaving BOTH root SSH login AND password auth ENABLED to avoid locking you out."
+    warn "  -> Create a non-root user and add your key, e.g.:"
+    warn "       adduser deploy && usermod -aG sudo deploy"
+    warn "       ssh-copy-id deploy@${OPENBAO_DOMAIN:-this-host}"
     warn "     then re-run this script to finish SSH hardening."
   fi
 
-  local pwline
-  if [ "$disable_passwords" = "yes" ]; then
+  local rootline pwline
+  if [ "$harden_login" = "yes" ]; then
+    rootline="PermitRootLogin no"
     pwline="PasswordAuthentication no"
   else
+    rootline="# PermitRootLogin left enabled (no non-root key detected) — see warning above"
     pwline="# PasswordAuthentication left enabled (no non-root key detected) — see warning above"
   fi
 
   write_file "$SSHD_DROPIN" "$(cat <<EOF
 # Managed by ${SCRIPT_NAME}. SSH hardening.
 Port ${SSH_PORT}
-PermitRootLogin no
+${rootline}
 ${pwline}
 PubkeyAuthentication yes
 ChallengeResponseAuthentication no
@@ -712,7 +722,11 @@ EOF
   run systemctl reload ssh 2>/dev/null \
     || run systemctl reload sshd 2>/dev/null \
     || warn "Could not reload the SSH service (config validated; reload manually if needed)."
-  ok "SSH hardened (root login disabled${disable_passwords:+, password auth ${disable_passwords}})."
+  if [ "$harden_login" = "yes" ]; then
+    ok "SSH hardened: root login disabled, password auth disabled (non-root key present)."
+  else
+    warn "SSH partially hardened: root login + password auth LEFT ENABLED (no non-root key). Re-run after adding one."
+  fi
 }
 
 # ============================================================================
@@ -1249,7 +1263,12 @@ configure_approle() {
     || die "Failed to create/update AppRole '${OPENBAO_APPROLE_NAME}'. Halting." 3
   ok "AppRole '${OPENBAO_APPROLE_NAME}' bound to policy '${OPENBAO_POLICY_NAME}' (token TTL 20m/1h, secret-id TTL 30d)."
 
-  # Fetch role-id (stable) and mint a fresh secret-id (shown once in step 8).
+  # Fetch role-id (stable across runs) and mint a fresh secret-id (shown once in
+  # step 8). NOTE: the role config above is an idempotent upsert, but each run
+  # INTENTIONALLY issues a NEW secret-id (there is no check-then-create for a
+  # secret you can't read back). Old secret-ids simply expire at their TTL; this is
+  # the rotation path. If you only want to (re)configure without a new secret-id,
+  # skip this script and run the role-config write by hand.
   WORKER_ROLE_ID="$(bao_exec read -format=json "auth/approle/role/${OPENBAO_APPROLE_NAME}/role-id" 2>/dev/null \
     | jq -r '.data.role_id')" || true
   if [ -z "$WORKER_ROLE_ID" ] || [ "$WORKER_ROLE_ID" = "null" ]; then

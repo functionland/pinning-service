@@ -23,7 +23,19 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
+import { z } from "zod";
 import { emailToUserId } from "./userId.js";
+import type { CapabilityEnv } from "./capability.js";
+import {
+  storeFile,
+  readFile,
+  listFiles,
+  searchStub,
+  tagFileStub,
+  listTagsStub,
+  type ToolResult,
+} from "./fula/tools.js";
+import { CATEGORIES } from "./fula/classify.js";
 
 /** Path the MCP Streamable-HTTP endpoint is served at. Must equal the
  *  OAuthProvider `apiRoute` in index.ts and the `resource` in the RFC 9728
@@ -50,12 +62,50 @@ export interface FulaAuthProps {
 }
 
 /**
+ * Resolve the authenticated Fula user_id from the current MCP auth context, or
+ * null if there is no identity (which in production cannot happen — the OAuth
+ * provider 401s before dispatch — so a null indicates misconfiguration).
+ * Prefers the precomputed `props.userId`; recomputes from email as the source of
+ * truth (both yield the same SHA-256(lowercased email) hex).
+ */
+async function resolveUserId(): Promise<string | null> {
+  const auth = getMcpAuthContext();
+  const props = auth?.props as FulaAuthProps | undefined;
+  if (!props?.email) return null;
+  if (typeof props.userId === "string" && props.userId.length === 64) {
+    return props.userId;
+  }
+  return emailToUserId(props.email);
+}
+
+/** Wrap a tool body with identity resolution + a uniform "not authenticated". */
+async function withUser(
+  run: (userId: string) => Promise<ToolResult>,
+): Promise<ToolResult> {
+  const userId = await resolveUserId();
+  if (!userId) {
+    return {
+      isError: true,
+      content: [
+        { type: "text", text: "Not authenticated: no Fula identity in this MCP session." },
+      ],
+    };
+  }
+  return run(userId);
+}
+
+/**
  * Build a FRESH `McpServer` for a single request. The stateless handler REQUIRES
  * a new instance per request — reusing a connected server throws
  * ("Server is already connected to a transport. Create a new McpServer instance
  * per request for stateless handlers.").
+ *
+ * `env` carries the custody + OpenBao bindings the real tools need to load a
+ * session capability. It is OPTIONAL so the H1 identity tests (which only drive
+ * `fula_ping`) can call `buildServer()` with no env; the workspace tools are only
+ * reachable when a real env is supplied (production passes it per request).
  */
-export function buildServer(): McpServer {
+export function buildServer(env?: CapabilityEnv): McpServer {
   const server = new McpServer(SERVER_INFO);
 
   // ── fula_ping — the H1 stub tool ───────────────────────────────────────────
@@ -111,6 +161,119 @@ export function buildServer(): McpServer {
     },
   );
 
+  // ── The workspace tools (H3) ───────────────────────────────────────────────
+  // Only registered when a real env is supplied (they need custody + OpenBao).
+  // The `env` is closed over per request — there is no ambient env inside a tool
+  // callback in Workers, so capturing it here is how the tools reach custody.
+  if (env) {
+    const categoryEnum = z.enum(CATEGORIES);
+
+    server.registerTool(
+      "fula_store_file",
+      {
+        title: "Store a file in the AI workspace",
+        description:
+          "Encrypt and upload a file into your private AI workspace (a dedicated, " +
+          "end-to-end-encrypted area, FxFiles-compatible format). Returns the key " +
+          "you use to read it back. `encoding` MUST be 'base64' for binary files " +
+          "and 'utf8' for text — choosing wrong corrupts the bytes. Files are " +
+          "AI-workspace-private: the AI can read them back; the FxFiles app cannot " +
+          "yet read AI-written files.",
+        inputSchema: {
+          content: z.string().describe("File contents, encoded per `encoding`."),
+          encoding: z
+            .enum(["utf8", "base64"])
+            .describe("'utf8' for text, 'base64' for binary. Required."),
+          name: z.string().optional().describe("Filename (drives category + key)."),
+          mime: z.string().optional().describe("MIME type, e.g. image/png."),
+          tags: z.array(z.string()).optional().describe("Optional tags (advisory)."),
+          category: categoryEnum.optional().describe("Override the auto category."),
+        },
+      },
+      async (a) =>
+        withUser((userId) =>
+          storeFile(env, userId, {
+            content: a.content,
+            encoding: a.encoding,
+            name: a.name,
+            mime: a.mime,
+            tags: a.tags,
+            category: a.category,
+          }),
+        ),
+    );
+
+    server.registerTool(
+      "fula_read_file",
+      {
+        title: "Read a file from the AI workspace",
+        description:
+          "Download and decrypt one of YOUR AI-workspace files by its key " +
+          "(ai/<category>/<id>-<name>). Returns the content. Defaults to 'base64' " +
+          "(lossless for any bytes); pass encoding 'utf8' to get text directly " +
+          "(errors if the file is not valid UTF-8).",
+        inputSchema: {
+          key: z.string().describe("The workspace key returned by fula_store_file."),
+          encoding: z
+            .enum(["utf8", "base64"])
+            .optional()
+            .describe("Output encoding; default 'base64'."),
+        },
+      },
+      async (a) =>
+        withUser((userId) => readFile(env, userId, { key: a.key, encoding: a.encoding })),
+    );
+
+    server.registerTool(
+      "fula_list_files",
+      {
+        title: "List AI-workspace files",
+        description:
+          "List the files in your AI workspace (confined to the ai/ scope), " +
+          "optionally filtered by category or a key substring.",
+        inputSchema: {
+          category: categoryEnum.optional().describe("Only this category."),
+          prefix: z.string().optional().describe("Keep keys containing this substring."),
+        },
+      },
+      async (a) =>
+        withUser((userId) => listFiles(env, userId, { category: a.category, prefix: a.prefix })),
+    );
+
+    // Stubs — honest "not yet implemented in hosted" (H3b). Registered so they
+    // appear in tools/list with a clear signal rather than being silently absent.
+    server.registerTool(
+      "fula_search",
+      {
+        title: "Search AI-workspace files (not yet in hosted)",
+        description: "Search AI-workspace files. Not yet implemented in the hosted MCP (H3b).",
+        inputSchema: { query: z.string().describe("Search query.") },
+      },
+      async () => withUser(async () => searchStub()),
+    );
+    server.registerTool(
+      "fula_tag_file",
+      {
+        title: "Tag an AI-workspace file (not yet in hosted)",
+        description: "Add tags to a file. Not yet implemented in the hosted MCP (H3b).",
+        inputSchema: {
+          key: z.string().describe("The file key."),
+          tags: z.array(z.string()).describe("Tags to add."),
+        },
+      },
+      async () => withUser(async () => tagFileStub()),
+    );
+    server.registerTool(
+      "fula_list_tags",
+      {
+        title: "List AI-workspace tags (not yet in hosted)",
+        description: "List all tags. Not yet implemented in the hosted MCP (H3b).",
+        inputSchema: {},
+      },
+      async () => withUser(async () => listTagsStub()),
+    );
+  }
+
   return server;
 }
 
@@ -122,7 +285,10 @@ export function buildServer(): McpServer {
  */
 export const mcpApiHandler = {
   fetch(request: Request, env: unknown, ctx: ExecutionContext): Response | Promise<Response> {
-    return createMcpHandler(buildServer(), { route: MCP_ROUTE })(
+    // The runtime env is a superset of CapabilityEnv (custody DB + OpenBao +
+    // OAUTH_PROVIDER). Pass it so the workspace tools can load a session
+    // capability; the identity still flows via getMcpAuthContext().
+    return createMcpHandler(buildServer(env as CapabilityEnv), { route: MCP_ROUTE })(
       request,
       env as never,
       ctx as never,

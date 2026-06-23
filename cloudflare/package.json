@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "0.8.1",
+    "@functionland/fula-client": "^0.6.16",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@noble/ciphers": "^2.0.1",
     "agents": "0.16.2",

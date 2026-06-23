@@ -1,0 +1,15 @@
+# Local secrets for `wrangler dev`. COPY to `.dev.vars` (gitignored) and fill in.
+# At deploy time these become Worker secrets via `wrangler secret put <NAME>`.
+#
+# Reuse the SAME Google OAuth Web client the Fula stack uses so the federated
+# identity (and therefore user_id = SHA256(lowercased email)) is consistent
+# with pinning-webui. In the pinning-webui repo these are env GOOGLE_CLIENT_ID
+# / the matching client secret. DO NOT commit the real values.
+
+GOOGLE_CLIENT_ID="your-google-web-client-id.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET="your-google-oauth-client-secret"
+
+# 32-byte hex, random. Encrypts the short-lived upstream-OAuth state cookie that
+# carries the in-flight MCP authorization request across the Google round-trip.
+# Generate:  openssl rand -hex 32
+COOKIE_ENCRYPTION_KEY="0000000000000000000000000000000000000000000000000000000000000000"

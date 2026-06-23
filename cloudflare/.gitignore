@@ -1,0 +1,10 @@
+# Cloudflare Worker (cloudflare/) — local artifacts and secrets.
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+worker-configuration.d.ts
+*.log
+coverage/

@@ -1,0 +1,62 @@
+# Fula hosted (remote) MCP server — Cloudflare Worker.
+# H1 skeleton: OAuth 2.1 resource server + Google federation + stub tool.
+#
+# DEPLOY IS USER-GATED. This file is configured for `wrangler dev` (local) and
+# `vitest-pool-workers` (tests) only. To deploy to the user's Cloudflare account,
+# the operator must (1) create the KV namespace and paste its id below,
+# (2) set the secrets (see `.dev.vars.example`), and (3) uncomment a route /
+# custom domain. Until then `wrangler deploy` will (intentionally) not have a
+# real KV id and must not be run.
+
+name = "fula-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-11-01"
+
+# nodejs_compat            → jose + node:crypto style APIs used by the deps.
+# global_fetch_strictly_public → REQUIRED for CIMD (Client ID Metadata Document)
+#   support in @cloudflare/workers-oauth-provider; without it the library's
+#   `client_id_metadata_document_supported` advertises false (SSRF hardening:
+#   the library will only fetch a client_id metadata URL over the public
+#   internet, never internal addresses).
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+
+# ── KV: the OAuth provider's token / grant / client store ────────────────────
+# The library REQUIRES a binding literally named `OAUTH_KV`.
+# For `wrangler dev` (local) and vitest, miniflare simulates this in-memory, so
+# the placeholder id below is never contacted locally. Replace `id` before any
+# real deploy:  `wrangler kv namespace create OAUTH_KV`  → paste the returned id.
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "0000000000000000000000000000_PLACEHOLDER_REPLACE_BEFORE_DEPLOY"
+
+# ── Non-secret vars ──────────────────────────────────────────────────────────
+# These are NOT secrets (safe to commit). They are placeholders for H1.
+# CANONICAL_ORIGIN must equal the deployed Worker origin at H4 so the RFC 9728
+# protected-resource `resource` identifier and the canonical-host guard match
+# what real clients (Claude.ai / ChatGPT) bind their tokens to.
+[vars]
+CANONICAL_ORIGIN = "https://fula-mcp.example.workers.dev"
+# Google OAuth — the *non-secret* client id and the upstream endpoints. The
+# real value is injected as a Worker SECRET (GOOGLE_CLIENT_ID) at deploy time
+# and via `.dev.vars` locally; this placeholder lets `wrangler dev` boot the
+# metadata endpoints without auth configured. NEVER hardcode the real id here.
+GOOGLE_CLIENT_ID = ""
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+
+# ── Custom domain / route (commented — user-gated deploy) ────────────────────
+# Uncomment ONE of these at H4 once the user picks the hosted MCP hostname and
+# it is added to their Cloudflare zone. The hostname here MUST equal
+# CANONICAL_ORIGIN above.
+# routes = [
+#   { pattern = "fula-mcp.fx.land", custom_domain = true }
+# ]
+
+# ── Secrets (NOT set here — see `.dev.vars.example`) ─────────────────────────
+# Set via `wrangler secret put <NAME>` (deploy) or `.dev.vars` (local):
+#   GOOGLE_CLIENT_ID       — the Fula Google OAuth Web client id (reuse the
+#                            pinning-webui's: env GOOGLE_CLIENT_ID).
+#   GOOGLE_CLIENT_SECRET   — the matching Google OAuth client secret.
+#   COOKIE_ENCRYPTION_KEY  — random 32-byte hex; encrypts the short-lived
+#                            upstream-OAuth state/approval cookie.

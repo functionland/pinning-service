@@ -125,14 +125,17 @@ interface CapabilityRow {
   last_used_at: number | null;
 }
 
-/** Minimal D1 surface we use (so the module is easy to unit-test). */
+/** A prepared+bound statement (the subset we use). */
+export interface D1StmtLike {
+  run(): Promise<unknown>;
+  first<T = unknown>(): Promise<T | null>;
+}
+
+/** Minimal D1 surface we use (so the module is easy to unit-test). `batch` runs
+ *  the given statements ATOMICALLY (D1 wraps a batch in a transaction). */
 export interface D1Like {
-  prepare(query: string): {
-    bind(...values: unknown[]): {
-      run(): Promise<unknown>;
-      first<T = unknown>(): Promise<T | null>;
-    };
-  };
+  prepare(query: string): { bind(...values: unknown[]): D1StmtLike };
+  batch(statements: D1StmtLike[]): Promise<unknown>;
 }
 
 // ── AAD construction ─────────────────────────────────────────────────────────
@@ -218,33 +221,43 @@ export async function sealCapability(
   }
 
   const nowSec = Math.floor(Date.now() / 1000);
-  // UPSERT: one row per user. Overwriting rotates record_id + DEK + nonce.
-  await db
-    .prepare(
-      `INSERT INTO mcp_capabilities
-         (user_id, record_id, capability_ciphertext, wrapped_dek, dek_version, alg, endpoint, created_at, last_used_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)
-       ON CONFLICT(user_id) DO UPDATE SET
-         record_id = excluded.record_id,
-         capability_ciphertext = excluded.capability_ciphertext,
-         wrapped_dek = excluded.wrapped_dek,
-         dek_version = excluded.dek_version,
-         alg = excluded.alg,
-         endpoint = excluded.endpoint,
-         created_at = excluded.created_at,
-         last_used_at = NULL`,
-    )
-    .bind(
-      userId,
-      recordId,
-      ciphertext,
-      wrappedDek,
-      DEK_VERSION,
-      ALG,
-      cap.endpoint ?? null,
-      nowSec,
-    )
-    .run();
+  // ATOMIC seal: the capability UPSERT and its audit row are written in ONE D1
+  // batch (D1 wraps a batch in a transaction), so a persisted credential ALWAYS
+  // has a matching `capability_sealed` audit row — the seal and its audit cannot
+  // diverge (advisor: Codex flagged the seal-succeeds-but-audit-fails gap). The
+  // UPSERT keeps one row per user; overwriting rotates record_id + DEK + nonce.
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO mcp_capabilities
+           (user_id, record_id, capability_ciphertext, wrapped_dek, dek_version, alg, endpoint, created_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)
+         ON CONFLICT(user_id) DO UPDATE SET
+           record_id = excluded.record_id,
+           capability_ciphertext = excluded.capability_ciphertext,
+           wrapped_dek = excluded.wrapped_dek,
+           dek_version = excluded.dek_version,
+           alg = excluded.alg,
+           endpoint = excluded.endpoint,
+           created_at = excluded.created_at,
+           last_used_at = NULL`,
+      )
+      .bind(
+        userId,
+        recordId,
+        ciphertext,
+        wrappedDek,
+        DEK_VERSION,
+        ALG,
+        cap.endpoint ?? null,
+        nowSec,
+      ),
+    db
+      .prepare(
+        `INSERT INTO mcp_audit (user_id, action, ts, detail) VALUES (?1, ?2, ?3, ?4)`,
+      )
+      .bind(userId, "capability_sealed", nowSec, JSON.stringify({ record_id: recordId })),
+  ]);
 
   return recordId;
 }

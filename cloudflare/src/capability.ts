@@ -148,7 +148,11 @@ export async function handleCapability(
     return json(503, { error: "custody_unavailable" });
   }
 
-  // ── 4. Append-only audit (non-secret context only) ────────────────────────
+  // ── 4. Supplementary audit (non-secret context; best-effort) ──────────────
+  // sealCapability already wrote an ATOMIC `capability_sealed` audit row in the
+  // same D1 batch as the credential, so the seal is never unaudited. This extra
+  // `capability_delegated` row adds delegation context (the client_id) and is
+  // best-effort — its failure must not undo a successful seal.
   await recordAudit(env.CUSTODY_DB, userId, "capability_delegated", {
     record_id: recordId,
     client_id: summary.grant?.clientId,

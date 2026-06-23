@@ -32,6 +32,7 @@ import {
   type D1Like,
 } from "../src/custody.js";
 import { OpenBaoTransit, type OpenBaoConfig } from "../src/openbao.js";
+import { handleCapability, type CapabilityEnv } from "../src/capability.js";
 
 const LIVE = env.OPENBAO_LIVE === "1";
 const describeLive = LIVE ? describe : describe.skip;
@@ -303,6 +304,103 @@ describe("POST /capability delegation — auth is enforced", () => {
     );
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(405);
+  });
+});
+
+// ── 6b. Delegation endpoint plumbing — with a FAKE unwrapToken ────────────────
+// Per the advisor (Codex): test the endpoint's identity/seal PLUMBING with a fake
+// OAuth provider rather than reverse-engineering the library's private token
+// crypto (which would couple the test to a library-private constant). We inject a
+// fake `unwrapToken` that returns a chosen token summary, call handleCapability
+// directly with the real CUSTODY_DB + real OpenBao, and assert the happy path
+// (seal + 204) and the scope / identity gates. Needs a live OpenBao to seal.
+describeLive("POST /capability plumbing (fake unwrapToken; real seal)", () => {
+  // SHA-256("deleg-test@example.com") — the user_id this fake identity maps to.
+  const EMAIL = "deleg-test@example.com";
+  let USER_ID = "";
+
+  function envWith(summary: unknown): CapabilityEnv {
+    return {
+      ...(env as unknown as CapabilityEnv),
+      OAUTH_PROVIDER: {
+        // Only unwrapToken is exercised by handleCapability.
+        unwrapToken: async () => summary,
+      } as unknown as CapabilityEnv["OAUTH_PROVIDER"],
+    };
+  }
+
+  function req(): Request {
+    return new Request("http://localhost/capability", {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: "Bearer x" },
+      body: JSON.stringify(CAP),
+    });
+  }
+
+  beforeAll(async () => {
+    const { emailToUserId } = await import("../src/userId.js");
+    USER_ID = await emailToUserId(EMAIL);
+  });
+
+  it("a VALID token (scope mcp, matching identity) → 204 + row persisted + audited", async () => {
+    const summary = {
+      userId: USER_ID,
+      scope: ["mcp"],
+      grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID } },
+    };
+    const res = await handleCapability(req(), envWith(summary));
+    expect(res.status).toBe(204);
+    // The capability was actually sealed for this user, and re-opens correctly.
+    const opened = await openCapability(db(), liveBao(), USER_ID);
+    expect(opened).not.toBeNull();
+    expect(opened!.get()).toEqual(CAP);
+    opened!.dispose();
+    // An atomic `capability_sealed` audit row exists for this user.
+    const audit = await (env.CUSTODY_DB as unknown as {
+      prepare(q: string): { bind(...v: unknown[]): { first<T>(): Promise<T | null> } };
+    })
+      .prepare("SELECT action FROM mcp_audit WHERE user_id=?1 AND action='capability_sealed' LIMIT 1")
+      .bind(USER_ID)
+      .first<{ action: string }>();
+    expect(audit?.action).toBe("capability_sealed");
+  });
+
+  it("a token WITHOUT the mcp scope → 401 insufficient_scope (no seal)", async () => {
+    const summary = {
+      userId: USER_ID,
+      scope: ["openid"],
+      grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID } },
+    };
+    const res = await handleCapability(req(), envWith(summary));
+    expect(res.status).toBe(401);
+    expect((await res.text()).toLowerCase()).toContain("insufficient_scope");
+  });
+
+  it("a token whose userId disagrees with props.email → 401 identity_mismatch", async () => {
+    // props.email hashes to USER_ID, but the token claims a DIFFERENT subject.
+    const summary = {
+      userId: "f".repeat(64),
+      scope: ["mcp"],
+      grant: { clientId: "fxfiles", props: { email: EMAIL } },
+    };
+    const res = await handleCapability(req(), envWith(summary));
+    expect(res.status).toBe(401);
+    expect((await res.text()).toLowerCase()).toContain("identity_mismatch");
+  });
+
+  it("a malformed capability body → 400 (valid auth, bad payload)", async () => {
+    const summary = {
+      userId: USER_ID,
+      scope: ["mcp"],
+      grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID } },
+    };
+    const badReq = new Request("http://localhost/capability", {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: "Bearer x" },
+      body: JSON.stringify({ workspace_secret: "only-one-field" }),
+    });
+    const res = await handleCapability(badReq, envWith(summary));
+    expect(res.status).toBe(400);
   });
 });
 

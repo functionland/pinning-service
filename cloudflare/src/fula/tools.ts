@@ -178,7 +178,18 @@ export interface StoreArgs {
 
 /**
  * Classify → encrypt → upload under `fula-ai-workspace`/`ai/<category>/…`, in the
- * FxFiles-compatible format. Returns `{ key, bucket, etag, category }`.
+ * FxFiles-compatible format. Returns `{ key, bucket, etag, category, tags }`.
+ *
+ * If `tags` is non-empty, the file is ALSO associated with those tags in the AI's
+ * tag document (the SAME read-modify-write `fula_tag_file` performs) so it is
+ * findable by `fula_list_tags` / `fula_search(tag:…)` — the tags are not merely
+ * echoed. The tag write happens in the SAME session, AFTER a successful upload,
+ * and is BEST-EFFORT: a tag-write failure does NOT fail the store (the file is
+ * already stored). It is surfaced as a `tag_warning` and `tags: []` instead, so
+ * the response never claims a file is tagged when the association did not persist.
+ * (The local Rust `fula-mcp` `store_file` takes no tags and never auto-tags, so
+ * there is no precedent to mirror; best-effort-with-warning is the chosen
+ * semantics — the primary outcome, the stored file, is preserved.)
  *
  * NOTE the response flags that the file is AI-workspace-private (FxFiles owner-
  * share minting is not available via the hosted client — H3b).
@@ -206,22 +217,53 @@ export async function storeFile(
   }
   const contentType = args.mime && args.mime.length > 0 ? args.mime : defaultContentType(isText);
 
+  // The tags to actually apply: trimmed, empty/whitespace dropped (same filter
+  // `applyTagging`/`fula_tag_file` use). When this is empty we skip the tag-doc
+  // round-trip entirely, so `store` without (usable) tags is byte-for-byte the
+  // prior behavior — no tag document is read or written.
+  const requestedTags = Array.isArray(args.tags)
+    ? args.tags.map((t) => t.trim()).filter((t) => t.length > 0)
+    : [];
+  const now = nowIso8601();
+
   try {
     const result = await withWorkspaceClient(env, userId, async (client) => {
+      // The file upload is the primary, retry-on-401 operation.
       const put = await putEncryptedWithType(client, WORKSPACE_BUCKET, key, data, contentType);
-      return put;
+      // BEST-EFFORT tagging in the SAME session, AFTER the file is stored. We do
+      // NOT let a tag failure throw (that would fail the whole store, or re-trigger
+      // the file upload on the 401 retry): the file IS stored, so the worst case is
+      // an un-tagged-but-stored file plus a warning.
+      let appliedTags: string[] = [];
+      let tagWarning: string | undefined;
+      if (requestedTags.length > 0) {
+        try {
+          await applyTaggingToDoc(client, userId, key, requestedTags, now);
+          appliedTags = requestedTags;
+        } catch (te) {
+          tagWarning =
+            te instanceof CorruptTagDocumentError
+              ? `file stored, but tagging was skipped: ${te.message}`
+              : `file stored, but applying tags failed: ${toolErrorMessage(te, "tag_file")}`;
+        }
+      }
+      return { put, appliedTags, tagWarning };
     });
     await recordAudit(env.CUSTODY_DB, userId, "mcp_store_file", {
       key,
       category,
       bytes: data.length,
+      tags: result.appliedTags.length,
     });
     return ok({
       key,
       bucket: WORKSPACE_BUCKET,
       category,
-      etag: typeof result.etag === "string" ? result.etag : undefined,
-      tags: args.tags ?? [],
+      etag: typeof result.put.etag === "string" ? result.put.etag : undefined,
+      // The tags actually associated with the file (searchable), NOT a bare echo.
+      tags: result.appliedTags,
+      ...(requestedTags.length > 0 ? { metadata_key: TAG_METADATA_KEY } : {}),
+      ...(result.tagWarning ? { tag_warning: result.tagWarning } : {}),
       visibility: "ai-workspace-private",
       note:
         "Stored in your AI workspace (FxFiles-compatible encrypted format). " +
@@ -735,6 +777,43 @@ function isNotFound(e: unknown): boolean {
  *  exercised in H4, not here. */
 export const isNotFoundForTest = isNotFound;
 
+/**
+ * The shared tag-doc read-modify-write, factored out so BOTH `fula_tag_file` and
+ * `fula_store_file`'s auto-tagging drive the SAME path (no duplicated tag-doc
+ * logic). Given a live workspace `client`, it loads the document (or starts empty
+ * on not-found), applies `tagNames` × the file, bumps `updatedAt`, and writes the
+ * document back to TAG_METADATA_KEY in FxFiles' native TagCloudMetadata bytes
+ * (last-writer-wins, like the Rust + the app's syncToCloud). Returns what changed.
+ *
+ * Callers are responsible for scope-validating `fileKey` and for filtering empty
+ * tag names up front (mirrors `fula_tag_file`'s pre-checks); a `CorruptTagDocumentError`
+ * propagates so each caller can decide how to surface it (a hard error in
+ * `fula_tag_file`; a best-effort warning in `fula_store_file`).
+ */
+async function applyTaggingToDoc(
+  client: EncryptedClient,
+  userId: string,
+  fileKey: string,
+  tagNames: string[],
+  now: string,
+): Promise<TagOutcome> {
+  const existing = await loadTagDocument(client);
+  const doc = existing ?? emptyMetadata(userId.length > 0 ? userId : FALLBACK_USER_ID, now);
+  const fileName = filenameOfKey(fileKey);
+  const { createdTags, addedAssociations } = applyTagging(doc, fileKey, fileName, tagNames, now);
+  // Always bump updatedAt to reflect this call (matches the app's syncToCloud).
+  doc.updatedAt = now;
+  const json = serializeTagDocument(doc);
+  await putEncryptedWithType(
+    client,
+    WORKSPACE_BUCKET,
+    TAG_METADATA_KEY,
+    new TextEncoder().encode(json),
+    "application/json",
+  );
+  return { metadata: doc, createdTags, addedAssociations } satisfies TagOutcome;
+}
+
 // ── Tool: fula_tag_file ──────────────────────────────────────────────────────
 export interface TagFileArgs {
   key: string;
@@ -768,21 +847,7 @@ export async function tagFile(
   const now = nowIso8601();
   try {
     const outcome = await withWorkspaceClient(env, userId, async (client) => {
-      const existing = await loadTagDocument(client);
-      const doc = existing ?? emptyMetadata(userId.length > 0 ? userId : FALLBACK_USER_ID, now);
-      const fileName = filenameOfKey(fileKey);
-      const { createdTags, addedAssociations } = applyTagging(doc, fileKey, fileName, names, now);
-      // Always bump updatedAt to reflect this call (matches the app's syncToCloud).
-      doc.updatedAt = now;
-      const json = serializeTagDocument(doc);
-      await putEncryptedWithType(
-        client,
-        WORKSPACE_BUCKET,
-        TAG_METADATA_KEY,
-        new TextEncoder().encode(json),
-        "application/json",
-      );
-      return { metadata: doc, createdTags, addedAssociations } satisfies TagOutcome;
+      return applyTaggingToDoc(client, userId, fileKey, names, now);
     });
     await recordAudit(env.CUSTODY_DB, userId, "mcp_tag_file", {
       key: fileKey,

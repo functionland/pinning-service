@@ -1187,9 +1187,16 @@ configure_transit() {
   if bao_exec audit list -format=json 2>/dev/null | jq -e '."file/"' >/dev/null 2>&1; then
     ok "Audit device 'file/' already enabled."
   else
-    bao_exec audit enable file file_path=/openbao/logs/openbao_audit.log \
-      || die "Failed to enable the file audit device (is /openbao/logs writable by uid ${OPENBAO_UID}?). Halting." 3
-    ok "Audit device enabled -> ${BAO_LOGS_DIR}/openbao_audit.log (host)."
+    # OpenBao 2.5.x removed API-based audit-enable: PUT /sys/audit/* returns 400
+    # "cannot enable audit device via API; use declarative, config-based audit
+    # device management instead". Try the API (works on older OpenBao), but do
+    # NOT halt the whole setup if it fails — the KEK + AppRole (what the Worker
+    # needs) are what matter; the file audit log is defense-in-depth.
+    if bao_exec audit enable file file_path=/openbao/logs/openbao_audit.log 2>/dev/null; then
+      ok "Audit device enabled -> ${BAO_LOGS_DIR}/openbao_audit.log (host)."
+    else
+      warn "Could not enable a file audit device via the API (OpenBao 2.5+ requires declarative, config-based audit). Continuing WITHOUT a local audit log. To enable it, add an audit \"file\" { file_path = \"/openbao/logs/openbao_audit.log\" } stanza to openbao.hcl and restart. The KEK + AppRole are unaffected."
+    fi
   fi
 
   # --- Transit engine ---

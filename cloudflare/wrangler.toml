@@ -29,6 +29,20 @@ compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 binding = "OAUTH_KV"
 id = "0000000000000000000000000000_PLACEHOLDER_REPLACE_BEFORE_DEPLOY"
 
+# ── D1: the custody store (H2) ───────────────────────────────────────────────
+# Holds the per-user ENVELOPE-ENCRYPTED capability + an append-only audit log
+# (see schema.sql). Nothing secret is stored in plaintext; the DEK that encrypts
+# each capability is itself wrapped by OpenBao transit (a different trust domain),
+# so a dump of this DB — even with the Worker's own secrets — decrypts to nothing.
+# For `wrangler dev` + vitest, miniflare simulates D1 locally (the placeholder
+# database_id below is never contacted). Before a real deploy:
+#   wrangler d1 create fula_mcp_custody    → paste the returned database_id
+#   wrangler d1 execute fula_mcp_custody --remote --file ./schema.sql
+[[d1_databases]]
+binding = "CUSTODY_DB"
+database_name = "fula_mcp_custody"
+database_id = "00000000-0000-0000-0000-000000000000"
+
 # ── Non-secret vars ──────────────────────────────────────────────────────────
 # These are NOT secrets (safe to commit). They are placeholders for H1.
 # CANONICAL_ORIGIN must equal the deployed Worker origin at H4 so the RFC 9728
@@ -60,3 +74,17 @@ GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 #   GOOGLE_CLIENT_SECRET   — the matching Google OAuth client secret.
 #   COOKIE_ENCRYPTION_KEY  — random 32-byte hex; encrypts the short-lived
 #                            upstream-OAuth state/approval cookie.
+#
+# ── OpenBao transit (the CUSTODY KEK — a DIFFERENT trust domain) ──────────────
+#   OPENBAO_ADDR           — https URL of the self-hosted OpenBao (e.g.
+#                            https://bao.fx.land). The KEK lives ONLY here.
+#   OPENBAO_ROLE_ID        — the Worker's AppRole role-id (stable; printed by
+#                            scripts/openbao-setup.sh step 8). Not secret alone,
+#                            but treated as a secret for least-exposure.
+#   OPENBAO_SECRET_ID      — the AppRole secret-id (rotating; minted by the setup
+#                            script). role-id + secret-id → a short-lived token.
+#   OPENBAO_TRANSIT_KEY    — the transit key name. MUST equal the setup script's
+#                            OPENBAO_KEY_NAME (default "fula-mcp-workspace-kek").
+# The Worker's OpenBao policy grants ONLY transit/encrypt + transit/decrypt on
+# this key (no key read/export) — so even a fully-compromised Worker can wrap and
+# unwrap DEKs (rate-limited + audited) but can NEVER exfiltrate the KEK itself.

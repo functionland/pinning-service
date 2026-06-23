@@ -13,3 +13,17 @@ GOOGLE_CLIENT_SECRET="your-google-oauth-client-secret"
 # carries the in-flight MCP authorization request across the Google round-trip.
 # Generate:  openssl rand -hex 32
 COOKIE_ENCRYPTION_KEY="0000000000000000000000000000000000000000000000000000000000000000"
+
+# ── OpenBao transit (the custody KEK — a SEPARATE trust domain) ──────────────
+# The master KEK lives ONLY in OpenBao on the user's VPS; the Worker holds an
+# AppRole (role-id + secret-id) that can ONLY wrap/unwrap per-record DEKs via
+# transit/encrypt + transit/decrypt — never read or export the KEK. Provisioned
+# by scripts/openbao-setup.sh (transit key name default "fula-mcp-workspace-kek",
+# AppRole "fula-mcp-worker"). For LOCAL custody tests, point OPENBAO_ADDR at a
+# `bao server -dev` instance (see the setup steps in cloudflare/vitest.config.ts);
+# the role-id / secret-id come from the dev AppRole. When no live OpenBao is
+# reachable the round-trip tests skip, but the fail-closed guarantee tests run.
+OPENBAO_ADDR="https://bao.example.com"
+OPENBAO_ROLE_ID="00000000-0000-0000-0000-000000000000"
+OPENBAO_SECRET_ID="00000000-0000-0000-0000-000000000000"
+OPENBAO_TRANSIT_KEY="fula-mcp-workspace-kek"

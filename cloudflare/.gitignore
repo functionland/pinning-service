@@ -8,3 +8,7 @@ dist/
 worker-configuration.d.ts
 *.log
 coverage/
+# Local OpenBao binary used for the custody round-trip tests (NOT committed —
+# it's a large vendored binary; the test harness downloads/launches it locally).
+.bao-bin/
+.bao-test/

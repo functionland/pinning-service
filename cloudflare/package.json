@@ -15,6 +15,7 @@
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "0.8.1",
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@noble/ciphers": "^2.0.1",
     "agents": "0.16.2",
     "jose": "5.10.0",
     "zod": "4.4.3"

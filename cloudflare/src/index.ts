@@ -47,6 +47,18 @@ export interface Env {
   GOOGLE_JWKS_URL: string;
   /** 32-byte hex; encrypts the upstream-OAuth state cookie. Secret. */
   COOKIE_ENCRYPTION_KEY: string;
+
+  // ── H2 custody bindings ────────────────────────────────────────────────────
+  /** D1 database holding the envelope-encrypted per-user capability + audit. */
+  CUSTODY_DB: D1Database;
+  /** OpenBao base URL — the KEK's trust domain (a different domain). Secret. */
+  OPENBAO_ADDR: string;
+  /** AppRole role-id for the Worker's OpenBao access. Secret. */
+  OPENBAO_ROLE_ID: string;
+  /** AppRole secret-id (rotating). Secret. */
+  OPENBAO_SECRET_ID: string;
+  /** Transit key name (e.g. "fula-mcp-workspace-kek"). */
+  OPENBAO_TRANSIT_KEY: string;
 }
 
 /** OAuth scope(s) this server understands. The stub exposes a single read scope. */

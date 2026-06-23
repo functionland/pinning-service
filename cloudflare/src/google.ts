@@ -28,9 +28,12 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { emailToUserId } from "./userId.js";
+import { CAPABILITY_ROUTE, handleCapability, type CapabilityEnv } from "./capability.js";
 
-/** Env shape the federation handler needs (subset of the Worker env). */
-export interface FederationEnv {
+/** Env shape the federation handler needs (subset of the Worker env). The H2
+ *  custody fields (CUSTODY_DB + OPENBAO_*) are required because this handler also
+ *  owns the `/capability` delegation route. */
+export interface FederationEnv extends CapabilityEnv {
   OAUTH_PROVIDER: OAuthHelpers;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
@@ -78,6 +81,12 @@ export const googleDefaultHandler = {
     }
     if (url.pathname === "/callback") {
       return handleCallback(request, env);
+    }
+    // H2 — the FxFiles → Worker capability delegation endpoint. Authenticated by
+    // a Worker access token (Bearer), validated via the OAuth provider; seals the
+    // delivered capability into D1 (envelope-encrypted, DEK wrapped by OpenBao).
+    if (url.pathname === CAPABILITY_ROUTE) {
+      return handleCapability(request, env as unknown as CapabilityEnv);
     }
     if (url.pathname === "/" || url.pathname === "") {
       // Tiny liveness page; never an auth surface.

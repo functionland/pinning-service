@@ -1,0 +1,41 @@
+{
+  "name": "fula-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fula hosted (remote) MCP server — Cloudflare Worker. OAuth 2.1 resource server + Google federation + stub tool (H1 skeleton).",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "0.8.1",
+    "@functionland/fula-client": "^0.6.16",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@noble/ciphers": "^2.0.1",
+    "agents": "0.16.2",
+    "jose": "5.10.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.16.18",
+    "@cloudflare/workers-types": "4.20260623.1",
+    "@types/node": "^26.0.0",
+    "@vitest/runner": "4.1.9",
+    "@vitest/snapshot": "4.1.9",
+    "typescript": "5.7.3",
+    "vitest": "4.1.9",
+    "wrangler": "4.103.0"
+  },
+  "allowScripts": {
+    "@mongodb-js/zstd@7.0.0": true,
+    "core-js-pure@3.49.0": true,
+    "esbuild@0.28.1": true,
+    "sharp@0.34.5": true,
+    "workerd@1.20260617.1": true
+  }
+}

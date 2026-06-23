@@ -16,13 +16,13 @@
  *      the grant's `props`, and sets `ctx.props = <decrypted props>`.
  *   2. `createMcpHandler` reads `ctx.props` and runs the JSON-RPC request inside
  *      `runWithAuthContext({ props })`.
- *   3. A tool calls `getMcpAuthContext()` to read `{ props }` and derives the
- *      Fula `user_id` from `props.email`.
+ *   3. A tool calls `getMcpAuthContext()` to read `{ props }` and resolves the
+ *      Fula `user_id` — preferring the `props.userId` precomputed at federation,
+ *      falling back to deriving it from `props.email` (both yield the same value).
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
-import { z } from "zod";
 import { emailToUserId } from "./userId.js";
 
 /** Path the MCP Streamable-HTTP endpoint is served at. Must equal the
@@ -129,6 +129,3 @@ export const mcpApiHandler = {
     );
   },
 };
-
-// Re-export the input schema type marker so the stub's contract is greppable.
-export const FULA_PING_INPUT = z.object({}).strict();

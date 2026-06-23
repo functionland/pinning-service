@@ -140,6 +140,27 @@ describe("confused-deputy / wrong-audience rejection (THE security guard)", () =
     expect(`${www} ${body}`.toLowerCase()).not.toMatch(/audience/);
   });
 
+  it("canonical-host guard: /mcp on a NON-canonical host → 404 (before OAuth)", async () => {
+    // Even with a valid-looking bearer, a request whose host is neither the
+    // configured CANONICAL_ORIGIN host nor localhost is refused at /mcp BEFORE
+    // the OAuth provider runs — closing unbound-token replay on an alternate
+    // hostname (e.g. a *.workers.dev preview alongside the custom domain).
+    const ctx = createExecutionContext();
+    const req = new Request("https://evil.example.com/mcp", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer anything",
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+    const res = await worker.fetch(req, env as never, ctx);
+    await waitOnExecutionContext(ctx);
+    // 404 (guard), NOT 401 (which would mean the OAuth provider handled it).
+    expect(res.status).toBe(404);
+  });
+
   // NOTE on specificity: a "matching-origin accepted" positive control is
   // deliberately omitted. To exercise it the seeded token would have to carry a
   // genuinely decryptable `wrappedEncryptionKey` (the audience gate passes, then

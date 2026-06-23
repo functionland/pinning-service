@@ -42,8 +42,15 @@ export interface FederationEnv {
   CANONICAL_ORIGIN: string;
 }
 
-const STATE_COOKIE = "fula_mcp_oauth_state";
+// `__Host-` prefix: the browser enforces Secure + Path=/ + NO Domain attribute,
+// which prevents a sibling subdomain from injecting/overwriting this cookie
+// (cookie-tossing / fixation hardening on the upstream-OAuth state).
+const STATE_COOKIE = "__Host-fula_mcp_oauth_state";
 const GOOGLE_SCOPES = "openid email profile";
+/** The OAuth scopes this AS is willing to grant (mirrors index.ts). The library
+ *  advertises these but does NOT downscope at grant time, so we intersect the
+ *  client's requested scope against this set ourselves (deny scope escalation). */
+const GRANTABLE_SCOPES = new Set(["mcp"]);
 const GOOGLE_ACCEPTED_ISS = new Set([
   "accounts.google.com",
   "https://accounts.google.com",
@@ -187,12 +194,23 @@ async function handleCallback(request: Request, env: FederationEnv): Promise<Res
       // issuer accepts either of Google's two canonical issuer strings.
       issuer: [...GOOGLE_ACCEPTED_ISS],
     });
+    // `azp` (authorized party) hardening: when Google sets it, it MUST be our
+    // client id. This closes the case where `aud` is multi-valued — `aud` alone
+    // would pass jwtVerify but the token might have been minted for a different
+    // authorized party. (Single-aud tokens often omit azp; absent ⇒ aud check
+    // already pinned it to GOOGLE_CLIENT_ID.)
+    const azp = payload.azp;
+    if (typeof azp === "string" && azp !== env.GOOGLE_CLIENT_ID) {
+      return new Response("Google id_token azp mismatch", { status: 401 });
+    }
     const claimEmail = payload.email;
     const verified = payload.email_verified;
     if (typeof claimEmail !== "string" || !claimEmail) {
       return new Response("Google id_token missing email", { status: 400 });
     }
-    if (verified === false) {
+    // FAIL CLOSED: require email_verified === true. An absent/false claim is NOT
+    // trusted (stricter than legacy webui — correct posture for a fresh OAuth AS).
+    if (verified !== true) {
       return new Response("Google email not verified", { status: 403 });
     }
     email = claimEmail.toLowerCase();
@@ -207,12 +225,20 @@ async function handleCallback(request: Request, env: FederationEnv): Promise<Res
   const userId = await emailToUserId(email);
   const props = { email, name, userId };
 
+  // DOWNSCOPE: the library advertises scopes_supported but does NOT enforce it at
+  // grant time, so a client requesting `scope=mcp admin` would otherwise get
+  // `admin` minted. Intersect the requested scope with what we're willing to
+  // grant; if the client asked for nothing valid, default to ["mcp"].
+  const requested = parsed.authRequest.scope ?? [];
+  const grantedScope = requested.filter((s) => GRANTABLE_SCOPES.has(s));
+  const scope = grantedScope.length > 0 ? grantedScope : ["mcp"];
+
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
     request: parsed.authRequest,
     userId,
     // Unencrypted grant metadata — keep PII-free (it is enumerable in KV).
     metadata: { provider: "google" },
-    scope: parsed.authRequest.scope,
+    scope,
     props,
   });
 

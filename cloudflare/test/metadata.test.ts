@@ -37,15 +37,18 @@ async function getStatus(path: string): Promise<number> {
 }
 
 describe("RFC 9728 — protected-resource metadata", () => {
-  it("advertises the resource identifier and authorization server", async () => {
+  // The CANONICAL_ORIGIN bound in vitest.config.ts. The resource identifier MUST
+  // equal this origin + /mcp EXACTLY — a `.toContain("/mcp")` would still pass if
+  // it pointed at the wrong origin (e.g. localhost), defeating audience binding.
+  const CANONICAL = "https://fula-mcp.example.workers.dev";
+
+  it("advertises the EXACT resource identifier and authorization server", async () => {
     const { status, json } = await getJson("/.well-known/oauth-protected-resource");
     expect(status).toBe(200);
-    // resource MUST be present (the canonical /mcp URL from resourceMetadata).
-    expect(typeof json.resource).toBe("string");
-    expect(json.resource).toContain("/mcp");
-    // authorization_servers MUST point clients at the AS (this same origin).
-    expect(Array.isArray(json.authorization_servers)).toBe(true);
-    expect(json.authorization_servers.length).toBeGreaterThan(0);
+    // Exact match — the canonical /mcp URL, pinned to CANONICAL_ORIGIN.
+    expect(json.resource).toBe(`${CANONICAL}/mcp`);
+    // authorization_servers MUST point clients at THIS AS (canonical origin).
+    expect(json.authorization_servers).toEqual([CANONICAL]);
     // scopes advertised.
     expect(json.scopes_supported).toContain("mcp");
   });

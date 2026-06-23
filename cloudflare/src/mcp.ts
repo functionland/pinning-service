@@ -30,9 +30,9 @@ import {
   storeFile,
   readFile,
   listFiles,
-  searchStub,
-  tagFileStub,
-  listTagsStub,
+  search,
+  tagFile,
+  listTags,
   type ToolResult,
 } from "./fula/tools.js";
 import { CATEGORIES } from "./fula/classify.js";
@@ -240,37 +240,56 @@ export function buildServer(env?: CapabilityEnv): McpServer {
         withUser((userId) => listFiles(env, userId, { category: a.category, prefix: a.prefix })),
     );
 
-    // Stubs — honest "not yet implemented in hosted" (H3b). Registered so they
-    // appear in tools/list with a clear signal rather than being silently absent.
+    // ── fula_search (H3b) ───────────────────────────────────────────────────
     server.registerTool(
       "fula_search",
       {
-        title: "Search AI-workspace files (not yet in hosted)",
-        description: "Search AI-workspace files. Not yet implemented in the hosted MCP (H3b).",
-        inputSchema: { query: z.string().describe("Search query.") },
+        title: "Search AI-workspace files",
+        description:
+          "Search YOUR AI workspace by filename: returns files whose name contains " +
+          "`query` (case-insensitive substring; an empty query returns every file). " +
+          "Optionally pass `tag` to also restrict to files carrying that tag name " +
+          "(combined with the name match). Only your own ai/ workspace is searched.",
+        inputSchema: {
+          query: z.string().describe("Filename substring (case-insensitive; empty matches all)."),
+          tag: z
+            .string()
+            .optional()
+            .describe("Optional: also require this tag name (AND-combined with query)."),
+        },
       },
-      async () => withUser(async () => searchStub()),
+      async (a) => withUser((userId) => search(env, userId, { query: a.query, tag: a.tag })),
     );
+
+    // ── fula_tag_file (H3b) ─────────────────────────────────────────────────
     server.registerTool(
       "fula_tag_file",
       {
-        title: "Tag an AI-workspace file (not yet in hosted)",
-        description: "Add tags to a file. Not yet implemented in the hosted MCP (H3b).",
+        title: "Tag an AI-workspace file",
+        description:
+          "Add one or more tags to one of YOUR AI-workspace files (by its key from " +
+          "fula_store_file / fula_list_files). Tags are written in FxFiles' native " +
+          "tag format so the FxFiles app can later adopt them. Tag names dedupe " +
+          "case-insensitively; re-tagging the same file with the same tag is a no-op.",
         inputSchema: {
-          key: z.string().describe("The file key."),
-          tags: z.array(z.string()).describe("Tags to add."),
+          key: z.string().describe("The workspace file key (ai/<category>/<id>-<name>)."),
+          tags: z.array(z.string()).describe("One or more tag names to apply. Required."),
         },
       },
-      async () => withUser(async () => tagFileStub()),
+      async (a) => withUser((userId) => tagFile(env, userId, { key: a.key, tags: a.tags })),
     );
+
+    // ── fula_list_tags (H3b) ────────────────────────────────────────────────
     server.registerTool(
       "fula_list_tags",
       {
-        title: "List AI-workspace tags (not yet in hosted)",
-        description: "List all tags. Not yet implemented in the hosted MCP (H3b).",
+        title: "List AI-workspace tags",
+        description:
+          "List all tags in your AI workspace (the FxFiles-format tag cloud): each " +
+          "tag's name, color, and how many files carry it.",
         inputSchema: {},
       },
-      async () => withUser(async () => listTagsStub()),
+      async () => withUser((userId) => listTags(env, userId)),
     );
   }
 

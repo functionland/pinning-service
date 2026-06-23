@@ -326,30 +326,542 @@ function toListEntry(m: FileMetadata): ListEntry | null {
   };
 }
 
-// ── Tools: fula_search / fula_tag_file / fula_list_tags (STUBS → H3b) ─────────
-// These need extra machinery the hosted client/budget doesn't cover yet:
-//   • search    → list + filename filter is feasible, but tag-aware search needs
-//                 the TagCloudMetadata document (below).
-//   • tag_file  → a read-modify-write of ai/tag-metadata/ai-workspace.json in the
-//                 EXACT FxFiles TagCloudMetadata JSON shape; correct concurrency
-//                 + byte-shape parity is its own phase.
-//   • list_tags → reads that same document.
-// They return a clear "not yet implemented in hosted" so an AI gets an honest
-// signal rather than a silent empty result. Flagged for H3b.
-const NOT_IMPLEMENTED = (tool: string): ToolResult =>
-  err(
-    `${tool} is not yet implemented in the hosted MCP (H3b). ` +
-      `Use fula_store_file / fula_read_file / fula_list_files for now.`,
-  );
+// ── Tools: fula_search / fula_tag_file / fula_list_tags (H3b) ─────────────────
+// Ports the local Rust fula-mcp contracts (tags.rs + list.rs::search) to the
+// hosted Worker, scope-confined to the `ai/` AI-workspace (the gateway also
+// enforces it). The tag document is FxFiles' EXACT `TagCloudMetadata` JSON shape
+// (file_tag.dart) so FxFiles can adopt the AI's tags by an additive-by-id merge.
+//
+//   • fula_tag_file  → read-modify-write of ai/tag-metadata/ai-workspace.json
+//                      (last-writer-wins, matching the Rust + the app's syncToCloud).
+//   • fula_list_tags → reads that same document, returns its `tags`.
+//   • fula_search    → list (Rust list.rs::search) + filename substring filter,
+//                      case-insensitive, empty query matches all; PLUS an optional
+//                      `tag` filter (additive superset — AND-combined) resolved via
+//                      the same tag-metadata doc. With `tag` omitted it is byte-for-
+//                      behavior identical to the local Rust `fula_search(query)`.
 
-export function searchStub(): ToolResult {
-  return NOT_IMPLEMENTED("fula_search");
+/**
+ * The logical key the AI's tag-metadata document lives at, inside
+ * WORKSPACE_BUCKET (`fula-ai-workspace`). Mirrors the Rust `TAG_METADATA_KEY`.
+ *
+ * It is UNDER the `ai/` prefix on purpose: the scope gate admits a key only if
+ * its first path segment is `ai`, so the app's own `.fula/tags/{userId}.json`
+ * form would be DENIED here. This is NOT the user's per-user document — the AI
+ * writes its OWN workspace doc; FxFiles adoption (a later phase) reads THIS key.
+ */
+export const TAG_METADATA_KEY = "ai/tag-metadata/ai-workspace.json";
+
+/**
+ * The default ARGB color for an AI-created tag = `0xFF1E88E5` ("Blue" in FxFiles'
+ * `TagColors.presetColors`). Serializes as the decimal 4280191205 (a Dart `int`),
+ * matching the Rust `DEFAULT_TAG_COLOR`. (The app's own getRandomColor is time-
+ * seeded; we pick one fixed, reproducible palette color — the user can recolor.)
+ */
+export const DEFAULT_TAG_COLOR = 0xff1e88e5; // = 4280191205
+
+/** Recorded as the document `userId` when none is known. The app merges by tag/
+ *  file id, not this field, so it is informational. Mirrors Rust FALLBACK_USER_ID. */
+const FALLBACK_USER_ID = "ai-workspace";
+
+/** Document `version`, mirroring the Dart `TagCloudMetadata.version` default. */
+const TAG_METADATA_VERSION = "1.0";
+
+/**
+ * A user-created tag — mirrors FxFiles' `FileTag` (file_tag.dart `toJson`).
+ *
+ * Field declaration order MATCHES the Dart `toJson` EXACTLY — `JSON.stringify`
+ * emits keys in insertion order, so this order is byte-load-bearing:
+ * `id, name, colorValue, createdAt, updatedAt, fileCount`.
+ */
+export interface FileTag {
+  id: string;
+  name: string;
+  /** ARGB color as an int (Dart `Color.value`), e.g. DEFAULT_TAG_COLOR. */
+  colorValue: number;
+  /** ISO-8601 creation timestamp (`DateTime.toIso8601String()` shape). */
+  createdAt: string;
+  /** ISO-8601 last-update timestamp. */
+  updatedAt: string;
+  /** Number of files carrying this tag. */
+  fileCount: number;
 }
-export function tagFileStub(): ToolResult {
-  return NOT_IMPLEMENTED("fula_tag_file");
+
+/**
+ * A file→tag association — mirrors FxFiles' `TaggedFile` (file_tag.dart `toJson`).
+ *
+ * Field order matches Dart EXACTLY: `id, tagId, localPath, remoteKey, iosAssetId,
+ * fileName, taggedAt`. The three location fields are `string | null` and are ALWAYS
+ * present (never omitted): an AI-tagged cloud file sets only `remoteKey`, with
+ * `localPath`/`iosAssetId` EXPLICITLY `null` — byte-faithful to Dart's
+ * `jsonEncode` of a map containing `'localPath': null`. (Using `undefined` would
+ * make `JSON.stringify` DROP the key and diverge from the app's bytes.)
+ */
+export interface TaggedFile {
+  id: string;
+  tagId: string;
+  localPath: string | null;
+  remoteKey: string | null;
+  iosAssetId: string | null;
+  fileName: string;
+  taggedAt: string;
 }
-export function listTagsStub(): ToolResult {
-  return NOT_IMPLEMENTED("fula_list_tags");
+
+/**
+ * The cloud tag document — mirrors FxFiles' `TagCloudMetadata` (file_tag.dart).
+ * Top-level key order matches Dart EXACTLY: `userId, tags, taggedFiles, updatedAt,
+ * version`. An empty doc still emits every key (`tags: []`, `taggedFiles: []`).
+ */
+export interface TagCloudMetadata {
+  userId: string;
+  tags: FileTag[];
+  taggedFiles: TaggedFile[];
+  updatedAt: string;
+  version: string;
+}
+
+/** The outcome of a tag_file call: the doc as written + what changed. */
+export interface TagOutcome {
+  metadata: TagCloudMetadata;
+  /** Names of tags newly CREATED by this call (not previously present). */
+  createdTags: string[];
+  /** Number of (tag, file) associations newly ADDED by this call. */
+  addedAssociations: number;
+}
+
+/** A fresh, empty document for `userId` stamped `updatedAt = now`. */
+function emptyMetadata(userId: string, now: string): TagCloudMetadata {
+  return {
+    userId,
+    tags: [],
+    taggedFiles: [],
+    updatedAt: now,
+    version: TAG_METADATA_VERSION,
+  };
+}
+
+/**
+ * An ISO-8601 timestamp with millisecond precision + `Z`, e.g.
+ * `2026-06-20T12:34:56.789Z`. `Date.toISOString()` produces EXACTLY this shape
+ * (the same the Rust hand-rolls and the app's `DateTime.toIso8601String()` emits
+ * for a UTC instant); the app parses it with the liberal `DateTime.parse`.
+ */
+function nowIso8601(): string {
+  return new Date().toISOString();
+}
+
+/** The filename a workspace key resolves to: its last `/`-segment (Rust
+ *  `filename_of` / `file_name_from_key`). Falls back to the whole key. */
+function filenameOfKey(key: string): string {
+  const idx = key.lastIndexOf("/");
+  const last = idx >= 0 ? key.slice(idx + 1) : key;
+  return last.length > 0 ? last : key;
+}
+
+/**
+ * Tolerantly coerce arbitrary parsed JSON into a `TagCloudMetadata`, defaulting
+ * the optional fields exactly as the Dart `fromJson` does (`fileCount ?? 0`,
+ * `version ?? '1.0'`, missing tag/file arrays → empty). Throws if the shape is
+ * fundamentally wrong (not an object, or a tag/association missing a required
+ * non-defaultable field) so a corrupt document is an ERROR — never silently
+ * clobbered. Mirrors the Rust serde `#[serde(default)]` tolerance.
+ */
+function parseTagDocument(raw: unknown): TagCloudMetadata {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("tag document is not a JSON object");
+  }
+  const o = raw as Record<string, unknown>;
+  const tagsIn = Array.isArray(o.tags) ? o.tags : [];
+  const filesIn = Array.isArray(o.taggedFiles) ? o.taggedFiles : [];
+  const tags: FileTag[] = tagsIn.map((t) => {
+    const r = t as Record<string, unknown>;
+    if (typeof r.id !== "string" || typeof r.name !== "string") {
+      throw new Error("tag is missing a required string id/name");
+    }
+    return {
+      id: r.id,
+      name: r.name,
+      colorValue: typeof r.colorValue === "number" ? r.colorValue : DEFAULT_TAG_COLOR,
+      createdAt: typeof r.createdAt === "string" ? r.createdAt : "",
+      updatedAt: typeof r.updatedAt === "string" ? r.updatedAt : "",
+      fileCount: typeof r.fileCount === "number" ? r.fileCount : 0, // Dart `?? 0`
+    };
+  });
+  const taggedFiles: TaggedFile[] = filesIn.map((f) => {
+    const r = f as Record<string, unknown>;
+    if (typeof r.id !== "string" || typeof r.tagId !== "string") {
+      throw new Error("tagged file is missing a required string id/tagId");
+    }
+    return {
+      id: r.id,
+      tagId: r.tagId,
+      localPath: typeof r.localPath === "string" ? r.localPath : null,
+      remoteKey: typeof r.remoteKey === "string" ? r.remoteKey : null,
+      iosAssetId: typeof r.iosAssetId === "string" ? r.iosAssetId : null,
+      fileName: typeof r.fileName === "string" ? r.fileName : "",
+      taggedAt: typeof r.taggedAt === "string" ? r.taggedAt : "",
+    };
+  });
+  return {
+    userId: typeof o.userId === "string" ? o.userId : FALLBACK_USER_ID,
+    tags,
+    taggedFiles,
+    updatedAt: typeof o.updatedAt === "string" ? o.updatedAt : "",
+    version: typeof o.version === "string" ? o.version : TAG_METADATA_VERSION, // Dart `?? '1.0'`
+  };
+}
+
+// Test-only re-exports of the otherwise-internal pure helpers, so the H3b unit
+// tests can drive parse + empty-doc construction without the gateway (mirrors how
+// the Rust `tags.rs` tests exercise `TagCloudMetadata::empty` / serde parse). Kept
+// as named aliases (rather than exporting the bare internals) to mark them test-only.
+export const parseTagDocumentForTest = parseTagDocument;
+export const emptyMetadataForTest = emptyMetadata;
+
+/**
+ * Serialize a document to the EXACT byte shape FxFiles writes. We rebuild every
+ * object literal field-by-field in the Dart `toJson` order (NOT spread) so key
+ * order is guaranteed regardless of how the in-memory object was constructed, and
+ * the nullable association fields are always present as `null`. Compact (no
+ * spaces) — the app's `jsonEncode` is also compact. Returns the JSON string.
+ */
+export function serializeTagDocument(doc: TagCloudMetadata): string {
+  const ordered = {
+    userId: doc.userId,
+    tags: doc.tags.map((t) => ({
+      id: t.id,
+      name: t.name,
+      colorValue: t.colorValue,
+      createdAt: t.createdAt,
+      updatedAt: t.updatedAt,
+      fileCount: t.fileCount,
+    })),
+    taggedFiles: doc.taggedFiles.map((f) => ({
+      id: f.id,
+      tagId: f.tagId,
+      localPath: f.localPath,
+      remoteKey: f.remoteKey,
+      iosAssetId: f.iosAssetId,
+      fileName: f.fileName,
+      taggedAt: f.taggedAt,
+    })),
+    updatedAt: doc.updatedAt,
+    version: doc.version,
+  };
+  return JSON.stringify(ordered);
+}
+
+/** A fresh uuid v4 (hyphenated), matching the Rust `Uuid::new_v4().to_string()`
+ *  the app uses for tag/association ids (NOT the hyphen-free `simple()` form). */
+function freshUuid(): string {
+  return crypto.randomUUID();
+}
+
+/**
+ * Pure read-modify step (the algorithmic crux; unit-testable, NO network).
+ * Applies `tagNames` × `fileKey` to `doc` in place, returning what changed.
+ * Mirrors the Rust `apply_tagging`:
+ *  - Tags dedupe case-insensitively BY NAME; a new tag keeps the caller's display
+ *    casing and gets a fresh uuid + DEFAULT_TAG_COLOR. Names are trimmed; empty/
+ *    whitespace names are skipped.
+ *  - Associations dedupe by (tagId, remoteKey); an existing (tag, file) pair is
+ *    not re-added.
+ *  - fileCount is recomputed + updatedAt bumped for exactly the tags that gained
+ *    an association (an unchanged tag is left untouched).
+ */
+export function applyTagging(
+  doc: TagCloudMetadata,
+  fileKey: string,
+  fileName: string,
+  tagNames: string[],
+  now: string,
+): { createdTags: string[]; addedAssociations: number } {
+  const createdTags: string[] = [];
+  let addedAssociations = 0;
+  const touchedTagIds: string[] = [];
+
+  for (const rawName of tagNames) {
+    const name = rawName.trim();
+    if (name.length === 0) continue; // skip empty/whitespace (the app trims)
+
+    // Find an existing tag by case-insensitive name, else create one.
+    const lower = name.toLowerCase();
+    let tag = doc.tags.find((t) => t.name.toLowerCase() === lower);
+    if (!tag) {
+      tag = {
+        id: freshUuid(),
+        name,
+        colorValue: DEFAULT_TAG_COLOR,
+        createdAt: now,
+        updatedAt: now,
+        fileCount: 0,
+      };
+      doc.tags.push(tag);
+      createdTags.push(name);
+    }
+    const tagId = tag.id;
+
+    // Add the association unless an identical (tagId, remoteKey) already exists.
+    const already = doc.taggedFiles.some(
+      (tf) => tf.tagId === tagId && tf.remoteKey === fileKey,
+    );
+    if (!already) {
+      doc.taggedFiles.push({
+        id: freshUuid(),
+        tagId,
+        localPath: null,
+        remoteKey: fileKey,
+        iosAssetId: null,
+        fileName,
+        taggedAt: now,
+      });
+      addedAssociations += 1;
+      if (!touchedTagIds.includes(tagId)) touchedTagIds.push(tagId);
+    }
+  }
+
+  // Recompute fileCount + bump updatedAt for exactly the tags that changed.
+  for (const tagId of touchedTagIds) {
+    const count = doc.taggedFiles.filter((tf) => tf.tagId === tagId).length;
+    const tag = doc.tags.find((t) => t.id === tagId);
+    if (tag) {
+      tag.fileCount = count;
+      tag.updatedAt = now;
+    }
+  }
+
+  return { createdTags, addedAssociations };
+}
+
+/** Pure: the logical keys of files associated to `tagName` (case-insensitive) in
+ *  `doc`. Resolves the tag(s) by name, then collects their associations'
+ *  `remoteKey`s. Used by tag-aware search. Empty if the tag/files are absent. */
+export function fileKeysForTagName(doc: TagCloudMetadata, tagName: string): Set<string> {
+  const lower = tagName.trim().toLowerCase();
+  const tagIds = new Set(
+    doc.tags.filter((t) => t.name.toLowerCase() === lower).map((t) => t.id),
+  );
+  const keys = new Set<string>();
+  for (const tf of doc.taggedFiles) {
+    if (tagIds.has(tf.tagId) && typeof tf.remoteKey === "string" && tf.remoteKey.length > 0) {
+      keys.add(tf.remoteKey);
+    }
+  }
+  return keys;
+}
+
+/**
+ * Pure search filter (Rust `list.rs::search` semantics): keep entries whose
+ * FILENAME (last `/`-segment) contains `query` as a case-insensitive substring;
+ * an empty query matches every entry. If `tagKeys` is provided (tag-aware mode),
+ * ALSO require the entry's key to be in that set (AND-combined). NO network.
+ */
+export function searchFilter<T extends { key: string }>(
+  entries: T[],
+  query: string,
+  tagKeys?: Set<string>,
+): T[] {
+  const needle = query.toLowerCase();
+  return entries.filter((e) => {
+    if (!filenameOfKey(e.key).toLowerCase().includes(needle)) return false;
+    if (tagKeys && !tagKeys.has(e.key)) return false;
+    return true;
+  });
+}
+
+/**
+ * Load the AI's tag document from the workspace, or `null` if it does not exist
+ * yet. A genuine not-found returns `null` (caller starts fresh); a document that
+ * exists but fails to parse THROWS (we never silently clobber it). Mirrors the
+ * Rust `load_tag_document` not-found detection (substring check on the error).
+ */
+async function loadTagDocument(client: EncryptedClient): Promise<TagCloudMetadata | null> {
+  let bytes: Uint8Array;
+  try {
+    bytes = await getDecrypted(client, WORKSPACE_BUCKET, TAG_METADATA_KEY);
+  } catch (e) {
+    if (isNotFound(e)) return null; // no document yet → start fresh
+    throw e; // a real client/transport error
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
+  } catch (e) {
+    throw new CorruptTagDocumentError(
+      e instanceof Error ? e.message : "invalid JSON",
+    );
+  } finally {
+    bytes.fill(0);
+  }
+  try {
+    return parseTagDocument(raw);
+  } catch (e) {
+    throw new CorruptTagDocumentError(e instanceof Error ? e.message : "invalid shape");
+  }
+}
+
+/** An existing tag document that exists but is not valid TagCloudMetadata JSON.
+ *  Distinct from a transport error so we refuse to overwrite a corrupt doc. */
+export class CorruptTagDocumentError extends Error {
+  constructor(reason: string) {
+    super(`existing tag document at '${TAG_METADATA_KEY}' is not valid TagCloudMetadata JSON: ${reason}`);
+    this.name = "CorruptTagDocumentError";
+  }
+}
+
+/** Detect a fula-client "not found" (object missing). The client surfaces errors
+ *  as a structured JSON message; we parse defensively + fall back to a substring
+ *  check (mirrors the Rust `msg.to_lowercase().contains("not found")`). */
+function isNotFound(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  try {
+    const parsed = JSON.parse(e.message) as {
+      code?: string;
+      data?: { status?: number };
+      message?: string;
+    };
+    if (parsed?.data?.status === 404) return true;
+    if (parsed?.code === "NOT_FOUND") return true;
+    if (typeof parsed?.message === "string" && /not found/i.test(parsed.message)) return true;
+  } catch {
+    // not JSON — fall through to substring
+  }
+  return /not found|404|no such key|nosuchkey/i.test(e.message);
+}
+
+/** Test-only re-export so the H3b unit tests can pin the not-found DETECTION (the
+ *  linchpin of the first-ever tag_file: no doc → start fresh). NOTE this pins our
+ *  ASSUMED fula-client error shape against regression; the REAL gateway error is
+ *  exercised in H4, not here. */
+export const isNotFoundForTest = isNotFound;
+
+// ── Tool: fula_tag_file ──────────────────────────────────────────────────────
+export interface TagFileArgs {
+  key: string;
+  tags: string[];
+}
+
+/**
+ * Tag a stored workspace file with one or more tags, writing the result into the
+ * AI's tag document in FxFiles' native TagCloudMetadata format. Read-modify-write
+ * (last-writer-wins, like the Rust + the app's syncToCloud): load the document
+ * (or start empty on not-found), upsert tags + associations, write it back.
+ *
+ * The file `key` is scope-validated up front (defense in depth; the gateway also
+ * scopes the bucket). The doc key itself is fixed + under `ai/`.
+ */
+export async function tagFile(
+  env: CapabilityEnv,
+  userId: string,
+  args: TagFileArgs,
+): Promise<ToolResult> {
+  const fileKey = args.key;
+  if (!isInWorkspaceScope(fileKey)) {
+    return err(`key '${fileKey}' is not inside the ai/ workspace scope`);
+  }
+  // Match the Rust: refuse a no-op (no names) rather than a pointless round-trip.
+  const names = Array.isArray(args.tags) ? args.tags : [];
+  if (names.length === 0 || names.every((n) => n.trim().length === 0)) {
+    return err("fula_tag_file requires at least one non-empty tag name");
+  }
+
+  const now = nowIso8601();
+  try {
+    const outcome = await withWorkspaceClient(env, userId, async (client) => {
+      const existing = await loadTagDocument(client);
+      const doc = existing ?? emptyMetadata(userId.length > 0 ? userId : FALLBACK_USER_ID, now);
+      const fileName = filenameOfKey(fileKey);
+      const { createdTags, addedAssociations } = applyTagging(doc, fileKey, fileName, names, now);
+      // Always bump updatedAt to reflect this call (matches the app's syncToCloud).
+      doc.updatedAt = now;
+      const json = serializeTagDocument(doc);
+      await putEncryptedWithType(
+        client,
+        WORKSPACE_BUCKET,
+        TAG_METADATA_KEY,
+        new TextEncoder().encode(json),
+        "application/json",
+      );
+      return { metadata: doc, createdTags, addedAssociations } satisfies TagOutcome;
+    });
+    await recordAudit(env.CUSTODY_DB, userId, "mcp_tag_file", {
+      key: fileKey,
+      created_tags: outcome.createdTags.length,
+      added_associations: outcome.addedAssociations,
+    });
+    return ok({
+      key: fileKey,
+      bucket: WORKSPACE_BUCKET,
+      metadata_key: TAG_METADATA_KEY,
+      created_tags: outcome.createdTags,
+      added_associations: outcome.addedAssociations,
+      total_tags: outcome.metadata.tags.length,
+    });
+  } catch (e) {
+    if (e instanceof CorruptTagDocumentError) return err(e.message);
+    return err(toolErrorMessage(e, "tag_file"));
+  }
+}
+
+// ── Tool: fula_list_tags ─────────────────────────────────────────────────────
+/** List all tags in the AI's tag document (empty if the document does not exist). */
+export async function listTags(env: CapabilityEnv, userId: string): Promise<ToolResult> {
+  try {
+    const tags = await withWorkspaceClient(env, userId, async (client) => {
+      const doc = await loadTagDocument(client);
+      return doc ? doc.tags : [];
+    });
+    return ok({ bucket: WORKSPACE_BUCKET, metadata_key: TAG_METADATA_KEY, count: tags.length, tags });
+  } catch (e) {
+    if (e instanceof CorruptTagDocumentError) return err(e.message);
+    return err(toolErrorMessage(e, "list_tags"));
+  }
+}
+
+// ── Tool: fula_search ────────────────────────────────────────────────────────
+export interface SearchArgs {
+  query: string;
+  /** Optional tag-name filter (hosted superset; AND-combined with `query`). When
+   *  omitted, behavior is identical to the local Rust `fula_search(query)`. */
+  tag?: string;
+}
+
+/**
+ * Search the AI's workspace by FILENAME substring (case-insensitive; empty query
+ * matches all) — the Rust `list.rs::search` contract — optionally AND-filtered by
+ * a tag name (hosted superset, resolved via the tag-metadata doc). Reuses the same
+ * scope-confined listing as fula_list_files.
+ */
+export async function search(
+  env: CapabilityEnv,
+  userId: string,
+  args: SearchArgs,
+): Promise<ToolResult> {
+  const query = typeof args.query === "string" ? args.query : "";
+  const tagName = typeof args.tag === "string" ? args.tag.trim() : "";
+  try {
+    const files = await withWorkspaceClient(env, userId, async (client) => {
+      const rows = await listDecrypted(client, WORKSPACE_BUCKET, {
+        prefix: `${WORKSPACE_KEY_PREFIX}/`,
+      });
+      // Confine EVERY entry by the same segment geometry as fula_list_files
+      // (treat the listing as untrusted — never let a non-ai/ key leak through).
+      const confined = rows
+        .map(toListEntry)
+        .filter((f): f is ListEntry => f !== null && isInWorkspaceScope(f.key));
+      // Resolve the optional tag filter from the tag-metadata doc (only when asked).
+      let tagKeys: Set<string> | undefined;
+      if (tagName.length > 0) {
+        const doc = await loadTagDocument(client);
+        tagKeys = doc ? fileKeysForTagName(doc, tagName) : new Set<string>();
+      }
+      return searchFilter(confined, query, tagKeys);
+    });
+    return ok({ bucket: WORKSPACE_BUCKET, query, tag: tagName || undefined, count: files.length, files });
+  } catch (e) {
+    if (e instanceof CorruptTagDocumentError) return err(e.message);
+    return err(toolErrorMessage(e, "search"));
+  }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

@@ -174,23 +174,67 @@ describe("H3 tools — input validation BEFORE any custody/gateway work", () => 
   });
 });
 
-describe("H3 tools — honest stubs", () => {
-  it("fula_search returns a clear not-implemented signal", async () => {
+describe("H3b tools — search/tag_file/list_tags fail closed without a capability", () => {
+  // Now fully implemented (H3b): all three route through withWorkspaceClient, so
+  // with no custodied capability in the test D1 they return the SAME friendly
+  // "connect FxFiles" message as store/read/list — NOT a not-implemented stub,
+  // NOT a crash, and WITHOUT touching the gateway.
+  it("fula_search → friendly 'no workspace linked' message", async () => {
     const rpc = await callTool(
       "tools/call",
       { name: "fula_search", arguments: { query: "x" } },
       session,
     );
     expect(rpc.result.isError).toBe(true);
-    expect(rpc.result.content[0].text).toMatch(/not yet implemented/i);
+    expect(rpc.result.content[0].text).toMatch(/FxFiles|no Fula workspace/i);
   });
-  it("fula_list_tags returns a clear not-implemented signal", async () => {
+  it("fula_list_tags → friendly 'no workspace linked' message", async () => {
     const rpc = await callTool(
       "tools/call",
       { name: "fula_list_tags", arguments: {} },
       session,
     );
     expect(rpc.result.isError).toBe(true);
-    expect(rpc.result.content[0].text).toMatch(/not yet implemented/i);
+    expect(rpc.result.content[0].text).toMatch(/FxFiles|no Fula workspace/i);
+  });
+  it("fula_tag_file → friendly 'no workspace linked' message (for an in-scope key)", async () => {
+    const rpc = await callTool(
+      "tools/call",
+      { name: "fula_tag_file", arguments: { key: "ai/note/abc-n.txt", tags: ["Work"] } },
+      session,
+    );
+    expect(rpc.result.isError).toBe(true);
+    expect(rpc.result.content[0].text).toMatch(/FxFiles|no Fula workspace/i);
+  });
+
+  it("fula_tag_file rejects an out-of-scope key BEFORE any custody/gateway work", async () => {
+    const rpc = await callTool(
+      "tools/call",
+      { name: "fula_tag_file", arguments: { key: "photos/2026/x.jpg", tags: ["Work"] } },
+      session,
+    );
+    expect(rpc.result.isError).toBe(true);
+    expect(rpc.result.content[0].text).toMatch(/not inside the ai\/ workspace scope/i);
+  });
+
+  it("fula_tag_file rejects an empty tag list up front", async () => {
+    const rpc = await callTool(
+      "tools/call",
+      { name: "fula_tag_file", arguments: { key: "ai/note/abc-n.txt", tags: [] } },
+      session,
+    );
+    expect(rpc.result.isError).toBe(true);
+    expect(rpc.result.content[0].text).toMatch(/at least one .*tag/i);
+  });
+
+  it("declares fula_search inputSchema with query + the optional tag refinement", async () => {
+    const rpc = await callTool("tools/list", {}, session);
+    const s = (rpc.result.tools as Array<any>).find((t) => t.name === "fula_search");
+    expect(s).toBeTruthy();
+    expect(s.inputSchema.properties).toHaveProperty("query");
+    expect(s.inputSchema.properties).toHaveProperty("tag");
+    // query is required; tag is optional.
+    expect(s.inputSchema.required).toContain("query");
+    expect(s.inputSchema.required ?? []).not.toContain("tag");
   });
 });

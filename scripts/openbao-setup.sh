@@ -868,14 +868,20 @@ services:
       - ${BAO_DATA_DIR}:/openbao/data
       - ${BAO_LOGS_DIR}:/openbao/logs
       - ${BAO_CONFIG_DIR}:/openbao/config:ro
-    # Raft + disable_mlock => zero Linux caps required (port 8200 > 1024 so no
-    # NET_BIND_SERVICE; writes to bind-mounts it owns as uid 100; image USER is
-    # already 'openbao' so no root->user privilege drop). cap_drop: ALL is the
-    # logical completion of disable_mlock. If OpenBao ever fails to start, the
-    # command 'docker logs openbao' names the cause — add back ONLY the cap it
-    # names (or remove this cap_drop); do not pre-guess the set. Validate on VPS.
+    # OpenBao's entrypoint starts as ROOT and su-exec's down to the 'openbao'
+    # user (uid 100): it chowns the bind-mounts and calls setgroups/setgid/setuid,
+    # which need CHOWN/DAC_OVERRIDE/SETGID/SETUID. cap_drop: ALL alone breaks
+    # startup with "su-exec: setgroups: Operation not permitted" — confirmed on a
+    # real VPS (2026-06-23). So drop ALL, then add back EXACTLY those four and
+    # nothing more (disable_mlock => no IPC_LOCK; port 8200 > 1024 => no
+    # NET_BIND_SERVICE; at runtime as uid 100 OpenBao needs no caps).
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
     security_opt:
       - no-new-privileges:true
     healthcheck:

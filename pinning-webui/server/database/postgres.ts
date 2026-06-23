@@ -1059,6 +1059,188 @@ export async function gcExpiredGrants(graceSeconds = 600, nowSeconds?: number): 
   return result.rowCount || 0;
 }
 
+// ============================================
+// MCP connection registry (connection lifecycle)
+// ============================================
+//
+// A "connection" is a paired MCP (AI) client, identified by its X25519 pubkey
+// (`mcp_pub_b64`). Unlike the stateless MCP JWTs, a connection is LONG-LIVED
+// server-side state: it stores a high-entropy REFRESH TOKEN (only its sha256
+// hash is persisted) plus the connection's FROZEN scope claim. The refresh
+// token lets the client re-mint THIS connection's short-lived workspace JWT
+// (bucket fula-ai-workspace, prefix ai/, the SAME perms captured at pairing)
+// WITHOUT re-pairing — closing the "1h token, no renew → re-pair" blocker.
+//
+// SECURITY INVARIANT: a refresh re-mints ONLY from `scope` stored here (never a
+// request-supplied scope), so a connection paired with narrow perms can never
+// widen on refresh, and the refresh token can never yield the user's broader
+// account credential. The pubkey + scope are captured at MINT time from the
+// resolved claims; the refresh path reads them back verbatim.
+//
+// There is deliberately NO `exp` column: a connection lives until the user (or
+// an admin) revokes it. Revocation flips `revoked = true`; the gateway polls
+// listRevokedConnectionPubkeys() to deny a revoked connection's JWT by its
+// `cnf` (mcp_pub_b64) binding before the JWT's own short exp.
+
+/** The stored mcp scope claim shape (mirror of McpScopeClaim, kept local to avoid a cross-module type dep). */
+export interface McpConnectionScope {
+  v: number;
+  scopes: Array<{ bucket: string; prefix: string; perms: string[] }>;
+}
+
+export interface McpConnectionRow {
+  id: string;
+  user_id: string;
+  mcp_pub_b64: string;
+  label: string | null;
+  scope: McpConnectionScope;
+  revoked: boolean;
+  created_at: string;
+  last_refreshed_at: string | null;
+}
+
+/** Fields needed to insert a connection (id/created_at default server-side). */
+export interface McpConnectionInput {
+  id: string;
+  userId: string;
+  mcpPubB64: string;
+  label?: string | null;
+  refreshTokenHash: string; // sha256 HEX (64 chars) of the high-entropy refresh token
+  scope: McpConnectionScope;
+}
+
+export async function createMcpConnectionsTable(): Promise<void> {
+  await query(`
+    CREATE TABLE IF NOT EXISTS mcp_connections (
+      id UUID PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      mcp_pub_b64 VARCHAR(64) NOT NULL,
+      label TEXT,
+      refresh_token_hash VARCHAR(64) NOT NULL UNIQUE,
+      scope JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked BOOLEAN NOT NULL DEFAULT FALSE,
+      last_refreshed_at TIMESTAMPTZ
+    )
+  `);
+  // The user-facing list path filters by user_id.
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_mcp_connections_user ON mcp_connections(user_id)
+  `);
+  // The refresh path looks up by refresh_token_hash; the UNIQUE constraint above
+  // already creates a backing index, so no separate index is needed.
+}
+
+/**
+ * Insert a new connection row. Returns the generated id (passed in by the
+ * caller so it can be echoed in the mint response). The refresh token itself is
+ * NEVER stored — only `refreshTokenHash` (sha256 hex). Repeated pairings of the
+ * same pubkey intentionally create distinct rows (each with its own revocable
+ * refresh token) — that's re-pairing, not an upsert.
+ */
+export async function insertMcpConnection(row: McpConnectionInput): Promise<string> {
+  await query(
+    `INSERT INTO mcp_connections (id, user_id, mcp_pub_b64, label, refresh_token_hash, scope)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      row.id,
+      row.userId,
+      row.mcpPubB64,
+      row.label ?? null,
+      row.refreshTokenHash,
+      JSON.stringify(row.scope),
+    ],
+  );
+  return row.id;
+}
+
+/**
+ * Look up a connection by the sha256 HEX of its refresh token. Returns the row
+ * (including its FROZEN scope) or null. The caller must still check `revoked`.
+ * The lookup is by the UNIQUE hash of a 256-bit secret, so it is not a guessable
+ * key; we compare the full hash via SQL equality (the hash is not itself a
+ * secret that benefits from constant-time compare — a DB read already discloses
+ * it, and brute-forcing a 256-bit token is infeasible).
+ */
+export async function findMcpConnectionByRefreshHash(
+  refreshTokenHash: string,
+): Promise<McpConnectionRow | null> {
+  const result = await query<McpConnectionRow>(
+    `SELECT id, user_id, mcp_pub_b64, label, scope, revoked, created_at, last_refreshed_at
+       FROM mcp_connections
+      WHERE refresh_token_hash = $1`,
+    [refreshTokenHash],
+  );
+  return result.rows[0] ?? null;
+}
+
+/**
+ * Mark a refresh as having just happened (bumps last_refreshed_at to NOW()).
+ * Best-effort — a failure here must not fail the already-minted token, so the
+ * caller should not await-throw on it in a way that loses the token.
+ */
+export async function touchMcpConnectionRefreshed(id: string): Promise<void> {
+  await query('UPDATE mcp_connections SET last_refreshed_at = NOW() WHERE id = $1', [id]);
+}
+
+/**
+ * Revoke a connection — user-scoped: a user can only revoke THEIR OWN
+ * connection. Idempotent (re-revoking is a no-op). Returns true if a row was
+ * newly revoked, false if it didn't exist for this user or was already revoked.
+ */
+export async function revokeMcpConnection(userId: string, id: string): Promise<boolean> {
+  const result = await query(
+    'UPDATE mcp_connections SET revoked = TRUE WHERE user_id = $1 AND id = $2 AND NOT revoked',
+    [userId, id],
+  );
+  return (result.rowCount || 0) > 0;
+}
+
+/**
+ * List a user's connections for the management UI. NEVER returns the refresh
+ * token or its hash — only safe, displayable metadata.
+ */
+export async function listMcpConnectionsForUser(userId: string): Promise<
+  Array<{
+    id: string;
+    label: string | null;
+    mcp_pub_b64: string;
+    created_at: string;
+    revoked: boolean;
+    last_refreshed_at: string | null;
+  }>
+> {
+  const result = await query<{
+    id: string;
+    label: string | null;
+    mcp_pub_b64: string;
+    created_at: string;
+    revoked: boolean;
+    last_refreshed_at: string | null;
+  }>(
+    `SELECT id, label, mcp_pub_b64, created_at, revoked, last_refreshed_at
+       FROM mcp_connections
+      WHERE user_id = $1
+      ORDER BY created_at DESC`,
+    [userId],
+  );
+  return result.rows;
+}
+
+/**
+ * The gateway-pollable feed: the pubkeys of currently-revoked connections. The
+ * gateway denies any MCP JWT whose `cnf.mcp_pub_b64` is in this set (until the
+ * JWT's own short exp catches up). Connections have no exp, so the filter is
+ * simply `revoked = true`. DISTINCT collapses multiple revoked rows that share a
+ * pubkey (re-pairing history).
+ */
+export async function listRevokedConnectionPubkeys(): Promise<string[]> {
+  const result = await query<{ mcp_pub_b64: string }>(
+    'SELECT DISTINCT mcp_pub_b64 FROM mcp_connections WHERE revoked = TRUE',
+  );
+  return result.rows.map((r) => r.mcp_pub_b64);
+}
+
 export default {
   createPostgresPool,
   getPool,
@@ -1102,4 +1284,11 @@ export default {
   listActiveGrantsForConnection,
   revokeMcpGrant,
   gcExpiredGrants,
+  createMcpConnectionsTable,
+  insertMcpConnection,
+  findMcpConnectionByRefreshHash,
+  touchMcpConnectionRefreshed,
+  revokeMcpConnection,
+  listMcpConnectionsForUser,
+  listRevokedConnectionPubkeys,
 };

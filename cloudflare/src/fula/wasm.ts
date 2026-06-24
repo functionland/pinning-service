@@ -37,8 +37,11 @@ import {
   initSync,
   createEncryptedClient as _createEncryptedClient,
   putEncryptedWithType as _putEncryptedWithType,
+  putFlat as _putFlat,
   getDecrypted as _getDecrypted,
+  getFlat as _getFlat,
   listDecrypted as _listDecrypted,
+  listFilesFromForest as _listFilesFromForest,
   deleteEncrypted as _deleteEncrypted,
   blake3DeriveKey as _blake3DeriveKey,
   derivePublicKeyFromSecret as _derivePublicKeyFromSecret,
@@ -51,7 +54,14 @@ import {
   type EncryptedClient,
 } from "@functionland/fula-client";
 
-/** The npm version we pin to (asserted against the running WASM in tests). */
+/**
+ * The wasm CRATE version reported by `getVersion()`, asserted against the running
+ * WASM in tests. NOTE: this is the fula-js crate version, NOT the npm package
+ * version. The npm dependency is `^0.6.17` — the build that carries
+ * `putFlat`/`getFlat`/`listFilesFromForest` — but those bindings were added
+ * without a crate-version bump (the crate stays in lockstep with the rest of the
+ * fula-api workspace), so the wasm still reports 0.6.16.
+ */
 export const PINNED_FULA_CLIENT_VERSION = "0.6.16";
 
 let initialized = false;
@@ -151,6 +161,49 @@ export function deleteEncrypted(
   key: string,
 ): Promise<void> {
   return _deleteEncrypted(client, bucket, key);
+}
+
+/**
+ * Forest-tracked upload: writes the object AND registers it in the bucket's
+ * private-forest index (upsert + flush). REQUIRED for AI-workspace writes so the
+ * object is enumerable by `listFilesFromForest` (and therefore by FxFiles) —
+ * unlike `putEncryptedWithType`, which writes a raw object the forest never
+ * indexes. Same encrypted format; the only difference is the index entry.
+ */
+export function putFlat(
+  client: EncryptedClient,
+  bucket: string,
+  key: string,
+  data: Uint8Array,
+  contentType: string,
+): Promise<PutResult> {
+  return _putFlat(client, bucket, key, data, contentType);
+}
+
+/**
+ * Forest + CID-aware read — the read that PAIRS with `putFlat`. Resolves the key
+ * through the forest index (recovering by CID when the obfuscated storage key is
+ * gc-orphaned), unlike `getDecrypted` which reads the raw obfuscated key and
+ * fails on a forest-tracked write.
+ */
+export function getFlat(
+  client: EncryptedClient,
+  bucket: string,
+  key: string,
+): Promise<Uint8Array> {
+  return _getFlat(client, bucket, key);
+}
+
+/**
+ * Enumerate a bucket's files straight from the decrypted forest index. Correct
+ * for `flatNamespace` + metadata-privacy buckets, where `listDecrypted` (a
+ * prefix filter over OBFUSCATED storage keys) returns nothing.
+ */
+export function listFilesFromForest(
+  client: EncryptedClient,
+  bucket: string,
+): Promise<FileMetadata[]> {
+  return _listFilesFromForest(client, bucket) as Promise<FileMetadata[]>;
 }
 
 /** BLAKE3 keyed sub-key derivation (the AI-workspace-secret derivation primitive). */

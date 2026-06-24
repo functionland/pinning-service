@@ -36,9 +36,9 @@
 import { loadCapabilityForSession, recordAudit, type CapabilityEnv } from "../capability.js";
 import {
   createEncryptedClient,
-  putEncryptedWithType,
-  getDecrypted,
-  listDecrypted,
+  putFlat,
+  getFlat,
+  listFilesFromForest,
   freeClient,
   type EncryptedClient,
   type FileMetadata,
@@ -141,6 +141,35 @@ async function ensureWorkspaceBucket(
  * JWT, builds the workspace client, runs `body`, and GUARANTEES cleanup (free the
  * WASM handle + dispose the capability) in `finally`. Retries once on a 401.
  */
+/** Max times to retry a forest write that lost a conditional-PUT race (412). */
+const MAX_FOREST_WRITE_RETRIES = 4;
+
+/**
+ * A forest write that lost a conditional-PUT race surfaces as
+ * `ClientError::ConcurrentModification` ("precondition failed (ETag mismatch)").
+ * Match defensively against the structured/string error (NOT a bare "412", which
+ * could be an unrelated precondition) so we only retry true forest races.
+ */
+function isConcurrentModification(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  let m = msg;
+  try {
+    const parsed = JSON.parse(msg) as { code?: string; message?: string };
+    if (parsed?.code === "CONCURRENT_MODIFICATION") return true;
+    if (typeof parsed?.message === "string") m = parsed.message;
+  } catch {
+    /* not JSON — match the raw string */
+  }
+  return /concurrent modification|precondition failed|etag mismatch/i.test(m);
+}
+
+/** Jittered exponential backoff (~50·2^n ms + 0–50ms, capped) to break herds. */
+function sleepWithJitter(attempt: number): Promise<void> {
+  const base = Math.min(50 * 2 ** attempt, 400);
+  const ms = base + Math.floor(Math.random() * 50);
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function withWorkspaceClient<T>(
   env: CapabilityEnv,
   userId: string,
@@ -157,6 +186,7 @@ export async function withWorkspaceClient<T>(
     try {
       const cache = gatewayTokenCache();
       let attempt = 0;
+      let forestRetries = 0;
       // Up to two attempts: fresh-or-cached JWT, then a forced refresh on a 401.
       for (;;) {
         const token = await cache.getToken(
@@ -180,6 +210,18 @@ export async function withWorkspaceClient<T>(
             cache.invalidate(userId);
             attempt++;
             continue; // rebuild client with a fresh token, retry once
+          }
+          // Forest write race: put_object_flat flushes the forest with a
+          // conditional PUT; a concurrent writer makes it 412
+          // (ConcurrentModification). The WASM flush is single-attempt, so retry
+          // HERE — re-creating the client drops the now-stale forest cache, so the
+          // next attempt reloads the winner's forest and re-applies our write.
+          // Bounded + jittered. A read-only body never 412s, so this only fires
+          // for store / tag writes.
+          if (isConcurrentModification(e) && forestRetries < MAX_FOREST_WRITE_RETRIES) {
+            forestRetries++;
+            await sleepWithJitter(forestRetries);
+            continue;
           }
           throw e;
         } finally {
@@ -267,7 +309,7 @@ export async function storeFile(
   try {
     const result = await withWorkspaceClient(env, userId, async (client) => {
       // The file upload is the primary, retry-on-401 operation.
-      const put = await putEncryptedWithType(client, WORKSPACE_BUCKET, key, data, contentType);
+      const put = await putFlat(client, WORKSPACE_BUCKET, key, data, contentType);
       // BEST-EFFORT tagging in the SAME session, AFTER the file is stored. We do
       // NOT let a tag failure throw (that would fail the whole store, or re-trigger
       // the file upload on the 401 retry): the file IS stored, so the worst case is
@@ -336,7 +378,7 @@ export async function readFile(
   const encoding: ContentEncoding = args.encoding ?? "base64";
   try {
     const bytes = await withWorkspaceClient(env, userId, async (client) => {
-      return getDecrypted(client, WORKSPACE_BUCKET, key);
+      return getFlat(client, WORKSPACE_BUCKET, key);
     });
     let out: string;
     try {
@@ -373,13 +415,18 @@ export async function listFiles(
     : WORKSPACE_KEY_PREFIX;
   try {
     const rows = await withWorkspaceClient(env, userId, async (client) => {
-      return listDecrypted(client, WORKSPACE_BUCKET, { prefix: `${scopePrefix}/` });
+      // Enumerate via the forest index. (The raw `listDecrypted` prefix-filters the
+      // OBFUSCATED storage keys and returns nothing for this flatNamespace bucket —
+      // the bug that made AI files invisible.)
+      return listFilesFromForest(client, WORKSPACE_BUCKET);
     });
-    // Confine EVERY returned entry by the same segment geometry (treat the
-    // listing as untrusted — never let a non-ai/ key leak through).
+    // Confine EVERY returned entry by the same segment geometry (treat the listing
+    // as untrusted — never let a non-ai/ key leak through), then narrow to the
+    // requested category scope (this narrowing was previously the listDecrypted prefix).
     const files = rows
       .map(toListEntry)
       .filter((f): f is ListEntry => f !== null && isInWorkspaceScope(f.key))
+      .filter((f) => f.key.startsWith(`${scopePrefix}/`))
       .filter((f) => (args.prefix ? f.key.includes(args.prefix!) : true));
     return ok({ bucket: WORKSPACE_BUCKET, count: files.length, files });
   } catch (e) {
@@ -758,7 +805,7 @@ export function searchFilter<T extends { key: string }>(
 async function loadTagDocument(client: EncryptedClient): Promise<TagCloudMetadata | null> {
   let bytes: Uint8Array;
   try {
-    bytes = await getDecrypted(client, WORKSPACE_BUCKET, TAG_METADATA_KEY);
+    bytes = await getFlat(client, WORKSPACE_BUCKET, TAG_METADATA_KEY);
   } catch (e) {
     if (isNotFound(e)) return null; // no document yet → start fresh
     throw e; // a real client/transport error
@@ -842,7 +889,7 @@ async function applyTaggingToDoc(
   // Always bump updatedAt to reflect this call (matches the app's syncToCloud).
   doc.updatedAt = now;
   const json = serializeTagDocument(doc);
-  await putEncryptedWithType(
+  await putFlat(
     client,
     WORKSPACE_BUCKET,
     TAG_METADATA_KEY,
@@ -944,9 +991,7 @@ export async function search(
   const tagName = typeof args.tag === "string" ? args.tag.trim() : "";
   try {
     const files = await withWorkspaceClient(env, userId, async (client) => {
-      const rows = await listDecrypted(client, WORKSPACE_BUCKET, {
-        prefix: `${WORKSPACE_KEY_PREFIX}/`,
-      });
+      const rows = await listFilesFromForest(client, WORKSPACE_BUCKET);
       // Confine EVERY entry by the same segment geometry as fula_list_files
       // (treat the listing as untrusted — never let a non-ai/ key leak through).
       const confined = rows

@@ -101,6 +101,41 @@ function isUnauthorized(e: unknown): boolean {
   return /\b401\b|unauthor/i.test(e.message);
 }
 
+/** AI-workspace buckets already ensured to exist this isolate (keyed by userId). */
+const ensuredWorkspaceBuckets = new Set<string>();
+
+/**
+ * Idempotently create the user's dedicated AI-workspace bucket. `fula-client` does
+ * NOT auto-create on write (it returns NoSuchBucket — see its
+ * `cold_start_returns_bucket_not_found_when_bucket_absent` test), and a hosted
+ * connection has nothing else that provisions it, so the AI's first
+ * `fula_store_file` would fail with `NoSuchBucket: fula-ai-workspace`. The MCP
+ * token's `write` perm permits `CreateBucket` of ONLY this dedicated bucket (any
+ * other bucket is `BucketMismatch` at the gateway), so this cannot widen access.
+ * Best-effort + cached per-isolate: a non-2xx/409 result is left UNcached so a
+ * later op retries, and this never throws (the real op surfaces its own error).
+ */
+async function ensureWorkspaceBucket(
+  endpoint: string,
+  bucket: string,
+  token: string,
+  userId: string,
+): Promise<void> {
+  if (ensuredWorkspaceBuckets.has(userId)) return;
+  try {
+    const res = await fetch(`${endpoint.replace(/\/+$/, "")}/${encodeURIComponent(bucket)}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    // 2xx = created; 409 = already exists. Either way the bucket is now present.
+    if (res.ok || res.status === 409) {
+      ensuredWorkspaceBuckets.add(userId);
+    }
+  } catch {
+    // Best-effort — the following operation will surface any real failure.
+  }
+}
+
 /**
  * The higher-order session wrapper. Loads the capability, refreshes the gateway
  * JWT, builds the workspace client, runs `body`, and GUARANTEES cleanup (free the
@@ -136,6 +171,9 @@ export async function withWorkspaceClient<T>(
             { endpoint: c.endpoint, accessToken: token },
             { secretKey: secret, obfuscationMode: "flatNamespace", enableMetadataPrivacy: true },
           );
+          // Provision the dedicated AI-workspace bucket before any op — fula-client
+          // does NOT auto-create on write, so the first store would NoSuchBucket.
+          await ensureWorkspaceBucket(c.endpoint, WORKSPACE_BUCKET, token, userId);
           return await body(client);
         } catch (e) {
           if (attempt === 0 && isUnauthorized(e)) {

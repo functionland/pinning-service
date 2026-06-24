@@ -3,6 +3,7 @@ package openapi
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -16,6 +17,24 @@ func AuthMiddlewarePostgres(db *PostgresService) func(http.Handler) http.Handler
 			// Skip auth for login/register endpoints
 			if strings.HasPrefix(r.URL.Path, "/auth/") {
 				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Service-auth (MCP/AI writes from the co-located Fula S3 gateway):
+			// the gateway asserts the user via an HMAC over (user_id, exp) in the
+			// X-Fula-Service-Auth header instead of a session bearer (its token is
+			// a gateway-scoped JWT, not a session, so ValidateSession below would
+			// reject it). FAIL-CLOSED: a present-but-invalid header is rejected and
+			// never falls through to the session path. ABSENT => the normal
+			// Authorization/session path below, unchanged (normal users untouched).
+			if svc := r.Header.Get(ServiceAuthHeader); svc != "" {
+				uid, err := verifyServiceAuthValue(svc, os.Getenv(ServiceSecretEnv))
+				if err != nil {
+					writePostgresErrorResponse(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid service authentication")
+					return
+				}
+				ctx := context.WithValue(r.Context(), usernameContextKeyPostgres, uid)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 

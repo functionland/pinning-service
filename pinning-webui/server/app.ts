@@ -949,8 +949,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     // user via an HMAC over (user_id, exp) in X-Fula-Service-Auth, not an API key
     // (the gateway's bearer is a gateway-scoped JWT, not a session). FAIL-CLOSED:
     // a present-but-invalid header is rejected, never falls through to API-key auth.
+    // SCOPED to ONLY /api/v1/storage — the only endpoint the gateway needs — so a
+    // captured header can't reach the broader API (wallets, credit claiming, etc.).
     const svcAuth = req.headers[SERVICE_AUTH_HEADER];
-    if (typeof svcAuth === 'string' && svcAuth.length > 0) {
+    if (typeof svcAuth === 'string' && svcAuth.length > 0 && req.path === '/api/v1/storage') {
       const uid = verifyServiceAuth(svcAuth, config.pinServiceSecret ?? '');
       if (!uid) {
         return res.status(401).json({ error: 'Invalid service authentication' });

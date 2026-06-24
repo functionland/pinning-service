@@ -120,8 +120,16 @@ func main() {
 	// Get IPFS HTTP URL for dag/stat API
 	ipfsHTTPURL := os.Getenv("IPFS_HTTP_URL")
 
+	// Shared secret for HMAC service-auth from the co-located Fula S3 gateway
+	// (MCP/AI writes assert a user_id without a login session). Unset ⇒ the
+	// service-auth path is disabled (fail-closed); normal session auth unaffected.
+	pinServiceSecret := os.Getenv("FULA_PIN_SERVICE_SECRET")
+	if pinServiceSecret == "" {
+		log.Printf("Warning: FULA_PIN_SERVICE_SECRET not set — gateway service-auth (MCP/AI pins) disabled")
+	}
+
 	// Initialize PinsAPIService with PostgreSQL backend
-	pinsAPIService := openapi.NewPinsAPIServicePostgres(postgresService, userService, ipfsAPI, ipfsClusterApi, enableIPFSPinning, ipfsHTTPURL)
+	pinsAPIService := openapi.NewPinsAPIServicePostgres(postgresService, userService, ipfsAPI, ipfsClusterApi, enableIPFSPinning, ipfsHTTPURL, pinServiceSecret)
 
 	// Create PinsAPIController
 	pinsAPIController := openapi.NewPinsAPIController(pinsAPIService)

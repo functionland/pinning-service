@@ -10,6 +10,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { v4 as uuidv4 } from 'uuid';
 import jwt from 'jsonwebtoken';
 import { emailToUserId, hashWalletAddress, getUserId } from './utils/hash.js';
+import { verifyServiceAuth, SERVICE_AUTH_HEADER } from './serviceAuth.js';
 import {
   getUserCreditStatus,
   getUserWallets,
@@ -139,6 +140,7 @@ export interface AppConfig {
   nodeEnv: string;
   pinningServiceUrl: string;
   systemKey?: string;  // For x402 gateway integration
+  pinServiceSecret?: string;  // HMAC secret for gateway service-auth (MCP/AI pins + quota)
   s3AdminJwt?: string;  // For internal S3 fetch (share links)
   s3InternalUrl?: string;  // Internal S3 endpoint (default: http://127.0.0.1:9000)
   // v8 migration: bucket the collab manifest + collab files are WRITTEN to.
@@ -943,6 +945,22 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // API token auth middleware (Bearer token for external apps)
   // Looks up token in api_keys table - same approach as Go pinning service
   async function requireApiAuth(req: Request, res: Response, next: NextFunction) {
+    // Service-auth (MCP/AI writes via the co-located Fula S3 gateway): assert the
+    // user via an HMAC over (user_id, exp) in X-Fula-Service-Auth, not an API key
+    // (the gateway's bearer is a gateway-scoped JWT, not a session). FAIL-CLOSED:
+    // a present-but-invalid header is rejected, never falls through to API-key auth.
+    // SCOPED to ONLY /api/v1/storage — the only endpoint the gateway needs — so a
+    // captured header can't reach the broader API (wallets, credit claiming, etc.).
+    const svcAuth = req.headers[SERVICE_AUTH_HEADER];
+    if (typeof svcAuth === 'string' && svcAuth.length > 0 && req.path === '/api/v1/storage') {
+      const uid = verifyServiceAuth(svcAuth, config.pinServiceSecret ?? '');
+      if (!uid) {
+        return res.status(401).json({ error: 'Invalid service authentication' });
+      }
+      req.apiUser = { email: uid, userId: uid };
+      return next();
+    }
+
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {

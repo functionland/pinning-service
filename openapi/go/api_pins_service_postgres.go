@@ -28,10 +28,13 @@ type PinsAPIServicePostgres struct {
 	ipfsClusterAPI    clusterapi.Client
 	enableIPFSPinning bool
 	ipfsHTTPURL       string
+	// serviceSecret is the shared secret for HMAC service-auth (ServiceAuthHeader);
+	// empty ⇒ the service-auth path is disabled (fail-closed). See service_auth.go.
+	serviceSecret string
 }
 
 // NewPinsAPIServicePostgres creates a new pins API service with PostgreSQL backend
-func NewPinsAPIServicePostgres(db *PostgresService, userService *UserServicePostgres, ipfsAPI *ipfsrpc.HttpApi, ipfsClusterAPI clusterapi.Client, enableIPFSPinning bool, ipfsHTTPURL string) *PinsAPIServicePostgres {
+func NewPinsAPIServicePostgres(db *PostgresService, userService *UserServicePostgres, ipfsAPI *ipfsrpc.HttpApi, ipfsClusterAPI clusterapi.Client, enableIPFSPinning bool, ipfsHTTPURL string, serviceSecret string) *PinsAPIServicePostgres {
 	if ipfsHTTPURL == "" {
 		ipfsHTTPURL = "http://127.0.0.1:5001"
 	}
@@ -42,6 +45,7 @@ func NewPinsAPIServicePostgres(db *PostgresService, userService *UserServicePost
 		ipfsClusterAPI:    ipfsClusterAPI,
 		enableIPFSPinning: enableIPFSPinning,
 		ipfsHTTPURL:       ipfsHTTPURL,
+		serviceSecret:     serviceSecret,
 	}
 }
 
@@ -574,6 +578,18 @@ func (s *PinsAPIServicePostgres) GetPinNodes(ctx context.Context, requestid stri
 // Helper methods
 
 func (s *PinsAPIServicePostgres) extractUserIDFromAuth(ctx context.Context) (string, error) {
+	// Service-auth (MCP/AI writes): a co-located trusted caller (the Fula S3
+	// gateway) asserts the user via an HMAC-signed header instead of a session
+	// token, for writes whose bearer is a gateway-scoped JWT (not a login
+	// session). FAIL-CLOSED — a present-but-invalid header is rejected and NEVER
+	// falls back to the session lookup; an ABSENT header takes the normal path
+	// below, so normal users are 100% unaffected.
+	if uid, err := verifyServiceAuth(ctx, s.serviceSecret); err == nil {
+		return uid, nil
+	} else if !errors.Is(err, ErrServiceAuthAbsent) {
+		return "", err // present-but-invalid ⇒ reject; do not fall back to session
+	}
+
 	token, err := extractAuthTokenFromContext(ctx)
 	if err != nil {
 		return "", err

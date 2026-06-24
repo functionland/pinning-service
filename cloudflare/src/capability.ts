@@ -142,10 +142,19 @@ export async function handleCapability(
   try {
     const bao = openBaoFromEnv(env);
     recordId = await sealCapability(env.CUSTODY_DB, bao, userId, cap);
-  } catch {
+  } catch (e) {
+    // TEMP diagnostic — surface the coarse seal-failure class (no secrets:
+    // OpenBao errors carry only a `kind` + HTTP status). Revert after diagnosis.
+    const detail =
+      e && typeof e === "object" && "kind" in e
+        ? `${(e as { kind: string }).kind}: ${(e as Error).message}`
+        : e instanceof Error
+          ? e.message
+          : String(e);
+    console.error("capability seal failed:", detail);
     // Fail closed. Audit the failure (no secret material in the detail).
     await recordAudit(env.CUSTODY_DB, userId, "capability_seal_failed", {});
-    return json(503, { error: "custody_unavailable" });
+    return json(503, { error: "custody_unavailable", detail });
   }
 
   // ── 4. Supplementary audit (non-secret context; best-effort) ──────────────

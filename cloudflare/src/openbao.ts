@@ -96,7 +96,11 @@ export class OpenBaoTransit {
     this.secretId = cfg.secretId;
     this.transitKey = cfg.transitKey;
     this.timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.doFetch = cfg.fetchImpl ?? fetch;
+    // The global `fetch` MUST keep its original `this` (globalThis). Storing it
+    // on an instance and calling `this.doFetch(...)` rebinds `this` to the
+    // instance, which Workers reject with "Illegal invocation". Bind the default
+    // so the method-style call is safe. (An injected test fetch is a plain fn.)
+    this.doFetch = cfg.fetchImpl ?? fetch.bind(globalThis);
     this.now = cfg.now ?? (() => Date.now());
   }
 
@@ -222,12 +226,22 @@ export class OpenBaoTransit {
         signal: ctrl.signal,
       });
     } catch (e) {
-      // AbortError or network failure → fail closed with a coarse class. Do NOT
-      // include the error message verbatim (defensive: avoid any chance of a
-      // secret-bearing URL/host leaking into logs downstream).
+      // TEMP diagnostic (revert after): surface the REAL error + the target URL
+      // so we can see exactly what the fetch is failing on, and confirm which
+      // OPENBAO_ADDR is in effect. The URL is the configured host + a fixed path.
       const timedOut = e instanceof Error && e.name === "AbortError";
+      const real =
+        e instanceof Error
+          ? `${e.name}: ${e.message}${
+              (e as { cause?: unknown }).cause
+                ? ` | cause: ${String((e as { cause?: unknown }).cause)}`
+                : ""
+            }`
+          : String(e);
       throw new OpenBaoError(
-        timedOut ? "OpenBao request timed out" : "OpenBao request failed",
+        timedOut
+          ? `request to ${this.addr}${path} timed out`
+          : `request to ${this.addr}${path} failed — ${real}`,
         timedOut ? "timeout" : kind,
       );
     } finally {

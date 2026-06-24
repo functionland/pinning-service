@@ -58,7 +58,10 @@ export class GatewayTokenCache {
   private readonly now: () => number;
 
   constructor(opts: { fetchImpl?: FetchLike; now?: () => number } = {}) {
-    this.doFetch = opts.fetchImpl ?? fetch;
+    // Same Workers gotcha as OpenBaoTransit: the global `fetch` must keep its
+    // `this` (globalThis). Calling `this.doFetch(...)` otherwise throws "Illegal
+    // invocation". Bind the default so the method-style call is safe.
+    this.doFetch = opts.fetchImpl ?? fetch.bind(globalThis);
     this.now = opts.now ?? (() => Date.now());
   }
 

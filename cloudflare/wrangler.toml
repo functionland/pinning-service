@@ -12,6 +12,8 @@ name = "fula-mcp"
 main = "src/index.ts"
 compatibility_date = "2025-11-01"
 
+workers_dev = false
+
 # nodejs_compat            → jose + node:crypto style APIs used by the deps.
 # global_fetch_strictly_public → REQUIRED for CIMD (Client ID Metadata Document)
 #   support in @cloudflare/workers-oauth-provider; without it the library's
@@ -20,6 +22,13 @@ compatibility_date = "2025-11-01"
 #   internet, never internal addresses).
 compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 
+# Custom domain — serves the Worker at mcp.cloud.fx.land (must equal CANONICAL_ORIGIN).
+# `routes` MUST be a top-level key (above every [section]); placed under [vars] it is
+# parsed as a variable and no route is deployed.
+routes = [
+  { pattern = "mcp.cloud.fx.land", custom_domain = true }
+]
+
 # ── KV: the OAuth provider's token / grant / client store ────────────────────
 # The library REQUIRES a binding literally named `OAUTH_KV`.
 # For `wrangler dev` (local) and vitest, miniflare simulates this in-memory, so
@@ -27,7 +36,7 @@ compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 # real deploy:  `wrangler kv namespace create OAUTH_KV`  → paste the returned id.
 [[kv_namespaces]]
 binding = "OAUTH_KV"
-id = "0000000000000000000000000000_PLACEHOLDER_REPLACE_BEFORE_DEPLOY"
+id = "590571d10191482fbdf8b65ffcb81908"
 
 # ── D1: the custody store (H2) ───────────────────────────────────────────────
 # Holds the per-user ENVELOPE-ENCRYPTED capability + an append-only audit log
@@ -41,7 +50,7 @@ id = "0000000000000000000000000000_PLACEHOLDER_REPLACE_BEFORE_DEPLOY"
 [[d1_databases]]
 binding = "CUSTODY_DB"
 database_name = "fula_mcp_custody"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "d5a73564-2a86-460a-a1a8-a7a4bf6a1ca6"
 
 # ── Non-secret vars ──────────────────────────────────────────────────────────
 # These are NOT secrets (safe to commit). They are placeholders for H1.
@@ -49,12 +58,11 @@ database_id = "00000000-0000-0000-0000-000000000000"
 # protected-resource `resource` identifier and the canonical-host guard match
 # what real clients (Claude.ai / ChatGPT) bind their tokens to.
 [vars]
-CANONICAL_ORIGIN = "https://fula-mcp.example.workers.dev"
+CANONICAL_ORIGIN = "https://mcp.cloud.fx.land"
 # Google OAuth — the *non-secret* client id and the upstream endpoints. The
 # real value is injected as a Worker SECRET (GOOGLE_CLIENT_ID) at deploy time
 # and via `.dev.vars` locally; this placeholder lets `wrangler dev` boot the
 # metadata endpoints without auth configured. NEVER hardcode the real id here.
-GOOGLE_CLIENT_ID = ""
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
@@ -62,10 +70,8 @@ GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 # ── Custom domain / route (commented — user-gated deploy) ────────────────────
 # Uncomment ONE of these at H4 once the user picks the hosted MCP hostname and
 # it is added to their Cloudflare zone. The hostname here MUST equal
-# CANONICAL_ORIGIN above.
-# routes = [
-#   { pattern = "fula-mcp.fx.land", custom_domain = true }
-# ]
+# CANONICAL_ORIGIN above. The active `routes` is now a TOP-LEVEL key near the top of
+# this file (under [vars] it would be parsed as a variable and no route would deploy).
 
 # ── Secrets (NOT set here — see `.dev.vars.example`) ─────────────────────────
 # Set via `wrangler secret put <NAME>` (deploy) or `.dev.vars` (local):

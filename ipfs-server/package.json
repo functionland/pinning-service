@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "build": "npm run build:bundle && npm run build:binary",
-    "build:bundle": "esbuild server.js --bundle --platform=node --format=cjs --target=node20 --outfile=dist/bundle.cjs --external:pg --external:pg-native",
-    "build:binary": "pkg ./dist/bundle.cjs --target node20-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode",
+    "build:bundle": "esbuild server.js --bundle --platform=node --format=cjs --target=node22 --outfile=dist/bundle.cjs --external:pg --external:pg-native",
+    "build:binary": "pkg ./dist/bundle.cjs --target node22-linux-x64 -o ./dist/ipfs-gateway --public --no-bytecode",
     "dev": "node --watch server.js",
     "test": "node --test test/server.test.js",
     "test:setup": "node test/setup-test-db.js"
@@ -20,7 +20,7 @@
       "node_modules/multiformats/**/*"
     ],
     "targets": [
-      "node20-linux-x64"
+      "node22-linux-x64"
     ],
     "outputPath": "dist"
   },

@@ -226,22 +226,11 @@ export class OpenBaoTransit {
         signal: ctrl.signal,
       });
     } catch (e) {
-      // TEMP diagnostic (revert after): surface the REAL error + the target URL
-      // so we can see exactly what the fetch is failing on, and confirm which
-      // OPENBAO_ADDR is in effect. The URL is the configured host + a fixed path.
+      // Do not surface the OpenBao address or raw error to callers; keep the
+      // coarse failure kind for fail-closed handling upstream.
       const timedOut = e instanceof Error && e.name === "AbortError";
-      const real =
-        e instanceof Error
-          ? `${e.name}: ${e.message}${
-              (e as { cause?: unknown }).cause
-                ? ` | cause: ${String((e as { cause?: unknown }).cause)}`
-                : ""
-            }`
-          : String(e);
       throw new OpenBaoError(
-        timedOut
-          ? `request to ${this.addr}${path} timed out`
-          : `request to ${this.addr}${path} failed — ${real}`,
+        timedOut ? "request timed out" : "request failed",
         timedOut ? "timeout" : kind,
       );
     } finally {

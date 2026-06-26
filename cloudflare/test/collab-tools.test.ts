@@ -307,8 +307,7 @@ describe("read-only + owner-file deferral", () => {
     expect(res.content[0]!.text.toLowerCase()).toContain("read-only");
   });
 
-  it("reading an owner (encType:fula) file returns a clear deferral message", async () => {
-    // Seed a manifest carrying a fula-encrypted owner entry.
+  it("an owner (encType:fula) file with NO share token fails closed", async () => {
     const g = emptyGroup();
     const fula: CollaborationFile = {
       id: "owner-file-0000-4000-8000-00000000feed",
@@ -319,14 +318,36 @@ describe("read-only + owner-file deferral", () => {
       addedAt: "2026-01-02T00:00:00.000Z",
       fileSize: 10,
       encType: "fula",
-      shareTokenJson: "{}",
+      // no shareTokenJson
     };
     g.files.push(fula);
     await server.seed(g);
 
     const res = await readFile(session, { fileId: fula.id });
     expect(res.isError).toBe(true);
-    expect(res.content[0]!.text.toLowerCase()).toContain("owner");
+    expect(res.content[0]!.text.toLowerCase()).toContain("share token");
+  });
+
+  it("an owner (encType:fula) file with a malformed share token fails closed (no crash)", async () => {
+    const g = emptyGroup();
+    const fula: CollaborationFile = {
+      id: "owner-file-0000-4000-8000-00000000beef",
+      fileName: "owner2.pdf",
+      bucket: "fula-metadata",
+      storageKey: "obfs-storage-key-2",
+      addedByPublicKey: "owner-pub",
+      addedAt: "2026-01-02T00:00:00.000Z",
+      fileSize: 10,
+      encType: "fula",
+      shareTokenJson: "{}", // not a valid v5 ShareToken
+    };
+    g.files.push(fula);
+    await server.seed(g);
+
+    // Reaches the 0.6.19 recipient binding, which rejects the malformed token.
+    const res = await readFile(session, { fileId: fula.id });
+    expect(res.isError).toBe(true);
+    expect(res.content[0]!.text.toLowerCase()).toContain("share token");
   });
 });
 

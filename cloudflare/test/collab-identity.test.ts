@@ -3,11 +3,10 @@
  * link-secret UNWRAP seam (./identity.ts `recoverLinkSecret`). Runs inside
  * workerd because it uses the fula WASM HPKE primitives.
  *
- * The unwrap seam is the FLAGGED upstream dependency (see ./identity.ts + the PR
- * notes): the pinned WASM can unwrap a BARE HPKE envelope (`testHpkeEncryptDek`
- * format) but NOT a v5 ShareToken (the Rust/local-MCP contract — no DEK-returning
- * binding). This suite pins both: the bare-envelope round-trip works, and a v5
- * ShareToken is rejected with the precise "needs a fula-client binding" error.
+ * The unwrap seam (fula-client 0.6.19) unwraps the PRODUCTION v5 ShareToken (the
+ * Rust/local-MCP + FxFiles contract) directly via `unwrapSecretForRecipient`. This
+ * suite pins the v5 round-trip (wrap → recover the exact link secret), the
+ * stranger-key rejection, and the gated bare-envelope TEST affordance.
  */
 
 import { describe, it, expect } from "vitest";
@@ -19,7 +18,12 @@ import {
   recoverLinkSecret,
   IdentityError,
 } from "../src/fula/collab/identity.js";
-import { blake3DeriveKey, derivePublicKeyFromSecret, testHpkeEncryptDek } from "../src/fula/wasm.js";
+import {
+  blake3DeriveKey,
+  derivePublicKeyFromSecret,
+  testHpkeEncryptDek,
+  wrapSecretForRecipient,
+} from "../src/fula/wasm.js";
 
 function hex(b: Uint8Array): string {
   return Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
@@ -96,22 +100,37 @@ describe("recoverLinkSecret — the HPKE unwrap seam", () => {
     expect(() => recoverLinkSecret(stranger, wrapped, { allowBareEnvelope: true })).toThrow(IdentityError);
   });
 
-  it("a v5 ShareToken surfaces the precise upstream-binding dependency (not a silent fail)", () => {
+  it("recovers a link secret wrapped as a v5 ShareToken (the production Method-2 path)", () => {
     const workerSecret = blake3DeriveKey("test:worker:v1", new Uint8Array(32).fill(1));
-    // A v5 ShareToken carries `wrapped_key` + `version` — the Rust/local-MCP contract.
-    const shareToken = JSON.stringify({
-      id: "share-1",
-      wrapped_key: { version: 5, encapsulated_key: { ephemeral_public: [] }, ciphertext: "..." },
-      path_scope: "/collab/g",
-      version: 5,
-    });
+    const workerPub = derivePublicKeyFromSecret(workerSecret);
+
+    const linkSecret = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) linkSecret[i] = (i * 7 + 3) & 0xff;
+
+    // FxFiles (the producer) HPKE-wraps the link secret to the worker pubkey as a v5 ShareToken.
+    const token = wrapSecretForRecipient(linkSecret, workerPub, "/collab/g", 3600n);
+    const parsed = JSON.parse(token);
+    expect(parsed.wrapped_key).toBeTruthy(); // it IS a v5 ShareToken
+    expect(parsed.version).toBe(5);
+
+    // recoverLinkSecret unwraps it directly on the LIVE path (no allowBareEnvelope needed).
+    const recovered = recoverLinkSecret(workerSecret, token);
+    expect(hex(recovered)).toBe(hex(linkSecret));
+  });
+
+  it("a v5 ShareToken addressed to a STRANGER fails closed", () => {
+    const workerSecret = blake3DeriveKey("test:worker:v1", new Uint8Array(32).fill(1));
+    const strangerPub = derivePublicKeyFromSecret(
+      blake3DeriveKey("test:stranger:v1", new Uint8Array(32).fill(2)),
+    );
+    // Wrapped for the stranger, not the worker → accept_share fails → IdentityError("share").
+    const token = wrapSecretForRecipient(new Uint8Array(32).fill(9), strangerPub, "/collab/g", 3600n);
     try {
-      recoverLinkSecret(workerSecret, shareToken);
-      throw new Error("expected recoverLinkSecret to throw");
+      recoverLinkSecret(workerSecret, token);
+      throw new Error("expected recoverLinkSecret to reject a token addressed to a stranger");
     } catch (e) {
       expect(e).toBeInstanceOf(IdentityError);
-      expect((e as IdentityError).kind).toBe("unsupportedShareToken");
-      expect((e as IdentityError).message).toContain("acceptShareDek");
+      expect((e as IdentityError).kind).toBe("share");
     }
   });
 });

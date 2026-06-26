@@ -1086,6 +1086,14 @@ export async function gcExpiredGrants(graceSeconds = 600, nowSeconds?: number): 
 export interface McpConnectionScope {
   v: number;
   scopes: Array<{ bucket: string; prefix: string; perms: string[] }>;
+  /**
+   * ADDITIVE (collab-write auth): the collab groups this connection is
+   * authorized to WRITE to via a `collab_write` token. Populated ONLY by the
+   * authorize endpoint (POST /api/mcp/connections/:id/collab-groups); the
+   * `mcp_s3` minting path ignores it entirely. Absent ⇒ no collab authorization
+   * (backward-compatible — existing rows have no `collab` key).
+   */
+  collab?: { groupIds: string[] };
 }
 
 export interface McpConnectionRow {
@@ -1239,6 +1247,314 @@ export async function listRevokedConnectionPubkeys(): Promise<string[]> {
     'SELECT DISTINCT mcp_pub_b64 FROM mcp_connections WHERE revoked = TRUE',
   );
   return result.rows.map((r) => r.mcp_pub_b64);
+}
+
+/**
+ * Load a single connection row by id (NOT user-scoped — callers that need
+ * ownership must check `user_id` themselves). Used by the collab-write path to
+ * resolve the connection a `collab_write` token names in `collab.cid` for the
+ * SYNCHRONOUS revoked check, and by the authorize endpoint.
+ */
+export async function findMcpConnectionById(id: string): Promise<McpConnectionRow | null> {
+  const result = await query<McpConnectionRow>(
+    `SELECT id, user_id, mcp_pub_b64, label, scope, revoked, created_at, last_refreshed_at
+       FROM mcp_connections
+      WHERE id = $1`,
+    [id],
+  );
+  return result.rows[0] ?? null;
+}
+
+/**
+ * Authorize (MERGE-add) collab group ids onto a connection's stored scope.
+ * USER-SCOPED + not-revoked: the row must belong to `userId` and be live, or
+ * this returns null (the endpoint maps that to 404/403). The merge + write are
+ * done in JS for clarity; the UPDATE re-asserts `user_id = $ AND NOT revoked`
+ * so a connection revoked between the load and the write is never modified
+ * (rowCount 0 → null). Returns the AUTHORITATIVE post-update row (so the minted
+ * token reflects exactly what is stored). `addGroupIds` are assumed already
+ * UUID-validated + lowercased by the caller (collabTokens.normalizeGroupIds).
+ */
+export async function authorizeCollabGroupsForConnection(
+  userId: string,
+  id: string,
+  addGroupIds: string[],
+): Promise<McpConnectionRow | null> {
+  const row = await findMcpConnectionById(id);
+  if (!row || row.user_id !== userId || row.revoked) return null;
+
+  const existing = Array.isArray(row.scope?.collab?.groupIds) ? row.scope.collab!.groupIds : [];
+  // EXACT (case-sensitive) merge — a group's identity is its exact id (the
+  // collab_manifests PK); see collabTokens.normalizeGroupIds.
+  const merged = [...new Set([...existing.map(String), ...addGroupIds.map(String)])];
+  const newScope: McpConnectionScope = { ...row.scope, collab: { groupIds: merged } };
+
+  const upd = await query<{ scope: McpConnectionScope }>(
+    `UPDATE mcp_connections SET scope = $1
+       WHERE id = $2 AND user_id = $3 AND NOT revoked
+       RETURNING scope`,
+    [JSON.stringify(newScope), id, userId],
+  );
+  if ((upd.rowCount || 0) === 0) return null; // revoked/gone between load and write
+  row.scope = upd.rows[0].scope;
+  return row;
+}
+
+/**
+ * De-authorize (REMOVE) collab group ids from a connection's stored scope.
+ * USER-SCOPED (the row must belong to `userId`). Unlike the add path this is
+ * allowed even on a revoked row (removing access is always safe). Returns the
+ * authoritative post-update row, or null if the row doesn't exist for this user.
+ * Combined with the synchronous DB-truth check on the write path, a removed
+ * group is denied IMMEDIATELY (not after token TTL). `removeGroupIds` are
+ * lowercased by the caller.
+ */
+export async function deauthorizeCollabGroupsForConnection(
+  userId: string,
+  id: string,
+  removeGroupIds: string[],
+): Promise<McpConnectionRow | null> {
+  const row = await findMcpConnectionById(id);
+  if (!row || row.user_id !== userId) return null;
+
+  const remove = new Set(removeGroupIds.map(String));
+  const existing = Array.isArray(row.scope?.collab?.groupIds) ? row.scope.collab!.groupIds : [];
+  const kept = existing.map(String).filter((g) => !remove.has(g));
+  const newScope: McpConnectionScope = { ...row.scope, collab: { groupIds: kept } };
+
+  const upd = await query<{ scope: McpConnectionScope }>(
+    `UPDATE mcp_connections SET scope = $1 WHERE id = $2 AND user_id = $3 RETURNING scope`,
+    [JSON.stringify(newScope), id, userId],
+  );
+  if ((upd.rowCount || 0) === 0) return null;
+  row.scope = upd.rows[0].scope;
+  return row;
+}
+
+/**
+ * Which of `groupIds` have a `collab_manifests` row (i.e. are REAL, known
+ * groups). Used by the authorize endpoint to reject authorizing a connection
+ * for a group that does not exist (you can only delegate access to a group you
+ * can name — the groupId UUID is the link-authorization capability). Returns the
+ * set of EXISTING ids (lowercased). The caller diffs against the requested set.
+ */
+export async function collabGroupsExist(groupIds: string[]): Promise<Set<string>> {
+  if (groupIds.length === 0) return new Set();
+  // EXACT match — a group's identity is its exact group_id (the PK); matching
+  // case-insensitively here would let an authorization bind to a different
+  // stored group than the one written to. See collabTokens.normalizeGroupIds.
+  const result = await query<{ group_id: string }>(
+    'SELECT group_id FROM collab_manifests WHERE group_id = ANY($1::text[])',
+    [groupIds],
+  );
+  return new Set(result.rows.map((r) => String(r.group_id)));
+}
+
+// ============================================
+// Collab-write auth — manifest flags + version + audit (additive)
+// ============================================
+
+/**
+ * Create the base `collab_manifests` table + its historical migrations (encrypted
+ * column, nullable manifest_data, creator_id). Extracted so both the app init
+ * and the tests build an identical schema. The additive collab-write-auth
+ * columns/tables are added by `createCollabWriteAuthSchema` (call it after).
+ */
+export async function createCollabManifestsTable(): Promise<void> {
+  await query(`
+    CREATE TABLE IF NOT EXISTS collab_manifests (
+      group_id TEXT PRIMARY KEY,
+      manifest_data TEXT,
+      encrypted_manifest TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await query(`ALTER TABLE collab_manifests ADD COLUMN IF NOT EXISTS encrypted_manifest TEXT`).catch(() => {});
+  await query(`ALTER TABLE collab_manifests ALTER COLUMN manifest_data DROP NOT NULL`).catch(() => {});
+  await query(`ALTER TABLE collab_manifests ADD COLUMN IF NOT EXISTS creator_id VARCHAR(64)`).catch(() => {});
+}
+
+/**
+ * Additive schema for the collab-write auth feature:
+ *  • collab_manifests.collab_writes_revoked — the per-group AI-write KILL SWITCH
+ *    (server source of truth, checked synchronously on every collab write —
+ *    NOT the manifest blob). Default FALSE ⇒ existing groups unaffected.
+ *  • collab_manifests.manifest_version — monotonic version for OPT-IN CAS on
+ *    PUT manifest-sync. Default 0 ⇒ existing groups start at 0; the first
+ *    versioned write moves it to 1.
+ *  • collab_audit_log — one row per collab write (human OR AI).
+ * Idempotent (IF NOT EXISTS) and safe to run on every boot.
+ */
+export async function createCollabWriteAuthSchema(): Promise<void> {
+  await query(
+    `ALTER TABLE collab_manifests ADD COLUMN IF NOT EXISTS collab_writes_revoked BOOLEAN NOT NULL DEFAULT FALSE`,
+  );
+  await query(
+    `ALTER TABLE collab_manifests ADD COLUMN IF NOT EXISTS manifest_version BIGINT NOT NULL DEFAULT 0`,
+  );
+  await query(`
+    CREATE TABLE IF NOT EXISTS collab_audit_log (
+      id BIGSERIAL PRIMARY KEY,
+      principal_id VARCHAR(64) NOT NULL,
+      principal_type VARCHAR(16) NOT NULL,
+      group_id TEXT NOT NULL,
+      verb VARCHAR(32) NOT NULL,
+      file_id TEXT,
+      src_ip VARCHAR(64),
+      status_code INT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  // status_code is additive for forensics; add it if an older table predates it.
+  await query(`ALTER TABLE collab_audit_log ADD COLUMN IF NOT EXISTS status_code INT`);
+  await query(
+    `CREATE INDEX IF NOT EXISTS idx_collab_audit_group ON collab_audit_log(group_id, created_at)`,
+  );
+}
+
+/**
+ * True iff the group's AI/collab writes are revoked (the kill switch). A MISSING
+ * row ⇒ false (nothing to revoke; the write then resolves the creator key as
+ * usual). Throws on a real query error so the caller can FAIL CLOSED (deny) —
+ * never swallow into a false.
+ */
+export async function isCollabGroupWritesRevoked(groupId: string): Promise<boolean> {
+  const result = await query<{ collab_writes_revoked: boolean }>(
+    'SELECT collab_writes_revoked FROM collab_manifests WHERE group_id = $1',
+    [groupId],
+  );
+  return result.rows[0]?.collab_writes_revoked === true;
+}
+
+/**
+ * Flip the per-group AI-write kill switch. CREATOR-GATED: only the group's
+ * `creator_id` may toggle it (the collab files live in the creator's S3
+ * namespace, so the creator is the authority). Returns:
+ *   'not_found' — no manifest row for the group
+ *   'forbidden' — creator_id is null OR != caller (don't disclose which)
+ *   'ok'        — flipped
+ */
+export async function setCollabWritesRevoked(
+  groupId: string,
+  callerId: string,
+  revoked: boolean,
+): Promise<'ok' | 'not_found' | 'forbidden'> {
+  const row = await query<{ creator_id: string | null }>(
+    'SELECT creator_id FROM collab_manifests WHERE group_id = $1',
+    [groupId],
+  );
+  if (row.rows.length === 0) return 'not_found';
+  const creatorId = row.rows[0].creator_id;
+  if (!creatorId || creatorId !== callerId) return 'forbidden';
+  await query(
+    'UPDATE collab_manifests SET collab_writes_revoked = $2, updated_at = NOW() WHERE group_id = $1',
+    [groupId, revoked],
+  );
+  return 'ok';
+}
+
+export interface CollabManifestSyncResult {
+  /** false ⇒ CAS conflict (the stored version moved); `version` is the CURRENT stored version. */
+  ok: boolean;
+  /** new version on success, or the current stored version on a CAS conflict. */
+  version: number;
+}
+
+/**
+ * Manifest-sync upsert with OPTIONAL conditional write (CAS). Preserves the
+ * EXACT column semantics of the original two-path upsert (encrypted vs legacy
+ * plaintext) and ADDS:
+ *   • manifest_version = manifest_version + 1 on every update (1 on insert)
+ *   • a CAS guard: `WHERE $base IS NULL OR manifest_version = $base`
+ *
+ * `baseVersion == null/undefined` ⇒ NO CAS (always writes — identical to the
+ * legacy behavior, just now also bumping the version). When a base IS given and
+ * the stored version differs, the ON CONFLICT update's WHERE excludes the row →
+ * 0 rows returned → we report `{ ok: false, version: <current> }` so the route
+ * can 409. Atomic + race-free: Postgres takes a row lock on the conflicting row
+ * for ON CONFLICT DO UPDATE, so two writers with the same base serialize — the
+ * first bumps the version, the second's WHERE (= old base) then fails.
+ *
+ * Brand-new group (no row) + a base given ⇒ the INSERT path runs (no conflict),
+ * creating it at version 1 (CAS does not apply to creation; documented).
+ */
+export async function syncCollabManifest(
+  groupId: string,
+  opts: {
+    encryptedManifest?: string | null;
+    data?: string | null;
+    creatorId: string | null;
+    baseVersion?: number | null;
+  },
+): Promise<CollabManifestSyncResult> {
+  const base = opts.baseVersion == null ? null : opts.baseVersion;
+  const useEncrypted = typeof opts.encryptedManifest === 'string' && opts.encryptedManifest.length > 0;
+
+  let result;
+  if (useEncrypted) {
+    result = await query<{ manifest_version: string | number }>(
+      `INSERT INTO collab_manifests (group_id, manifest_data, encrypted_manifest, creator_id, manifest_version, updated_at)
+       VALUES ($1, NULL, $2, $3, 1, NOW())
+       ON CONFLICT (group_id) DO UPDATE SET
+         encrypted_manifest = EXCLUDED.encrypted_manifest,
+         manifest_data = NULL,
+         creator_id = COALESCE(collab_manifests.creator_id, EXCLUDED.creator_id),
+         manifest_version = collab_manifests.manifest_version + 1,
+         updated_at = NOW()
+       WHERE $4::bigint IS NULL OR collab_manifests.manifest_version = $4::bigint
+       RETURNING manifest_version`,
+      [groupId, opts.encryptedManifest, opts.creatorId, base],
+    );
+  } else {
+    result = await query<{ manifest_version: string | number }>(
+      `INSERT INTO collab_manifests (group_id, manifest_data, creator_id, manifest_version, updated_at)
+       VALUES ($1, $2, $3, 1, NOW())
+       ON CONFLICT (group_id) DO UPDATE SET
+         manifest_data = EXCLUDED.manifest_data,
+         creator_id = COALESCE(collab_manifests.creator_id, EXCLUDED.creator_id),
+         manifest_version = collab_manifests.manifest_version + 1,
+         updated_at = NOW()
+       WHERE $4::bigint IS NULL OR collab_manifests.manifest_version = $4::bigint
+       RETURNING manifest_version`,
+      [groupId, opts.data ?? null, opts.creatorId, base],
+    );
+  }
+
+  if (result.rows.length > 0) {
+    return { ok: true, version: Number(result.rows[0].manifest_version) };
+  }
+  // No row returned ⇒ CAS conflict (row exists, version != base). Report current.
+  const cur = await query<{ manifest_version: string | number }>(
+    'SELECT manifest_version FROM collab_manifests WHERE group_id = $1',
+    [groupId],
+  );
+  const currentVersion = cur.rows.length > 0 ? Number(cur.rows[0].manifest_version) : 0;
+  return { ok: false, version: currentVersion };
+}
+
+/** Best-effort audit row for a collab write (human OR AI). Never throws to the caller. */
+export async function insertCollabAuditLog(entry: {
+  principalId: string;
+  principalType: 'connection' | 'user';
+  groupId: string;
+  verb: string;
+  fileId?: string | null;
+  srcIp?: string | null;
+  statusCode?: number | null;
+}): Promise<void> {
+  await query(
+    `INSERT INTO collab_audit_log (principal_id, principal_type, group_id, verb, file_id, src_ip, status_code)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      entry.principalId,
+      entry.principalType,
+      entry.groupId,
+      entry.verb,
+      entry.fileId ?? null,
+      entry.srcIp ?? null,
+      entry.statusCode ?? null,
+    ],
+  );
 }
 
 export default {

@@ -62,6 +62,16 @@ import {
   revokeMcpConnection,
   listMcpConnectionsForUser,
   listRevokedConnectionPubkeys,
+  findMcpConnectionById,
+  authorizeCollabGroupsForConnection,
+  deauthorizeCollabGroupsForConnection,
+  createCollabManifestsTable,
+  createCollabWriteAuthSchema,
+  isCollabGroupWritesRevoked,
+  setCollabWritesRevoked,
+  syncCollabManifest,
+  insertCollabAuditLog,
+  collabGroupsExist,
 } from './database/postgres.js';
 import {
   mintMcpToken,
@@ -73,7 +83,14 @@ import {
   MCP_TOKEN_USE,
 } from './mcpTokens.js';
 import { validateGrantsPayload } from './mcpGrants.js';
-import { newRefreshToken, hashRefreshToken, mintFromConnection } from './mcpConnections.js';
+import { newRefreshToken, hashRefreshToken, mintFromConnection, mintCollabFromConnection } from './mcpConnections.js';
+import {
+  verifyCollabWriteToken,
+  isGroupAuthorizedByToken,
+  normalizeGroupIds,
+  COLLAB_MAX_GROUP_IDS,
+  COLLAB_TOKEN_USE,
+} from './collabTokens.js';
 import { getEnabledChains, processTransfer } from './services/blockScanner.js';
 import {
   buildSignedTranscript,
@@ -119,6 +136,15 @@ declare global {
   namespace Express {
     interface Request {
       apiUser?: { email: string; userId: string };
+      // Set by requireCollabWriteAuth on the collab WRITE routes. Identifies the
+      // authorized principal (a human user OR a bound AI connection) for audit
+      // logging + CAS. `type: 'connection'` ⇒ an AI collab-write token.
+      collabPrincipal?: {
+        type: 'user' | 'connection';
+        userId: string;
+        connectionId?: string;
+        mcpPubB64?: string;
+      };
     }
   }
 }
@@ -250,24 +276,11 @@ export async function initializeDatabase(): Promise<void> {
 
   // Create collab_manifests table for collaboration group manifest sync
   try {
-    await query(`
-      CREATE TABLE IF NOT EXISTS collab_manifests (
-        group_id TEXT PRIMARY KEY,
-        manifest_data TEXT,
-        encrypted_manifest TEXT,
-        updated_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `);
-    // Migration: add encrypted_manifest column and make manifest_data nullable
-    await query(`
-      ALTER TABLE collab_manifests ADD COLUMN IF NOT EXISTS encrypted_manifest TEXT
-    `).catch(ignoreMigrationError);
-    await query(`
-      ALTER TABLE collab_manifests ALTER COLUMN manifest_data DROP NOT NULL
-    `).catch(ignoreMigrationError);
-    await query(`
-      ALTER TABLE collab_manifests ADD COLUMN IF NOT EXISTS creator_id VARCHAR(64)
-    `).catch(ignoreMigrationError);
+    await createCollabManifestsTable();
+    // Collab-write auth (additive): per-group AI-write kill switch + manifest
+    // version (opt-in CAS) columns + the audit table. ALTERs collab_manifests,
+    // so it MUST run after the CREATE/ALTERs above.
+    await createCollabWriteAuthSchema();
     console.log('[webui] collab_manifests table ready');
   } catch (error) {
     console.error('[webui] Failed to create collab_manifests table:', error);
@@ -939,6 +952,156 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         }
       } catch (_) { /* fall through to 401 */ }
     }
+    return res.status(401).json({ error: 'Authentication required. Sign in or provide a valid API key.' });
+  }
+
+  // Derive a short audit verb from the collab WRITE route being hit.
+  function collabVerbFromReq(req: Request): string {
+    const p = req.path;
+    if (p.endsWith('/manifest-sync')) return 'manifest-sync';
+    if (p.endsWith('/manifest')) return 'manifest';
+    if (p.endsWith('/upload')) return 'upload';
+    return req.method.toLowerCase();
+  }
+
+  // Best-effort audit of a collab write, fired on response 'finish' so it
+  // captures the OUTCOME (status). Logs BOTH human and AI principals. Cannot be
+  // forgotten on a new route because it is wired inside requireCollabWriteAuth
+  // (the shared gate for every collab write). Never throws.
+  function attachCollabAudit(req: Request, res: Response) {
+    res.on('finish', () => {
+      const principal = req.collabPrincipal;
+      if (!principal) return;
+      const principalId = principal.type === 'connection' ? principal.connectionId! : principal.userId;
+      const fileId =
+        (typeof req.headers['x-collab-file-id'] === 'string' ? (req.headers['x-collab-file-id'] as string) : undefined) ??
+        (typeof req.params?.fileId === 'string' ? req.params.fileId : undefined);
+      insertCollabAuditLog({
+        principalId,
+        principalType: principal.type,
+        groupId: req.params?.groupId ?? 'unknown',
+        verb: collabVerbFromReq(req),
+        fileId: fileId ?? null,
+        srcIp: req.ip ?? null,
+        statusCode: res.statusCode,
+      }).catch((err) => console.error('[webui] collab audit insert failed (non-fatal):', err));
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Collab WRITE auth — session OR human api-key OR an AI `collab_write` token.
+  //
+  // Replaces requireSessionOrBearer on the THREE collab WRITE routes (upload,
+  // manifest, manifest-sync). It is a SUPERSET: the human paths (a)+(b) are
+  // byte-for-byte the old behaviour; (c) adds the AI `collab_write` token. The
+  // DELETE route deliberately KEEPS requireSessionOrBearer — an AI may NOT
+  // delete (it removes via manifest tombstone).
+  //
+  // SINGLE accepted aud per route: the JWT branch ONLY accepts
+  // aud="pinning-webui-collab" + token_use="collab_write" (verifyCollabWriteToken,
+  // signed with the DOMAIN-SEPARATED collab key). An mcp_s3 gateway token (aud
+  // "fula-s3-gateway", signed with the RAW secret) fails BOTH the signature
+  // (wrong derived key) AND the aud/token_use checks → 401. No "either token is
+  // fine" fallback.
+  //
+  // For a verified collab token, ALL of these must hold (else 403), checked
+  // SYNCHRONOUSLY against the DB on every write (server source of truth, never
+  // the manifest blob):
+  //   1. req.params.groupId ∈ the VERIFIED token's collab.groupIds          (token scope)
+  //   2. the connection row (by collab.cid) exists AND is NOT revoked        (server truth)
+  //   3. row.user_id === token.sub                                          (owner binding)
+  //   4. req.params.groupId ∈ the LIVE row's scope.collab.groupIds          (DB truth — makes
+  //                                                                          de-authorization immediate)
+  //   5. the group's collab_writes_revoked kill switch is NOT set           (server truth)
+  // A DB error on (2) or (5) FAILS CLOSED (503) — never falls through to allow.
+  async function requireCollabWriteAuth(req: Request, res: Response, next: NextFunction) {
+    attachCollabAudit(req, res);
+
+    // (a) Session (webui human).
+    if (req.session.user) {
+      req.collabPrincipal = { type: 'user', userId: req.session.user.userId };
+      return next();
+    }
+
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+
+      // (b) Human api-key (existing path — preserved exactly).
+      try {
+        const userEmail = await verifyApiKey(token);
+        if (userEmail) {
+          const userId = getUserId(userEmail);
+          req.apiUser = { email: userEmail, userId };
+          req.collabPrincipal = { type: 'user', userId };
+          return next();
+        }
+      } catch (_) { /* fall through to collab-write attempt */ }
+
+      // (c) AI collab-write token.
+      let claims;
+      try {
+        claims = verifyCollabWriteToken(token, config.jwtSecret);
+      } catch {
+        return res.status(401).json({ error: 'Authentication required. Sign in or provide a valid API key.' });
+      }
+
+      const groupId = req.params.groupId;
+
+      // 1. groupId ∈ the token's authorized groups (from the VERIFIED token).
+      if (!isGroupAuthorizedByToken(claims, groupId)) {
+        return res.status(403).json({ error: 'collab_write token not authorized for this group' });
+      }
+
+      // 2. Connection not revoked (synchronous server truth, precise by cid).
+      let conn;
+      try {
+        conn = await findMcpConnectionById(claims.collab.cid);
+      } catch (err) {
+        console.error('[webui] collab-write: connection lookup failed, denying:', err);
+        return res.status(503).json({ error: 'Authorization check unavailable' });
+      }
+      if (!conn || conn.revoked) {
+        return res.status(403).json({ error: 'collab_write connection revoked or not found' });
+      }
+
+      // 3. The token's subject must own the connection row.
+      if (conn.user_id !== claims.sub) {
+        return res.status(403).json({ error: 'collab_write connection/token owner mismatch' });
+      }
+
+      // 4. groupId ∈ the LIVE row's authorized groups (DB truth → immediate
+      //    de-auth). EXACT match — the group's identity is its exact id.
+      const liveGroups = Array.isArray(conn.scope?.collab?.groupIds) ? conn.scope.collab!.groupIds : [];
+      if (!liveGroups.includes(groupId)) {
+        return res.status(403).json({ error: 'collab_write authorization for this group was removed' });
+      }
+
+      // 5. Group-level AI-write kill switch (synchronous server truth).
+      let groupRevoked;
+      try {
+        groupRevoked = await isCollabGroupWritesRevoked(groupId);
+      } catch (err) {
+        console.error('[webui] collab-write: group revocation check failed, denying:', err);
+        return res.status(503).json({ error: 'Authorization check unavailable' });
+      }
+      if (groupRevoked) {
+        return res.status(403).json({ error: 'collab writes revoked for this group' });
+      }
+
+      req.collabPrincipal = {
+        type: 'connection',
+        userId: claims.sub,
+        connectionId: conn.id,
+        mcpPubB64: claims.cnf.mcp_pub_b64,
+      };
+      console.log(
+        `[webui] collab-write ALLOW conn=${conn.id.slice(0, 8)}… user=${claims.sub.slice(0, 8)}… ` +
+          `group=${groupId.slice(0, 8)}… verb=${collabVerbFromReq(req)}`,
+      );
+      return next();
+    }
+
     return res.status(401).json({ error: 'Authentication required. Sign in or provide a valid API key.' });
   }
 
@@ -1996,12 +2159,36 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         console.error('[webui] refresh-connection: last_refreshed_at bump failed (non-fatal):', err);
       }
 
-      console.log(
-        `[webui] MCP connection refresh conn=${conn.id.slice(0, 8)}… ` +
-          `user=${conn.user_id.slice(0, 8)}… jti=${claims.jti.slice(0, 8)}… exp=${claims.exp}`,
+      // ADDITIVE: if this connection has authorized collab groups, ALSO re-mint a
+      // short-lived `collab_write` token from the STORED scope (groupIds come
+      // ONLY off the row — never the request). Absent groups ⇒ no collab token
+      // (older clients see exactly the previous response shape). The collab TTL
+      // is the collab token's own short default (<=10 min), independent of the
+      // mcp_s3 TTL.
+      const collab = mintCollabFromConnection(
+        { id: conn.id, user_id: conn.user_id, mcp_pub_b64: conn.mcp_pub_b64, scope: conn.scope },
+        config.jwtSecret,
       );
 
-      res.json({ token, jti: claims.jti, expiresAt: claims.exp });
+      console.log(
+        `[webui] MCP connection refresh conn=${conn.id.slice(0, 8)}… ` +
+          `user=${conn.user_id.slice(0, 8)}… jti=${claims.jti.slice(0, 8)}… exp=${claims.exp}` +
+          (collab ? ` +collab(groups=${collab.claims.collab.groupIds.length})` : ''),
+      );
+
+      res.json({
+        token,
+        jti: claims.jti,
+        expiresAt: claims.exp,
+        ...(collab
+          ? {
+              collabToken: collab.token,
+              collabJti: collab.claims.jti,
+              collabExpiresAt: collab.claims.exp,
+              collabGroupIds: collab.claims.collab.groupIds,
+            }
+          : {}),
+      });
     } catch (error) {
       console.error('[webui] Error refreshing MCP connection:', error);
       res.status(500).json({ error: 'Failed to refresh connection' });
@@ -2061,6 +2248,131 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     } catch (error) {
       console.error('[webui] Error listing revoked MCP connections:', error);
       res.status(500).json({ error: 'Failed to list revoked connections' });
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Collab-write authorization — delegate an AI connection write access to
+  // specific collab groups (the "mint path" a logged-in pairing owner calls).
+  // ────────────────────────────────────────────────────────────────────────
+  //
+  // TRUST MODEL: collab groups are LINK-AUTHORIZED — the groupId UUID is itself
+  // the bearer capability (the existing human write routes use only
+  // session/api-key + knowledge of the groupId; there is no creator/membership
+  // gate). So a user who can NAME a group can already write to it (as the group
+  // creator's S3 identity). Authorizing their bound AI connection for that group
+  // delegates STRICTLY LESS than they already hold: scoped to named groups,
+  // short-TTL, revocable (connection OR group), audited, and NO delete. We
+  // therefore gate on (1) the caller OWNING the connection row and (2) every
+  // groupId EXISTING (you can't authorize a group you can't name) — NOT on being
+  // the creator, which would wrongly lock out non-creator collaborators.
+  app.post('/api/mcp/connections/:id/collab-groups', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      const userId = mcpResolveUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      const id = req.params.id;
+      if (typeof id !== 'string' || id.length === 0) {
+        return res.status(400).json({ error: 'Provide a connection id' });
+      }
+
+      // Validate + canonicalize groupIds (UUIDs, lowercased, deduped, capped).
+      let groupIds: string[];
+      try {
+        groupIds = normalizeGroupIds(req.body?.groupIds);
+      } catch (e) {
+        return res.status(400).json({ error: (e as Error).message });
+      }
+      if (groupIds.length === 0) {
+        return res.status(400).json({ error: 'Provide at least one groupId' });
+      }
+
+      // Every requested group must EXIST (link-capability check) — reject the
+      // WHOLE request if any is unknown (no partial authorization).
+      const existing = await collabGroupsExist(groupIds);
+      const missing = groupIds.filter((g) => !existing.has(g));
+      if (missing.length > 0) {
+        return res.status(404).json({ error: 'Unknown collab group(s)', missing });
+      }
+
+      // Merge into the connection's STORED scope. User-scoped + not-revoked
+      // (returns null otherwise → 404). The cumulative stored set is capped.
+      const row = await authorizeCollabGroupsForConnection(userId, id, groupIds);
+      if (!row) {
+        return res.status(404).json({ error: 'Connection not found, not yours, or revoked' });
+      }
+      const storedGroups = row.scope?.collab?.groupIds ?? [];
+      if (storedGroups.length > COLLAB_MAX_GROUP_IDS) {
+        return res.status(409).json({ error: `Too many authorized groups (max ${COLLAB_MAX_GROUP_IDS})` });
+      }
+
+      // Mint a fresh collab-write token from the UPDATED row (so it matches what
+      // is stored). Re-mintable later via the connection refresh-token flow.
+      const collab = mintCollabFromConnection(
+        { id: row.id, user_id: row.user_id, mcp_pub_b64: row.mcp_pub_b64, scope: row.scope },
+        config.jwtSecret,
+      );
+      if (!collab) {
+        // Should not happen (we just merged a non-empty set), but fail closed.
+        return res.status(500).json({ error: 'Failed to mint collab token' });
+      }
+
+      console.log(
+        `[webui] collab authorize by ${userId.slice(0, 8)}… conn=${id.slice(0, 8)}… ` +
+          `groups=${storedGroups.length}`,
+      );
+
+      res.json({
+        connectionId: row.id,
+        groupIds: storedGroups,
+        collabToken: collab.token,
+        jti: collab.claims.jti,
+        expiresAt: collab.claims.exp,
+        tokenType: COLLAB_TOKEN_USE,
+      });
+    } catch (error) {
+      console.error('[webui] Error authorizing collab groups:', error);
+      res.status(500).json({ error: 'Failed to authorize collab groups' });
+    }
+  });
+
+  // De-authorize (remove) specific collab groups from a connection. User-scoped.
+  // Combined with the synchronous DB-truth check on the write path, removal is
+  // effective IMMEDIATELY (not after the token's short TTL).
+  app.delete('/api/mcp/connections/:id/collab-groups', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      const userId = mcpResolveUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      const id = req.params.id;
+      if (typeof id !== 'string' || id.length === 0) {
+        return res.status(400).json({ error: 'Provide a connection id' });
+      }
+      let groupIds: string[];
+      try {
+        groupIds = normalizeGroupIds(req.body?.groupIds);
+      } catch (e) {
+        return res.status(400).json({ error: (e as Error).message });
+      }
+      if (groupIds.length === 0) {
+        return res.status(400).json({ error: 'Provide at least one groupId' });
+      }
+
+      const row = await deauthorizeCollabGroupsForConnection(userId, id, groupIds);
+      if (!row) {
+        return res.status(404).json({ error: 'Connection not found or not yours' });
+      }
+      const storedGroups = row.scope?.collab?.groupIds ?? [];
+      console.log(
+        `[webui] collab de-authorize by ${userId.slice(0, 8)}… conn=${id.slice(0, 8)}… ` +
+          `remaining=${storedGroups.length}`,
+      );
+      res.json({ connectionId: row.id, groupIds: storedGroups });
+    } catch (error) {
+      console.error('[webui] Error de-authorizing collab groups:', error);
+      res.status(500).json({ error: 'Failed to de-authorize collab groups' });
     }
   });
 
@@ -2970,9 +3282,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     return undefined;
   }
 
-  // Upload encrypted file for collaboration (public - link-authorized)
+  // Upload encrypted file for collaboration (public - link-authorized).
+  // Auth: session OR human api-key OR an AI `collab_write` token (see
+  // requireCollabWriteAuth). The audit row is written by that middleware.
   app.post('/api/collab/:groupId/upload',
-    requireSessionOrBearer,
+    requireCollabWriteAuth,
     collabUploadLimiter,
     express.raw({ type: 'application/octet-stream', limit: '100mb' }),
     async (req: Request, res: Response) => {
@@ -3181,9 +3495,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   });
 
-  // Update collaboration manifest (public - link-authorized)
+  // Update collaboration manifest (public - link-authorized). Auth: session OR
+  // human api-key OR an AI `collab_write` token (requireCollabWriteAuth).
   app.put('/api/collab/:groupId/manifest',
-    requireSessionOrBearer,
+    requireCollabWriteAuth,
     collabManifestLimiter,
     express.raw({ type: 'application/octet-stream', limit: '1mb' }),
     async (req: Request, res: Response) => {
@@ -3241,8 +3556,30 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     }
   );
 
-  // Sync collaboration manifest JSON to DB (called by Flutter after manifest updates)
-  app.put('/api/collab/:groupId/manifest-sync', requireSessionOrBearer, collabManifestLimiter, async (req: Request, res: Response) => {
+  // Parse the OPTIONAL CAS precondition for manifest-sync: an `If-Match` header
+  // (HTTP-canonical, takes precedence) OR a body `baseVersion`. Returns the base
+  // version to guard against, or null for NO CAS (legacy behaviour). A present
+  // but non-integer precondition is a client error. `If-Match: *` is unsupported
+  // here (we use numeric versions, not entity-tags-as-existence).
+  function parseCollabBaseVersion(req: Request): { ok: true; base: number | null } | { ok: false } {
+    const ifMatch = req.headers['if-match'];
+    if (typeof ifMatch === 'string' && ifMatch.trim().length > 0) {
+      const cleaned = ifMatch.trim().replace(/^W\//i, '').replace(/^"(.*)"$/, '$1').trim();
+      const n = Number(cleaned);
+      if (!Number.isInteger(n) || n < 0) return { ok: false };
+      return { ok: true, base: n };
+    }
+    const bodyBase = (req.body as { baseVersion?: unknown } | undefined)?.baseVersion;
+    if (bodyBase !== undefined && bodyBase !== null) {
+      if (typeof bodyBase !== 'number' || !Number.isInteger(bodyBase) || bodyBase < 0) return { ok: false };
+      return { ok: true, base: bodyBase };
+    }
+    return { ok: true, base: null };
+  }
+
+  // Sync collaboration manifest JSON to DB (called by Flutter after manifest
+  // updates). Auth: session OR human api-key OR an AI `collab_write` token.
+  app.put('/api/collab/:groupId/manifest-sync', requireCollabWriteAuth, collabManifestLimiter, async (req: Request, res: Response) => {
     try {
       const { groupId } = req.params;
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -3250,56 +3587,52 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Invalid group ID format' });
       }
 
-      // Extract creator identity from Bearer token or session
-      let creatorId: string | null = null;
-      const authHeader = req.headers.authorization;
-      if (authHeader?.startsWith('Bearer ')) {
-        try {
-          creatorId = await verifyApiKey(authHeader.substring(7));
-        } catch {}
-      }
-      if (!creatorId && req.session.user?.userId) {
-        creatorId = req.session.user.userId;
-      }
+      // Creator identity: a HUMAN principal becomes/keeps the creator (the
+      // collab S3 namespace owner). An AI `collab_write` principal NEVER sets
+      // creator_id — COALESCE in the upsert preserves the existing creator (the
+      // AI writes under the human creator's S3 key, see getCollabS3Jwt).
+      const creatorId = req.collabPrincipal?.type === 'user' ? req.collabPrincipal.userId : null;
 
-      const { data, encryptedManifest } = req.body;
-
-      if (encryptedManifest) {
-        // Encrypted path: store opaque blob, clear plaintext
-        // Keep original creator_id once set — all collab files are stored under creator's S3 namespace
-        await query(
-          `INSERT INTO collab_manifests (group_id, manifest_data, encrypted_manifest, creator_id, updated_at)
-           VALUES ($1, NULL, $2, $3, NOW())
-           ON CONFLICT (group_id) DO UPDATE SET
-             encrypted_manifest = EXCLUDED.encrypted_manifest, manifest_data = NULL,
-             creator_id = COALESCE(collab_manifests.creator_id, EXCLUDED.creator_id),
-             updated_at = NOW()`,
-          [groupId, encryptedManifest, creatorId]
-        );
-      } else if (data && typeof data === 'string') {
-        // Legacy plaintext path
-        await query(
-          `INSERT INTO collab_manifests (group_id, manifest_data, creator_id, updated_at)
-           VALUES ($1, $2, $3, NOW())
-           ON CONFLICT (group_id) DO UPDATE SET
-             manifest_data = EXCLUDED.manifest_data,
-             creator_id = COALESCE(collab_manifests.creator_id, EXCLUDED.creator_id),
-             updated_at = NOW()`,
-          [groupId, data, creatorId]
-        );
-      } else {
+      const body = (req.body ?? {}) as { data?: unknown; encryptedManifest?: unknown };
+      const hasEncrypted = typeof body.encryptedManifest === 'string' && body.encryptedManifest.length > 0;
+      const hasData = typeof body.data === 'string' && body.data.length > 0;
+      if (!hasEncrypted && !hasData) {
         return res.status(400).json({ error: 'Missing manifest data' });
       }
 
-      console.log('[webui] Collab manifest synced for group:', groupId);
-      res.json({ ok: true });
+      // OPT-IN conditional write. Absent ⇒ identical to legacy (always writes,
+      // now also bumping manifest_version). Present ⇒ 409 if the stored version
+      // moved since the client's base.
+      const parsed = parseCollabBaseVersion(req);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: 'Invalid If-Match / baseVersion (expected a non-negative integer)' });
+      }
+
+      const result = await syncCollabManifest(groupId, {
+        encryptedManifest: hasEncrypted ? (body.encryptedManifest as string) : null,
+        data: hasData ? (body.data as string) : null,
+        creatorId,
+        baseVersion: parsed.base,
+      });
+
+      if (!result.ok) {
+        // CAS conflict — the stored version moved. The client should re-read
+        // (GET manifest-sync), re-merge, and retry with the new baseVersion.
+        res.setHeader('ETag', `"${result.version}"`);
+        return res.status(409).json({ error: 'Manifest version conflict', currentVersion: result.version });
+      }
+
+      console.log('[webui] Collab manifest synced for group:', groupId, `v${result.version}`);
+      res.setHeader('ETag', `"${result.version}"`);
+      res.json({ ok: true, version: result.version });
     } catch (error) {
       console.error('[webui] Error syncing collab manifest:', error);
       res.status(500).json({ error: 'Failed to sync manifest' });
     }
   });
 
-  // Fetch collaboration manifest JSON from DB (called by portal)
+  // Fetch collaboration manifest JSON from DB (called by portal). Also returns
+  // the current `version` (+ ETag) so a client can drive opt-in CAS.
   app.get('/api/collab/:groupId/manifest-sync', collabManifestLimiter, async (req: Request, res: Response) => {
     try {
       const { groupId } = req.params;
@@ -3308,20 +3641,65 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(400).json({ error: 'Invalid group ID format' });
       }
 
-      const result = await query('SELECT manifest_data, encrypted_manifest FROM collab_manifests WHERE group_id = $1', [groupId]);
+      const result = await query<{ manifest_data: string | null; encrypted_manifest: string | null; manifest_version: string | number | null }>(
+        'SELECT manifest_data, encrypted_manifest, manifest_version FROM collab_manifests WHERE group_id = $1',
+        [groupId],
+      );
       if (result.rows.length === 0) {
         return res.status(404).json({ error: 'Not found' });
       }
 
       const row = result.rows[0];
+      const version = Number(row.manifest_version ?? 0);
+      res.setHeader('ETag', `"${version}"`);
       if (row.encrypted_manifest) {
-        res.json({ encryptedManifest: row.encrypted_manifest });
+        res.json({ encryptedManifest: row.encrypted_manifest, version });
       } else {
-        res.json({ data: row.manifest_data });
+        res.json({ data: row.manifest_data, version });
       }
     } catch (error) {
       console.error('[webui] Error fetching collab manifest:', error);
       res.status(500).json({ error: 'Failed to fetch manifest' });
+    }
+  });
+
+  // Per-group AI-write KILL SWITCH (the "group is revoked" server source of
+  // truth checked synchronously on every collab write — collab_manifests flag,
+  // NOT the manifest blob). CREATOR-GATED: only the group's creator_id may flip
+  // it (the collab files live in the creator's S3 namespace, so the creator is
+  // the authority for whether AI agents may write at all). This deliberately
+  // lives OUTSIDE the `/collab/` CSRF-exempt path so a session caller still gets
+  // the Origin check on this state change (Bearer callers are CSRF-immune).
+  app.post('/api/collab-groups/:groupId/ai-writes', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      const { groupId } = req.params;
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(groupId)) {
+        return res.status(400).json({ error: 'Invalid group ID format' });
+      }
+      const callerId = mcpResolveUserId(req);
+      if (!callerId) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      const revoked = req.body?.revoked;
+      if (typeof revoked !== 'boolean') {
+        return res.status(400).json({ error: 'Provide { revoked: boolean }' });
+      }
+
+      const result = await setCollabWritesRevoked(groupId, callerId, revoked);
+      if (result === 'not_found') {
+        return res.status(404).json({ error: 'Group not found' });
+      }
+      if (result === 'forbidden') {
+        return res.status(403).json({ error: 'Only the group creator can change AI-write access' });
+      }
+      console.log(
+        `[webui] collab ai-writes ${revoked ? 'REVOKED' : 'restored'} group=${groupId.slice(0, 8)}… by ${callerId.slice(0, 8)}…`,
+      );
+      res.json({ groupId, collabWritesRevoked: revoked });
+    } catch (error) {
+      console.error('[webui] Error toggling collab ai-writes:', error);
+      res.status(500).json({ error: 'Failed to toggle collab ai-writes' });
     }
   });
 

@@ -5,9 +5,9 @@
  *
  * This module owns ONLY the HTTP framing + JSON envelopes; every byte of crypto
  * is delegated to ./crypto.ts (the `ENC1:` manifest envelope + collab-file
- * blobs). The HPKE owner-file decryption (for `encType:"fula"`) is NOT wired here
- * — see ./tools.ts and the PR notes (it needs a fula-client WASM binding that the
- * pinned build does not yet expose).
+ * blobs). Owner-file (`encType:"fula"`) decryption is wired in ./tools.ts (it
+ * accepts the per-file v5 ShareToken with the 0.6.19 recipient bindings); this
+ * module only FETCHES the ciphertext (see `fulaFetch`).
  *
  * ## Endpoints
  *

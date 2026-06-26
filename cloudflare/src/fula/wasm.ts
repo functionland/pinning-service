@@ -51,17 +51,23 @@ import {
   testHpkeDecryptDek as _testHpkeDecryptDek,
   testAesGcmEncrypt as _testAesGcmEncrypt,
   testAesGcmDecrypt as _testAesGcmDecrypt,
+  wrapSecretForRecipient as _wrapSecretForRecipient,
+  unwrapSecretForRecipient as _unwrapSecretForRecipient,
+  describeSharedFile as _describeSharedFile,
+  decryptSharedFileSingleBlock as _decryptSharedFileSingleBlock,
+  decryptSharedFileChunked as _decryptSharedFileChunked,
   type EncryptedClient,
 } from "@functionland/fula-client";
 
 /**
  * The wasm CRATE version reported by `getVersion()`, asserted against the running
- * WASM in tests. The npm dependency is `@functionland/fula-client@^0.6.17` (the
+ * WASM in tests. The npm dependency is `@functionland/fula-client@^0.6.19` (the
  * build carrying `putFlat`/`getFlat`/`listFilesFromForest` + the collab-rework
- * crypto), and the crate now reports 0.6.17 in lockstep with the fula-api
+ * crypto + the Method-2 recipient bindings `unwrapSecretForRecipient` /
+ * `describeSharedFile` / `decryptSharedFile*`), in lockstep with the fula-api
  * workspace. Bump this in step with the package.json dependency.
  */
-export const PINNED_FULA_CLIENT_VERSION = "0.6.17";
+export const PINNED_FULA_CLIENT_VERSION = "0.6.19";
 
 let initialized = false;
 
@@ -215,6 +221,69 @@ export function blake3DeriveKey(context: string, input: Uint8Array): Uint8Array 
 export function derivePublicKeyFromSecret(secret: Uint8Array): Uint8Array {
   ensureWasmReady();
   return _derivePublicKeyFromSecret(secret);
+}
+
+// ── Method-2 RECIPIENT bindings (0.6.19) — the Worker's collab-share consumer ──
+
+/** The non-secret framing of an owner (`encType:"fula"`) share. */
+export interface SharedFileFraming {
+  chunked: boolean;
+  numChunks: number;
+  encryptionVersion: number | null;
+}
+
+/**
+ * Recover the exact 32-byte secret a producer wrapped for this recipient's X25519
+ * public key (the consumer half of FxFiles' `wrapSecretForRecipient`). For a collab
+ * pairing the recovered bytes ARE the group link secret. Fail-closed on a bad key
+ * length / pre-v5 / expired / tampered / non-addressed token.
+ */
+export function unwrapSecretForRecipient(recipientSecretKey: Uint8Array, tokenJson: string): Uint8Array {
+  ensureWasmReady();
+  return _unwrapSecretForRecipient(recipientSecretKey, tokenJson);
+}
+
+/**
+ * Producer half — HPKE-wrap a 32-byte secret to a recipient's X25519 public key as a
+ * v5 ShareToken (the format FxFiles ships). The Worker is a consumer in production;
+ * this is exposed for parity tests of the recipient bindings.
+ */
+export function wrapSecretForRecipient(
+  secret: Uint8Array,
+  recipientPublicKey: Uint8Array,
+  pathScope?: string,
+  expiresInSeconds?: bigint,
+): string {
+  ensureWasmReady();
+  return _wrapSecretForRecipient(secret, recipientPublicKey, pathScope ?? null, expiresInSeconds ?? null);
+}
+
+/** An owner share's non-secret framing (chunked? how many chunks?) — exposes NO key material. */
+export function describeSharedFile(recipientSecretKey: Uint8Array, tokenJson: string): SharedFileFraming {
+  ensureWasmReady();
+  return _describeSharedFile(recipientSecretKey, tokenJson) as SharedFileFraming;
+}
+
+/** Decrypt a SINGLE-BLOCK owner (`encType:"fula"`) file whose whole ciphertext the caller fetched. */
+export function decryptSharedFileSingleBlock(
+  recipientSecretKey: Uint8Array,
+  tokenJson: string,
+  storageKey: string,
+  ciphertext: Uint8Array,
+): Uint8Array {
+  ensureWasmReady();
+  return _decryptSharedFileSingleBlock(recipientSecretKey, tokenJson, storageKey, ciphertext);
+}
+
+/** Decrypt a CHUNKED owner file from its ordered per-chunk ciphertexts (`chunks[i]` is chunk index `i`). */
+export function decryptSharedFileChunked(
+  recipientSecretKey: Uint8Array,
+  tokenJson: string,
+  storageKey: string,
+  chunks: Uint8Array[],
+): Uint8Array {
+  ensureWasmReady();
+  return _decryptSharedFileChunked(recipientSecretKey, tokenJson, storageKey, chunks);
 }
 
 export function getVersion(): string {

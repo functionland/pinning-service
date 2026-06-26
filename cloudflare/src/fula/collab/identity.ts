@@ -13,33 +13,26 @@
  * to. The Worker exposes it (and the raw base64 pubkey) via the connect flow so
  * FxFiles can wrap the group link secret to it.
  *
- * ## ⚠️ HPKE link-secret unwrap — the FLAGGED dependency (read the PR notes)
+ * ## HPKE link-secret unwrap (Method-2) — wired to the 0.6.19 recipient binding
  *
  * The Rust local MCP recovers the link secret via
  * `fula_crypto::sharing::ShareRecipient::accept_share(token)`, where the wrapped
  * secret is a strict **v5 `ShareToken`** (it binds every token field + the
- * recipient public key into the DEK-wrap AAD). The pinned Worker WASM
- * (`@functionland/fula-client@0.6.17`) does NOT expose a function that returns the
- * recovered DEK from such a token: `acceptShare()` yields an OPAQUE `AcceptedShare`
- * handle (no `.dek`), and `testHpkeDecryptDek()` cannot reproduce the v5 AAD.
+ * recipient public key into the DEK-wrap AAD). `@functionland/fula-client@0.6.19`
+ * now exposes the consumer binding `unwrapSecretForRecipient(secretKeyBytes,
+ * tokenJson) -> Uint8Array` (the sibling of FxFiles' `wrapSecretForRecipient`), so
+ * {@link recoverLinkSecret} unwraps the production v5 ShareToken directly.
  *
- * So {@link recoverLinkSecret} supports the two shapes explicitly:
+ * {@link recoverLinkSecret} handles two shapes:
+ *  - a **v5 ShareToken** (`{ wrapped_key, version >= 5, … }`, the Rust/local-MCP +
+ *    FxFiles contract) → the PRODUCTION path, via `unwrapSecretForRecipient`.
  *  - a **bare HPKE envelope** (`{ encapsulated_key, ciphertext }`, the
- *    `testHpkeEncryptDek` format) → unwrapped with {@link testHpkeDecryptDek}.
- *    This is the only shape the pinned WASM can unwrap today; if the hosted
- *    producer is defined as this (see PR notes), the Worker is fully functional.
- *  - a **v5 ShareToken** (`{ wrapped_key, version >= 5, … }`, the Rust/local-MCP
- *    contract) → a clear, actionable error: it needs a fula-client binding
- *    (e.g. `acceptShareDek(secretKeyBytes, tokenJson) -> Uint8Array`) that the
- *    pinned build lacks. This is the single named upstream dependency.
- *
- * NOTE: as of this PR there is NO producer that wraps a collab link secret to an
- * MCP pubkey on EITHER end (FxFiles still ships the old workspace model), so this
- * seam cannot be exercised end-to-end; it is unit-tested against the bare-envelope
- * shape and the v5 detection.
+ *    `testHpkeEncryptDek` format) → a GATED TEST affordance (`allowBareEnvelope`),
+ *    unwrapped with {@link testHpkeDecryptDek}. It lacks v5's recipient/group/
+ *    expiry AAD binding and is DISABLED on the live path.
  */
 
-import { derivePublicKeyFromSecret, testHpkeDecryptDek } from "../wasm.js";
+import { derivePublicKeyFromSecret, testHpkeDecryptDek, unwrapSecretForRecipient } from "../wasm.js";
 
 /** The mandatory prefix on a FULA share identity string. */
 const FULA_PREFIX = "FULA-";
@@ -98,10 +91,10 @@ export function publicKeyB64(publicKey: Uint8Array): string {
  * upstream fula-client binding). The recovered bytes are exactly the 32-byte link
  * secret used to derive the manifest key + every collab-file key.
  *
- * @throws {IdentityError} `unsupportedShareToken` for a v5 ShareToken (the binding
- *   is not in the pinned WASM) or for a bare envelope when `allowBareEnvelope` is
- *   not set (production is fail-closed v5-only); `share` if the bare-envelope HPKE
- *   decrypt fails (wrong recipient key / tampering).
+ * @throws {IdentityError} `share` if the v5 ShareToken unwrap fails (wrong recipient
+ *   key, expired, or tampered) or the bare-envelope HPKE decrypt fails;
+ *   `unsupportedShareToken` for a bare envelope when `allowBareEnvelope` is not set
+ *   (production is fail-closed v5-only); `key` if the secret is not 32 bytes.
  */
 export function recoverLinkSecret(
   workerSecret: Uint8Array,
@@ -119,15 +112,26 @@ export function recoverLinkSecret(
   }
 
   // A v5 ShareToken (the Rust / local-MCP contract) carries `wrapped_key` and a
-  // numeric `version`. The pinned WASM cannot reproduce its recipient-bound AAD,
-  // so surface the precise upstream dependency instead of silently failing.
+  // numeric `version`. Recover the wrapped link secret with the 0.6.19 recipient
+  // binding (`unwrapSecretForRecipient` — the consumer half of FxFiles'
+  // `wrapSecretForRecipient`). `accept_share` enforces strict-v5, the expiry, and
+  // the recipient-pubkey AAD binding, so a wrong key / expired / tampered token all
+  // fail closed. This is the production path (the bare-envelope branch below is a
+  // gated TEST affordance only).
   if ("wrapped_key" in parsed) {
-    throw new IdentityError(
-      "unsupportedShareToken",
-      "wrapped_link_secret is a v5 ShareToken; recovering its DEK needs a fula-client " +
-        "binding (e.g. acceptShareDek(secretKeyBytes, tokenJson)) that @functionland/fula-client@0.6.17 " +
-        "does not expose. See the PR notes (HPKE-unwrap dependency).",
-    );
+    try {
+      const secret = unwrapSecretForRecipient(workerSecret, wrappedLinkSecret);
+      if (secret.length !== 32) {
+        throw new IdentityError("share", `recovered link secret has unexpected length ${secret.length}`);
+      }
+      return secret;
+    } catch (e) {
+      if (e instanceof IdentityError) throw e;
+      throw new IdentityError(
+        "share",
+        `v5 ShareToken unwrap failed (wrong recipient key, expired, or tampered): ${e instanceof Error ? e.message : "?"}`,
+      );
+    }
   }
 
   // A bare HPKE envelope (`testHpkeEncryptDek` format): the only shape the pinned

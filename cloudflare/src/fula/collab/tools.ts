@@ -38,6 +38,7 @@ import {
   CollabError,
   fetchCollabFile,
   fetchManifest,
+  fulaFetch,
   putManifest,
   uploadCollabFile,
 } from "./client.js";
@@ -58,6 +59,11 @@ import {
   normalizeFolder,
   pathUnderFolder,
 } from "./tree.js";
+import {
+  decryptSharedFileChunked,
+  decryptSharedFileSingleBlock,
+  describeSharedFile,
+} from "../wasm.js";
 
 /** A tool result the MCP layer understands (structurally a `CallToolResult`). */
 export interface ToolResult {
@@ -73,6 +79,15 @@ function ok(payload: Record<string, unknown>): ToolResult {
 function err(message: string): ToolResult {
   return { isError: true, content: [{ type: "text", text: message }] };
 }
+
+/** Bounds the owner-file chunk FETCH LOOP — well under the Cloudflare subrequest
+ *  limit (~1000/req). The total-bytes cap below binds first for real files. */
+const MAX_OWNER_FILE_CHUNKS = 512;
+
+/** Bounds isolate memory for a hosted owner-file read: the chunk array + the decrypted
+ *  plaintext + its base64 all coexist in the ~128 MiB isolate, so cap the total
+ *  ciphertext fetched. Larger owner files are read on the LOCAL (native) MCP, which streams. */
+const MAX_OWNER_FILE_TOTAL_BYTES = 32 * 1024 * 1024;
 
 /**
  * The per-connection collaboration session a tool runs against. Built from the
@@ -365,10 +380,10 @@ function resolveEntry(manifest: CollaborationGroup, args: ReadArgs): Collaborati
 }
 
 /**
- * Read + decrypt a file in the group, addressed by id or path. Collab-encrypted
- * files are fully supported. Owner `fula`-encrypted files are NOT yet readable via
- * the hosted Worker — see the PR notes (the same fula-client binding gap as the
- * link-secret unwrap).
+ * Read + decrypt a file in the group, addressed by id or path. Both encodings are
+ * supported: `collab` files the AI stored (decrypt with the link-derived file key),
+ * and owner `fula` files the human shared in (accept the per-file v5 ShareToken with
+ * the link keypair, fetch via `/fula-fetch`, decrypt with the 0.6.19 recipient bindings).
  */
 export async function readFile(session: CollabSession, args: ReadArgs): Promise<ToolResult> {
   try {
@@ -395,16 +410,74 @@ export async function readFile(session: CollabSession, args: ReadArgs): Promise<
     }
 
     if (file.encType === "fula") {
-      // Owner fula-encrypted file: needs the fula-client share-decryption path
-      // (accept_share → AcceptedShare.dek/nonce + the fula:v4 AAD), which the
-      // pinned WASM only exposes as an OPAQUE handle (no DEK access), and whose
-      // `getWithToken` endpoint shape does not match `/fula-fetch?bucket=&key=`.
-      // Deferred — the SAME upstream binding gap as the link-secret unwrap.
-      return err(
-        "This file was added by the FxFiles owner (fula-encrypted). Reading owner files via the " +
-          "hosted MCP is not yet available (needs a fula-client share-DEK binding — see the PR notes). " +
-          "Collab files the AI stored ARE readable.",
-      );
+      // Owner fula-encrypted file shared into the group via a per-file v5 ShareToken
+      // addressed to the GROUP LINK KEYPAIR — whose X25519 secret IS the 32-byte link
+      // secret (native: `SecretKey::from_bytes(link_secret)` → `link_keypair`). Mirror
+      // the native `read_fula`: describe the share's framing, fetch the ciphertext via
+      // `/fula-fetch` (whole file, or one object per chunk at `{key}.chunks/{i:08}`),
+      // then decrypt with the 0.6.19 recipient bindings.
+      const tokenJson = file.shareTokenJson;
+      if (!tokenJson) return err("owner (fula) file has no share token in the manifest");
+      const framing = describeSharedFile(session.linkSecret, tokenJson);
+      // `describeSharedFile` is typed `any` (tsc cannot check it) — validate the shape
+      // the routing depends on and fail closed on anything unexpected, so a mis-shaped
+      // return can never silently route a chunked file down the single-block path.
+      if (typeof framing.chunked !== "boolean") {
+        return err("owner file framing is malformed (chunked is not a boolean)");
+      }
+      let plaintext: Uint8Array;
+      if (framing.chunked) {
+        // num_chunks comes from the (authenticated) token; bound the fetch loop AND the
+        // total bytes so a pathological value cannot exhaust the isolate's memory /
+        // subrequest budget. `Number.isInteger` also rejects undefined/NaN fail-closed.
+        if (
+          !Number.isInteger(framing.numChunks) ||
+          framing.numChunks < 1 ||
+          framing.numChunks > MAX_OWNER_FILE_CHUNKS
+        ) {
+          return err(`owner file declares an out-of-range chunk count (${framing.numChunks})`);
+        }
+        const chunks: Uint8Array[] = [];
+        let totalBytes = 0;
+        for (let i = 0; i < framing.numChunks; i++) {
+          const chunkKey = `${file.storageKey}.chunks/${String(i).padStart(8, "0")}`;
+          const chunk = await fulaFetch(
+            session.fetchImpl,
+            session.webuiBase,
+            session.groupId,
+            file.bucket,
+            chunkKey,
+          );
+          totalBytes += chunk.byteLength;
+          if (totalBytes > MAX_OWNER_FILE_TOTAL_BYTES) {
+            return err(
+              `owner file exceeds the hosted-read size limit (${MAX_OWNER_FILE_TOTAL_BYTES} bytes); read it on a local MCP`,
+            );
+          }
+          chunks.push(chunk);
+        }
+        plaintext = decryptSharedFileChunked(session.linkSecret, tokenJson, file.storageKey, chunks);
+      } else {
+        const ct = await fulaFetch(
+          session.fetchImpl,
+          session.webuiBase,
+          session.groupId,
+          file.bucket,
+          file.storageKey,
+        );
+        plaintext = decryptSharedFileSingleBlock(session.linkSecret, tokenJson, file.storageKey, ct);
+      }
+      return ok({
+        file_id: file.id,
+        file_name: file.fileName,
+        path: logicalPathOf(file),
+        content_type: file.contentType,
+        enc_type: "fula",
+        size: plaintext.length,
+        encoding: "base64",
+        content: base64Of(plaintext),
+        group_id: session.groupId,
+      });
     }
     return err(`unknown encType \`${file.encType}\``);
   } catch (e) {

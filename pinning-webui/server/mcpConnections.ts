@@ -25,6 +25,7 @@
  */
 import crypto from 'crypto';
 import { mintMcpToken, type McpPerm, type MintMcpTokenResult } from './mcpTokens.js';
+import { mintCollabWriteToken, type MintCollabTokenResult } from './collabTokens.js';
 
 /** Raw entropy (bytes) of a connection refresh token. 256 bits → infeasible to brute-force. */
 export const MCP_REFRESH_TOKEN_BYTES = 32;
@@ -90,5 +91,43 @@ export function mintFromConnection(
     mcpPubB64: conn.mcp_pub_b64, // re-apply the connection binding (cnf)
     ...(jti !== undefined ? { jti } : {}),
     ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
+  });
+}
+
+/** The minimal connection shape the collab re-mint needs (subset of the DB row, incl. id). */
+export interface StoredCollabConnection {
+  id: string;
+  user_id: string;
+  mcp_pub_b64: string;
+  scope: { collab?: { groupIds?: string[] } };
+}
+
+/**
+ * Re-mint a fresh short-lived COLLAB-WRITE token for a connection, pinned to its
+ * STORED collab authorization (`scope.collab.groupIds`). Mirrors
+ * `mintFromConnection`'s invariant: reads groupIds ONLY off the row (never a
+ * request body), re-applies the connection binding (cnf = the row's pubkey), and
+ * stamps `cid = conn.id` for the synchronous revoked check on the write path.
+ *
+ * Returns `null` when the connection has NO collab authorization (no groupIds) —
+ * the caller then simply omits a collab token from the response. FAIL CLOSED:
+ * a malformed/absent groupIds array yields null, never a wide token. The TTL
+ * defaults to the collab token's own SHORT default (<=10 min), independent of
+ * the mcp_s3 token TTL.
+ */
+export function mintCollabFromConnection(
+  conn: StoredCollabConnection,
+  jwtSecret: string,
+  ttlSeconds?: number,
+  jti?: string,
+): MintCollabTokenResult | null {
+  const groupIds = Array.isArray(conn.scope?.collab?.groupIds) ? conn.scope.collab!.groupIds! : [];
+  if (groupIds.length === 0) return null;
+  return mintCollabWriteToken(conn.user_id, jwtSecret, {
+    connectionId: conn.id,
+    groupIds,
+    mcpPubB64: conn.mcp_pub_b64,
+    ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
+    ...(jti !== undefined ? { jti } : {}),
   });
 }

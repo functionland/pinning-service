@@ -52,6 +52,9 @@ class FakeCollabServer {
   putCount = 0;
   /** When set, the first N manifest PUTs reply 409 (to drive the CAS retry). */
   conflictsToInject = 0;
+  /** The token the refresh endpoint hands back (drives the auth-retry path). */
+  refreshedToken = "collab-write-tok";
+  refreshCount = 0;
 
   async seed(group: CollaborationGroup): Promise<void> {
     this.manifestEnc1 = await enc1Encrypt(new TextEncoder().encode(serializeManifest(group)), LINK_SECRET, GROUP_ID);
@@ -109,6 +112,12 @@ class FakeCollabServer {
       if (!blob) return new Response("not found", { status: 404 });
       return new Response(blob, { status: 200, headers: { "content-type": "application/octet-stream" } });
     }
+    // The connection refresh endpoint: returns the collab-write token under
+    // `collabToken` (NOT `token`, which is the gateway JWT — see refresh.ts).
+    if (path.endsWith("/refresh-connection") && method === "POST") {
+      this.refreshCount += 1;
+      return json({ token: "gateway-jwt-ignored", collabToken: this.refreshedToken });
+    }
     return new Response("not found", { status: 404 });
   };
 }
@@ -130,7 +139,10 @@ async function bodyBytes(init?: RequestInit): Promise<Uint8Array> {
   return new Uint8Array(0);
 }
 
-function makeSession(server: FakeCollabServer, opts: { writeToken?: string | undefined } = {}): CollabSession {
+function makeSession(
+  server: FakeCollabServer,
+  opts: { writeToken?: string | undefined; refreshUrl?: string; refreshToken?: string } = {},
+): CollabSession {
   let token: string | undefined = "writeToken" in opts ? opts.writeToken : "collab-write-tok";
   return {
     fetchImpl: server.fetch,
@@ -143,8 +155,8 @@ function makeSession(server: FakeCollabServer, opts: { writeToken?: string | und
     setCollabWriteToken: (t: string) => {
       token = t;
     },
-    refreshUrl: undefined,
-    refreshToken: undefined,
+    refreshUrl: opts.refreshUrl,
+    refreshToken: opts.refreshToken,
   };
 }
 
@@ -260,6 +272,30 @@ describe("merge-on-write compare-and-swap", () => {
     const res = await storeFile(session, { data: enc("x"), fileName: "cas.txt" });
     expect(res.isError).toBeFalsy();
     expect(server.putCount).toBe(1); // one successful PUT after the retries
+  });
+});
+
+describe("write-token refresh-on-auth, retry-once", () => {
+  it("a stale write token is refreshed (via collabToken) and the write retries + succeeds", async () => {
+    // Session starts with a STALE token the server rejects (401); the refresh
+    // endpoint returns the good token under `collabToken`; the write retries.
+    const s = makeSession(server, {
+      writeToken: "stale-token",
+      refreshUrl: "https://api.fx.land/api/mcp/tokens/refresh-connection",
+      refreshToken: "rt-secret",
+    });
+    const res = await storeFile(s, { data: enc("hi"), fileName: "r.txt" });
+    expect(res.isError).toBeFalsy();
+    expect(server.refreshCount).toBeGreaterThanOrEqual(1);
+    // The session swapped in the refreshed token.
+    expect(s.collabWriteToken()).toBe("collab-write-tok");
+  });
+
+  it("a write with no refresh configured surfaces the auth rejection unchanged", async () => {
+    const s = makeSession(server, { writeToken: "stale-token" }); // no refreshUrl/refreshToken
+    const res = await storeFile(s, { data: enc("hi"), fileName: "r.txt" });
+    expect(res.isError).toBe(true);
+    expect(server.refreshCount).toBe(0);
   });
 });
 

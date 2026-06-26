@@ -74,6 +74,9 @@ export interface CapabilityData {
   refresh_token: string;
   refresh_url: string;
   endpoint: string;
+  /** Index signature so the envelope is generic over any JSON-serializable payload
+   *  (the collab connect flow seals a different shape — see capability.ts). */
+  [k: string]: unknown;
 }
 
 /**
@@ -82,21 +85,21 @@ export interface CapabilityData {
  * plaintext bytes (JS gives no hard guarantee, but we null the reference and wipe
  * the decrypted buffer we control).
  */
-export class Capability {
+export class Capability<T extends Record<string, unknown> = CapabilityData> {
   private disposed = false;
   private constructor(
-    private data: CapabilityData | null,
+    private data: T | null,
     /** The decrypted plaintext bytes (wiped on dispose). */
     private plaintext: Uint8Array | null,
   ) {}
 
   /** @internal — constructed only by openCapability after verification. */
-  static __fromVerified(data: CapabilityData, plaintext: Uint8Array): Capability {
-    return new Capability(data, plaintext);
+  static __fromVerified<U extends Record<string, unknown>>(data: U, plaintext: Uint8Array): Capability<U> {
+    return new Capability<U>(data, plaintext);
   }
 
   /** Access the capability fields. Throws if already disposed. */
-  get(): CapabilityData {
+  get(): T {
     if (this.disposed || !this.data) {
       throw new Error("Capability has been disposed");
     }
@@ -179,11 +182,11 @@ function buildAad(parts: {
  * The capability secrets exist on the Worker only transiently here (in memory);
  * after this returns, only the OpenBao-wrapped ciphertext is at rest.
  */
-export async function sealCapability(
+export async function sealCapability<T extends Record<string, unknown> = CapabilityData>(
   db: D1Like,
   bao: OpenBaoTransit,
   userId: string,
-  cap: CapabilityData,
+  cap: T,
 ): Promise<string> {
   if (!/^[0-9a-f]{64}$/.test(userId)) {
     // user_id is SHA-256 hex; reject anything else (defensive — the caller
@@ -249,7 +252,7 @@ export async function sealCapability(
         wrappedDek,
         DEK_VERSION,
         ALG,
-        cap.endpoint ?? null,
+        typeof cap.endpoint === "string" ? cap.endpoint : null,
         nowSec,
       ),
     db
@@ -272,11 +275,11 @@ export async function sealCapability(
  * THROWS and yields no plaintext. Returns null only when the user simply has no
  * custodied capability (no row) — distinct from a decryption failure.
  */
-export async function openCapability(
+export async function openCapability<T extends Record<string, unknown> = CapabilityData>(
   db: D1Like,
   bao: OpenBaoTransit,
   userId: string,
-): Promise<Capability | null> {
+): Promise<Capability<T> | null> {
   const row = await db
     .prepare(
       `SELECT user_id, record_id, capability_ciphertext, wrapped_dek, dek_version, alg, endpoint, created_at, last_used_at
@@ -330,7 +333,7 @@ export async function openCapability(
   }
 
   // Parse + verify the embedded user_id (defense in depth vs cross-row swap).
-  let parsed: { v?: number; user_id?: string; cap?: CapabilityData };
+  let parsed: { v?: number; user_id?: string; cap?: T };
   try {
     parsed = JSON.parse(new TextDecoder().decode(plaintext));
   } catch {

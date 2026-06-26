@@ -56,13 +56,12 @@ import {
 
 /**
  * The wasm CRATE version reported by `getVersion()`, asserted against the running
- * WASM in tests. NOTE: this is the fula-js crate version, NOT the npm package
- * version. The npm dependency is `^0.6.17` — the build that carries
- * `putFlat`/`getFlat`/`listFilesFromForest` — but those bindings were added
- * without a crate-version bump (the crate stays in lockstep with the rest of the
- * fula-api workspace), so the wasm still reports 0.6.16.
+ * WASM in tests. The npm dependency is `@functionland/fula-client@^0.6.17` (the
+ * build carrying `putFlat`/`getFlat`/`listFilesFromForest` + the collab-rework
+ * crypto), and the crate now reports 0.6.17 in lockstep with the fula-api
+ * workspace. Bump this in step with the package.json dependency.
  */
-export const PINNED_FULA_CLIENT_VERSION = "0.6.16";
+export const PINNED_FULA_CLIENT_VERSION = "0.6.17";
 
 let initialized = false;
 

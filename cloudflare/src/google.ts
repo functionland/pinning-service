@@ -28,11 +28,17 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { emailToUserId } from "./userId.js";
-import { CAPABILITY_ROUTE, handleCapability, type CapabilityEnv } from "./capability.js";
+import {
+  COLLAB_CONNECTION_ROUTE,
+  COLLAB_BUNDLE_ROUTE,
+  handleCollabConnection,
+  handleCollabBundle,
+  type CapabilityEnv,
+} from "./capability.js";
 
-/** Env shape the federation handler needs (subset of the Worker env). The H2
- *  custody fields (CUSTODY_DB + OPENBAO_*) are required because this handler also
- *  owns the `/capability` delegation route. */
+/** Env shape the federation handler needs (subset of the Worker env). The custody
+ *  fields (CUSTODY_DB + OPENBAO_*) are required because this handler also owns the
+ *  `/collab/*` connect routes. */
 export interface FederationEnv extends CapabilityEnv {
   OAUTH_PROVIDER: OAuthHelpers;
   GOOGLE_CLIENT_ID: string;
@@ -82,11 +88,15 @@ export const googleDefaultHandler = {
     if (url.pathname === "/callback") {
       return handleCallback(request, env);
     }
-    // H2 — the FxFiles → Worker capability delegation endpoint. Authenticated by
-    // a Worker access token (Bearer), validated via the OAuth provider; seals the
-    // delivered capability into D1 (envelope-encrypted, DEK wrapped by OpenBao).
-    if (url.pathname === CAPABILITY_ROUTE) {
-      return handleCapability(request, env as unknown as CapabilityEnv);
+    // The FxFiles → Worker collaboration CONNECT routes. Authenticated by a Worker
+    // access token (Bearer), validated via the OAuth provider. `GET /collab/connection`
+    // returns the connection's X25519 pubkey + FULA-id; `POST /collab/bundle` seals
+    // the delivered bundle into D1 (envelope-encrypted, DEK wrapped by OpenBao).
+    if (url.pathname === COLLAB_CONNECTION_ROUTE) {
+      return handleCollabConnection(request, env as unknown as CapabilityEnv);
+    }
+    if (url.pathname === COLLAB_BUNDLE_ROUTE) {
+      return handleCollabBundle(request, env as unknown as CapabilityEnv);
     }
     if (url.pathname === "/" || url.pathname === "") {
       // Tiny liveness page; never an auth surface.

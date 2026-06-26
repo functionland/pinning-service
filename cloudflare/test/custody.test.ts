@@ -32,7 +32,13 @@ import {
   type D1Like,
 } from "../src/custody.js";
 import { OpenBaoTransit, type OpenBaoConfig } from "../src/openbao.js";
-import { handleCapability, type CapabilityEnv } from "../src/capability.js";
+import {
+  handleCollabBundle,
+  handleCollabConnection,
+  loadCollabCustody,
+  type CapabilityEnv,
+  type CollabBundleData,
+} from "../src/capability.js";
 
 const LIVE = env.OPENBAO_LIVE === "1";
 const describeLive = LIVE ? describe : describe.skip;
@@ -47,6 +53,19 @@ const CAP: CapabilityData = {
 };
 // The secret string values that MUST NEVER appear plaintext in the DB row.
 const SECRET_VALUES = [CAP.workspace_secret, CAP.mcp_secret, CAP.refresh_token];
+
+// A representative collaboration bundle delivered to a connection. The
+// `wrapped_link_secret` is opaque at delivery time (it is only unwrapped when a
+// session is built), so any non-empty string is a valid payload here.
+const BUNDLE: CollabBundleData = {
+  webui_base: "https://cloud.fx.land",
+  group_id: "1b9d7c2e-0000-4000-8000-000000000abc",
+  manifest_bucket: "fula-metadata",
+  manifest_key: "manifests/1b9d7c2e.json",
+  wrapped_link_secret: '{"encapsulated_key":{"ephemeral_public":"AA"},"ciphertext":"BB"}',
+  refresh_url: "https://api.fx.land/api/mcp/tokens/refresh-connection",
+  refresh_token: "rt_live_connection_refresh_credential_example_0001",
+};
 
 const USER_A = "a".repeat(64);
 const USER_B = "b".repeat(64);
@@ -260,14 +279,14 @@ describeLive("at-rest hygiene: the D1 row holds ONLY ciphertext + opaque metadat
   });
 });
 
-// ── 6. Delegation endpoint auth (runs WITHOUT a live OpenBao too) ─────────────
-describe("POST /capability delegation — auth is enforced", () => {
-  const CAP_URL = "http://localhost/capability";
+// ── 6. Connect endpoint auth (runs WITHOUT a live OpenBao too) ────────────────
+describe("POST /collab/bundle delegation — auth is enforced", () => {
+  const BUNDLE_URL = "http://localhost/collab/bundle";
 
   async function post(headers: Record<string, string>, body: unknown): Promise<Response> {
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request(CAP_URL, {
+      new Request(BUNDLE_URL, {
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
         body: JSON.stringify(body),
@@ -280,7 +299,7 @@ describe("POST /capability delegation — auth is enforced", () => {
   }
 
   it("rejects an UNAUTHENTICATED request (no bearer) with 401", async () => {
-    const res = await post({}, CAP);
+    const res = await post({}, BUNDLE);
     expect(res.status).toBe(401);
     expect((await res.text()).toLowerCase()).toContain("missing_bearer");
   });
@@ -290,15 +309,15 @@ describe("POST /capability delegation — auth is enforced", () => {
     // null → 401 invalid_token. (Proves we validate against the provider's KV,
     // not merely the token shape.)
     const forged = `${"c".repeat(64)}:grant-x:never-issued-secret-000000000000`;
-    const res = await post({ Authorization: `Bearer ${forged}` }, CAP);
+    const res = await post({ Authorization: `Bearer ${forged}` }, BUNDLE);
     expect(res.status).toBe(401);
     expect((await res.text()).toLowerCase()).toContain("invalid_token");
   });
 
-  it("rejects a GET (method not allowed)", async () => {
+  it("rejects a GET on /collab/bundle (method not allowed)", async () => {
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request(CAP_URL, { method: "GET" }),
+      new Request(BUNDLE_URL, { method: "GET" }),
       env as never,
       ctx,
     );
@@ -314,7 +333,7 @@ describe("POST /capability delegation — auth is enforced", () => {
 // fake `unwrapToken` that returns a chosen token summary, call handleCapability
 // directly with the real CUSTODY_DB + real OpenBao, and assert the happy path
 // (seal + 204) and the scope / identity gates. Needs a live OpenBao to seal.
-describeLive("POST /capability plumbing (fake unwrapToken; real seal)", () => {
+describeLive("POST /collab/bundle plumbing (fake unwrapToken; real seal)", () => {
   // SHA-256("deleg-test@example.com") — the user_id this fake identity maps to.
   const EMAIL = "deleg-test@example.com";
   let USER_ID = "";
@@ -323,17 +342,23 @@ describeLive("POST /capability plumbing (fake unwrapToken; real seal)", () => {
     return {
       ...(env as unknown as CapabilityEnv),
       OAUTH_PROVIDER: {
-        // Only unwrapToken is exercised by handleCapability.
+        // Only unwrapToken is exercised by the connect handlers.
         unwrapToken: async () => summary,
       } as unknown as CapabilityEnv["OAUTH_PROVIDER"],
     };
   }
 
-  function req(): Request {
-    return new Request("http://localhost/capability", {
+  function connReq(): Request {
+    return new Request("http://localhost/collab/connection", {
+      method: "GET",
+      headers: { Authorization: "Bearer x" },
+    });
+  }
+  function bundleReq(body: unknown = BUNDLE): Request {
+    return new Request("http://localhost/collab/bundle", {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: "Bearer x" },
-      body: JSON.stringify(CAP),
+      body: JSON.stringify(body),
     });
   }
 
@@ -342,27 +367,42 @@ describeLive("POST /capability plumbing (fake unwrapToken; real seal)", () => {
     USER_ID = await emailToUserId(EMAIL);
   });
 
-  it("a VALID token (scope mcp, matching identity) → 204 + row persisted + audited", async () => {
+  it("connection then bundle: 200 pubkey → 204 sealed + re-opens with the bundle", async () => {
     const summary = {
       userId: USER_ID,
       scope: ["mcp"],
       grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID } },
     };
-    const res = await handleCapability(req(), envWith(summary));
+    // 1. Establish the connection keypair (first call generates + seals it).
+    const conn = await handleCollabConnection(connReq(), envWith(summary));
+    expect(conn.status).toBe(200);
+    const connBody = (await conn.json()) as { mcp_pub_b64: string; mcp_fula_id: string };
+    expect(connBody.mcp_fula_id.startsWith("FULA-")).toBe(true);
+
+    // 2. Deliver the bundle (re-seals the SAME keypair + the bundle).
+    const res = await handleCollabBundle(bundleReq(), envWith(summary));
     expect(res.status).toBe(204);
-    // The capability was actually sealed for this user, and re-opens correctly.
-    const opened = await openCapability(db(), liveBao(), USER_ID);
+
+    // The custody re-opens with the keypair preserved + the bundle stored.
+    const opened = await loadCollabCustody(envWith(summary), USER_ID);
     expect(opened).not.toBeNull();
-    expect(opened!.get()).toEqual(CAP);
-    opened!.dispose();
-    // An atomic `capability_sealed` audit row exists for this user.
-    const audit = await (env.CUSTODY_DB as unknown as {
-      prepare(q: string): { bind(...v: unknown[]): { first<T>(): Promise<T | null> } };
-    })
-      .prepare("SELECT action FROM mcp_audit WHERE user_id=?1 AND action='capability_sealed' LIMIT 1")
-      .bind(USER_ID)
-      .first<{ action: string }>();
-    expect(audit?.action).toBe("capability_sealed");
+    try {
+      expect(opened!.get().bundle?.group_id).toBe(BUNDLE.group_id);
+      expect(typeof opened!.get().mcp_secret_b64).toBe("string");
+    } finally {
+      opened!.dispose();
+    }
+  });
+
+  it("a bundle delivered BEFORE the connection keypair exists → 409", async () => {
+    const fresh = await import("../src/userId.js").then((m) => m.emailToUserId("never-connected@example.com"));
+    const summary = {
+      userId: fresh,
+      scope: ["mcp"],
+      grant: { clientId: "fxfiles", props: { email: "never-connected@example.com", userId: fresh } },
+    };
+    const res = await handleCollabBundle(bundleReq(), envWith(summary));
+    expect(res.status).toBe(409);
   });
 
   it("a token WITHOUT the mcp scope → 401 insufficient_scope (no seal)", async () => {
@@ -371,35 +411,29 @@ describeLive("POST /capability plumbing (fake unwrapToken; real seal)", () => {
       scope: ["openid"],
       grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID } },
     };
-    const res = await handleCapability(req(), envWith(summary));
+    const res = await handleCollabBundle(bundleReq(), envWith(summary));
     expect(res.status).toBe(401);
     expect((await res.text()).toLowerCase()).toContain("insufficient_scope");
   });
 
   it("a token whose userId disagrees with props.email → 401 identity_mismatch", async () => {
-    // props.email hashes to USER_ID, but the token claims a DIFFERENT subject.
     const summary = {
       userId: "f".repeat(64),
       scope: ["mcp"],
       grant: { clientId: "fxfiles", props: { email: EMAIL } },
     };
-    const res = await handleCapability(req(), envWith(summary));
+    const res = await handleCollabBundle(bundleReq(), envWith(summary));
     expect(res.status).toBe(401);
     expect((await res.text()).toLowerCase()).toContain("identity_mismatch");
   });
 
-  it("a malformed capability body → 400 (valid auth, bad payload)", async () => {
+  it("a malformed bundle body → 400 (valid auth, bad payload)", async () => {
     const summary = {
       userId: USER_ID,
       scope: ["mcp"],
       grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID } },
     };
-    const badReq = new Request("http://localhost/capability", {
-      method: "POST",
-      headers: { "content-type": "application/json", Authorization: "Bearer x" },
-      body: JSON.stringify({ workspace_secret: "only-one-field" }),
-    });
-    const res = await handleCapability(badReq, envWith(summary));
+    const res = await handleCollabBundle(bundleReq({ webui_base: "https://x" }), envWith(summary));
     expect(res.status).toBe(400);
   });
 });

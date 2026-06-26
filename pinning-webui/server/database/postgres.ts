@@ -1268,25 +1268,27 @@ export async function findMcpConnectionById(id: string): Promise<McpConnectionRo
 /**
  * Authorize (MERGE-add) collab group ids onto a connection's stored scope.
  * USER-SCOPED + not-revoked: the row must belong to `userId` and be live, or
- * this returns null (the endpoint maps that to 404/403). The merge + write are
- * done in JS for clarity; the UPDATE re-asserts `user_id = $ AND NOT revoked`
- * so a connection revoked between the load and the write is never modified
- * (rowCount 0 → null). Returns the AUTHORITATIVE post-update row (so the minted
+ * this returns `'not_found'`. If the MERGED set would exceed `maxGroups` we
+ * return `'over_cap'` WITHOUT persisting (so a rejected request never leaves the
+ * row oversized). Otherwise the UPDATE re-asserts `user_id AND NOT revoked` (a
+ * connection revoked between the load and the write is never modified → also
+ * `'not_found'`) and returns the AUTHORITATIVE post-update row (so the minted
  * token reflects exactly what is stored). `addGroupIds` are assumed already
- * UUID-validated + lowercased by the caller (collabTokens.normalizeGroupIds).
+ * UUID-validated by the caller (collabTokens.normalizeGroupIds); the merge is
+ * EXACT (case-sensitive) — a group's identity is its exact id (collab_manifests PK).
  */
 export async function authorizeCollabGroupsForConnection(
   userId: string,
   id: string,
   addGroupIds: string[],
-): Promise<McpConnectionRow | null> {
+  maxGroups: number,
+): Promise<McpConnectionRow | 'not_found' | 'over_cap'> {
   const row = await findMcpConnectionById(id);
-  if (!row || row.user_id !== userId || row.revoked) return null;
+  if (!row || row.user_id !== userId || row.revoked) return 'not_found';
 
   const existing = Array.isArray(row.scope?.collab?.groupIds) ? row.scope.collab!.groupIds : [];
-  // EXACT (case-sensitive) merge — a group's identity is its exact id (the
-  // collab_manifests PK); see collabTokens.normalizeGroupIds.
   const merged = [...new Set([...existing.map(String), ...addGroupIds.map(String)])];
+  if (merged.length > maxGroups) return 'over_cap'; // reject BEFORE persisting
   const newScope: McpConnectionScope = { ...row.scope, collab: { groupIds: merged } };
 
   const upd = await query<{ scope: McpConnectionScope }>(
@@ -1295,7 +1297,7 @@ export async function authorizeCollabGroupsForConnection(
        RETURNING scope`,
     [JSON.stringify(newScope), id, userId],
   );
-  if ((upd.rowCount || 0) === 0) return null; // revoked/gone between load and write
+  if ((upd.rowCount || 0) === 0) return 'not_found'; // revoked/gone between load and write
   row.scope = upd.rows[0].scope;
   return row;
 }

@@ -145,6 +145,16 @@ declare global {
         connectionId?: string;
         mcpPubB64?: string;
       };
+      // Set by requireCollabWriteAuth for AUDIT — populated as soon as a
+      // principal can be attributed, INCLUDING on a denied collab-token request
+      // (so revoked/unauthorized attempts are logged, not just successes). For a
+      // collab token it carries the connection id + jti even when the request is
+      // ultimately rejected.
+      collabAuditCtx?: {
+        principalId: string;
+        principalType: 'user' | 'connection';
+        jti?: string;
+      };
     }
   }
 }
@@ -965,20 +975,23 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   }
 
   // Best-effort audit of a collab write, fired on response 'finish' so it
-  // captures the OUTCOME (status). Logs BOTH human and AI principals. Cannot be
-  // forgotten on a new route because it is wired inside requireCollabWriteAuth
-  // (the shared gate for every collab write). Never throws.
+  // captures the OUTCOME (status code). Driven by `collabAuditCtx`, which is set
+  // as soon as a principal can be attributed — so it records BOTH authorized
+  // writes (2xx) AND attributable DENIALS (a revoked/unauthorized collab token →
+  // 403, a fail-closed 503): the forensic value of the kill switch + revocation.
+  // Garbage/unverifiable tokens (no attribution) are not DB-audited (console
+  // only). Cannot be forgotten on a new route because it is wired inside
+  // requireCollabWriteAuth (the shared gate). Never throws.
   function attachCollabAudit(req: Request, res: Response) {
     res.on('finish', () => {
-      const principal = req.collabPrincipal;
-      if (!principal) return;
-      const principalId = principal.type === 'connection' ? principal.connectionId! : principal.userId;
+      const ctx = req.collabAuditCtx;
+      if (!ctx) return;
       const fileId =
         (typeof req.headers['x-collab-file-id'] === 'string' ? (req.headers['x-collab-file-id'] as string) : undefined) ??
         (typeof req.params?.fileId === 'string' ? req.params.fileId : undefined);
       insertCollabAuditLog({
-        principalId,
-        principalType: principal.type,
+        principalId: ctx.principalId,
+        principalType: ctx.principalType,
         groupId: req.params?.groupId ?? 'unknown',
         verb: collabVerbFromReq(req),
         fileId: fileId ?? null,
@@ -1020,6 +1033,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     // (a) Session (webui human).
     if (req.session.user) {
       req.collabPrincipal = { type: 'user', userId: req.session.user.userId };
+      req.collabAuditCtx = { principalId: req.session.user.userId, principalType: 'user' };
       return next();
     }
 
@@ -1034,6 +1048,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           const userId = getUserId(userEmail);
           req.apiUser = { email: userEmail, userId };
           req.collabPrincipal = { type: 'user', userId };
+          req.collabAuditCtx = { principalId: userId, principalType: 'user' };
           return next();
         }
       } catch (_) { /* fall through to collab-write attempt */ }
@@ -1045,6 +1060,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       } catch {
         return res.status(401).json({ error: 'Authentication required. Sign in or provide a valid API key.' });
       }
+
+      // Attribute for audit as soon as the token VERIFIES — so a subsequent
+      // DENIAL (revoked / unauthorized group / kill switch / binding mismatch)
+      // is still recorded with the connection id + jti, not just successes.
+      req.collabAuditCtx = { principalId: claims.collab.cid, principalType: 'connection', jti: claims.jti };
 
       const groupId = req.params.groupId;
 
@@ -1068,6 +1088,13 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // 3. The token's subject must own the connection row.
       if (conn.user_id !== claims.sub) {
         return res.status(403).json({ error: 'collab_write connection/token owner mismatch' });
+      }
+
+      // 3b. The token's cnf binding must match the LIVE row's pubkey (bind to the
+      //     server's source of truth, not just the signed claim — defense in
+      //     depth against a stale/rotated binding).
+      if (conn.mcp_pub_b64 !== claims.cnf.mcp_pub_b64) {
+        return res.status(403).json({ error: 'collab_write connection binding mismatch' });
       }
 
       // 4. groupId ∈ the LIVE row's authorized groups (DB truth → immediate
@@ -2297,15 +2324,17 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       }
 
       // Merge into the connection's STORED scope. User-scoped + not-revoked
-      // (returns null otherwise → 404). The cumulative stored set is capped.
-      const row = await authorizeCollabGroupsForConnection(userId, id, groupIds);
-      if (!row) {
+      // ('not_found' → 404). The cumulative cap is enforced BEFORE persisting
+      // ('over_cap' → 409, row left unchanged).
+      const result = await authorizeCollabGroupsForConnection(userId, id, groupIds, COLLAB_MAX_GROUP_IDS);
+      if (result === 'not_found') {
         return res.status(404).json({ error: 'Connection not found, not yours, or revoked' });
       }
-      const storedGroups = row.scope?.collab?.groupIds ?? [];
-      if (storedGroups.length > COLLAB_MAX_GROUP_IDS) {
+      if (result === 'over_cap') {
         return res.status(409).json({ error: `Too many authorized groups (max ${COLLAB_MAX_GROUP_IDS})` });
       }
+      const row = result;
+      const storedGroups = row.scope?.collab?.groupIds ?? [];
 
       // Mint a fresh collab-write token from the UPDATED row (so it matches what
       // is stored). Re-mintable later via the connection refresh-token flow.
@@ -3562,16 +3591,20 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // but non-integer precondition is a client error. `If-Match: *` is unsupported
   // here (we use numeric versions, not entity-tags-as-existence).
   function parseCollabBaseVersion(req: Request): { ok: true; base: number | null } | { ok: false } {
+    // Upper bound = MAX_SAFE_INTEGER: keeps the value safely within Postgres
+    // BIGINT range, so an absurd precondition is a 400 (client error) rather
+    // than a `$::bigint` cast 500.
+    const inRange = (n: number) => Number.isInteger(n) && n >= 0 && n <= Number.MAX_SAFE_INTEGER;
     const ifMatch = req.headers['if-match'];
     if (typeof ifMatch === 'string' && ifMatch.trim().length > 0) {
       const cleaned = ifMatch.trim().replace(/^W\//i, '').replace(/^"(.*)"$/, '$1').trim();
       const n = Number(cleaned);
-      if (!Number.isInteger(n) || n < 0) return { ok: false };
+      if (!inRange(n)) return { ok: false };
       return { ok: true, base: n };
     }
     const bodyBase = (req.body as { baseVersion?: unknown } | undefined)?.baseVersion;
     if (bodyBase !== undefined && bodyBase !== null) {
-      if (typeof bodyBase !== 'number' || !Number.isInteger(bodyBase) || bodyBase < 0) return { ok: false };
+      if (typeof bodyBase !== 'number' || !inRange(bodyBase)) return { ok: false };
       return { ok: true, base: bodyBase };
     }
     return { ok: true, base: null };

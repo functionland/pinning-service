@@ -185,6 +185,18 @@ describe('collab token — CROSS-TOKEN CONFUSION guard (the security boundary)',
     const tampered = token.slice(0, -2) + (token.endsWith('A') ? 'BB' : 'AA');
     expect(() => verifyCollabWriteToken(tampered, JWT_SECRET)).toThrow();
   });
+
+  it('a token missing exp/iat is rejected (no-expiry guard — never a non-expiring token)', () => {
+    // noTimestamp:true omits iat, and we pass no exp → jwt.verify would accept
+    // (nothing to expire), so the verifier must require exp+iat itself.
+    const noTimes = jwt.sign(
+      { iss: COLLAB_TOKEN_ISS, aud: COLLAB_TOKEN_AUD, sub: USER_ID, jti: 'x',
+        token_use: COLLAB_TOKEN_USE, collab: { v: 1, cid: CID, groupIds: [G1] }, cnf: { mcp_pub_b64: MCP_PUB_A } },
+      deriveCollabSigningKey(JWT_SECRET),
+      { algorithm: 'HS256', noTimestamp: true, header: { alg: 'HS256', typ: COLLAB_TOKEN_TYP } },
+    );
+    expect(() => verifyCollabWriteToken(noTimes, JWT_SECRET)).toThrow();
+  });
 });
 
 describe('mintCollabFromConnection — scope comes ONLY from the stored row (no widening)', () => {
@@ -254,6 +266,17 @@ describe('collab-write endpoints — auth boundary (no DB)', () => {
   });
   it('POST /api/collab-groups/:groupId/ai-writes → 401 unauthenticated', async () => {
     const res = await request(app).post(`/api/collab-groups/${G1}/ai-writes`).send({ revoked: true });
+    expect(res.status).toBe(401);
+  });
+  it('a collab_write token CANNOT self-authorize on the authorize endpoint → 401 (no privilege escalation)', async () => {
+    // The authorize endpoint uses requireSessionOrBearer (session OR a HUMAN
+    // api_key only) — it must never accept a collab_write JWT, or an agent could
+    // widen its own groups + re-mint a broader token.
+    const { token: collab } = mintCollabWriteToken(USER_ID, JWT_SECRET, { connectionId: CID, groupIds: [G1], mcpPubB64: MCP_PUB_A });
+    const res = await request(app)
+      .post(`/api/mcp/connections/${CID}/collab-groups`)
+      .set('Authorization', `Bearer ${collab}`)
+      .send({ groupIds: [G2] });
     expect(res.status).toBe(401);
   });
   it('an mcp_s3 token is NOT accepted on a collab WRITE route (single accepted aud) → 401', async () => {

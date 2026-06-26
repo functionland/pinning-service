@@ -269,7 +269,9 @@ export function verifyCollabWriteToken(
   jwtSecret: string,
   opts?: { clockToleranceSeconds?: number; maxTtlSeconds?: number; expectedSub?: string },
 ): CollabTokenClaims {
-  const clockTolerance = opts?.clockToleranceSeconds ?? 120;
+  // Short-lived agent tokens: a tight skew window (60s) keeps the effective
+  // validity close to the <=600s TTL.
+  const clockTolerance = opts?.clockToleranceSeconds ?? 60;
   const maxTtl = opts?.maxTtlSeconds ?? COLLAB_TOKEN_TTL_MAX_SECONDS;
 
   // jwt.verify checks signature (under the DERIVED key — see deriveCollabSigningKey),
@@ -300,10 +302,14 @@ export function verifyCollabWriteToken(
   // Canonicalize + validate the authorized groups (throws on any non-UUID).
   const groupIds = normalizeGroupIds(collab.groupIds);
 
+  // exp AND iat are REQUIRED, and the TTL must be within bound. jwt.verify only
+  // enforces exp WHEN PRESENT, so a token missing exp would otherwise never
+  // expire; a missing iat would skip the TTL bound. Both are always minted, so
+  // requiring them is fail-closed defense in depth.
   const exp = Number(decoded.exp);
   const iat = Number(decoded.iat);
-  if (Number.isFinite(exp) && Number.isFinite(iat) && exp - iat > maxTtl) {
-    throw new Error('collab token: ttl exceeds max');
+  if (!Number.isFinite(exp) || !Number.isFinite(iat) || exp - iat > maxTtl) {
+    throw new Error('collab token: missing exp/iat or ttl exceeds max');
   }
 
   // cnf is REQUIRED and must be a valid 32-byte pubkey b64 (a malformed/missing

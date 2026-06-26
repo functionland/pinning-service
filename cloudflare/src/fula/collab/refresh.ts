@@ -145,7 +145,13 @@ export async function withCollabWriteRetry<T>(
   ctx.setCollabWriteToken(newToken);
   try {
     return await op(newToken);
-  } catch {
-    throw original; // retry failed → original auth error, no loop
+  } catch (retryErr) {
+    // A retried write that fails for a NON-auth reason (e.g. a 409 version
+    // conflict) must surface THAT error so the caller's compare-and-swap loop can
+    // act on it — masking it as the original auth error defeats the CAS retry
+    // (GLM-5.2 review). Only a repeated auth failure (or a non-CollabError) falls
+    // back to the original auth error: never loop on auth, never leak refresh detail.
+    if (retryErr instanceof CollabError && retryErr.kind !== "auth") throw retryErr;
+    throw original;
   }
 }

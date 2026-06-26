@@ -302,30 +302,62 @@ export async function uploadCollabFile(
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/** Read a response body as text with an OOM cap (uses Content-Length when present). */
+/** Read a response body as text with a streaming OOM cap. */
 async function readCappedText(resp: Response, what: string): Promise<string> {
-  const len = Number(resp.headers.get("content-length") ?? "0");
-  if (Number.isFinite(len) && len > MAX_MANIFEST_BYTES) {
-    throw new CollabError("tooLarge", `collab ${what} response exceeded the ${MAX_MANIFEST_BYTES}-byte cap`);
-  }
-  const buf = new Uint8Array(await resp.arrayBuffer());
-  if (buf.length > MAX_MANIFEST_BYTES) {
-    throw new CollabError("tooLarge", `collab ${what} response exceeded the ${MAX_MANIFEST_BYTES}-byte cap`);
-  }
-  return new TextDecoder("utf-8").decode(buf);
+  return new TextDecoder("utf-8").decode(await readBodyCapped(resp, MAX_MANIFEST_BYTES, what));
 }
 
-/** Read a binary response body with an OOM cap (Content-Length precheck + post-read). */
+/** Read a binary response body with a streaming OOM cap. */
 async function readCappedBytes(resp: Response, max: number, what: string): Promise<Uint8Array> {
+  return readBodyCapped(resp, max, what);
+}
+
+/**
+ * Read a response body under a hard byte cap, STREAMING — an over-cap body is
+ * aborted mid-flight (`reader.cancel`) instead of being fully buffered first. A
+ * lying or ABSENT `Content-Length` therefore cannot defeat the cap: the previous
+ * `arrayBuffer()` path allocated the ENTIRE body before the size check, so a
+ * compromised/malicious server could OOM the isolate well past the cap (GLM-5.2
+ * review, HIGH). The Content-Length precheck is kept as a fast reject for an
+ * honest oversized header. Exported for the unit test. */
+export async function readBodyCapped(resp: Response, max: number, what: string): Promise<Uint8Array> {
   const len = Number(resp.headers.get("content-length") ?? "0");
   if (Number.isFinite(len) && len > max) {
     throw new CollabError("tooLarge", `collab ${what} response exceeded the ${max}-byte cap`);
   }
-  const buf = new Uint8Array(await resp.arrayBuffer());
-  if (buf.length > max) {
-    throw new CollabError("tooLarge", `collab ${what} response exceeded the ${max}-byte cap`);
+  const body = resp.body;
+  if (!body) return new Uint8Array(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > max) {
+        // Never buffer past the cap — stop pulling bytes immediately.
+        await reader.cancel().catch(() => {});
+        throw new CollabError("tooLarge", `collab ${what} response exceeded the ${max}-byte cap`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* already released/cancelled */
+    }
   }
-  return buf;
+  if (chunks.length === 1) return chunks[0]!;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  return out;
 }
 
 /** Parse the `currentVersion` off a 409 body / ETag (best-effort). */

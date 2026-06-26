@@ -128,7 +128,19 @@ async function withCollabSession(
         "to a collaboration group, then retry.",
     );
   }
-  return body(session);
+  try {
+    return await body(session);
+  } finally {
+    // Best-effort wipe the recovered link secret from isolate memory once the tool
+    // call completes — it derives every manifest + collab-file key (GLM-5.2 review).
+    // JS gives no hard zeroization guarantee, but we own this buffer and the session
+    // is per-request + discarded; the returned ToolResult never references it.
+    try {
+      session.linkSecret.fill(0);
+    } catch {
+      /* noop */
+    }
+  }
 }
 
 /**

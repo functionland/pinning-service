@@ -55,6 +55,20 @@ export class IdentityError extends Error {
   }
 }
 
+/** Options for {@link recoverLinkSecret}. */
+export interface RecoverOptions {
+  /**
+   * Permit the bare-HPKE-envelope shape (the `testHpkeEncryptDek` format).
+   * Default FALSE. Production requires the real v5 ShareToken contract (which
+   * needs a fula-client DEK binding the pinned WASM lacks), so the bare path is
+   * an interim/TEST affordance ONLY — it carries NONE of v5's recipient/group/
+   * expiry AAD binding and must never silently become the production unwrap.
+   * Gating it keeps the live path strictly v5 (fail-closed until the binding
+   * lands) while letting the unit tests exercise the round-trip.
+   */
+  allowBareEnvelope?: boolean;
+}
+
 /** Derive the X25519 public key (32 bytes) from a 32-byte secret. */
 export function publicKeyFromSecret(secret: Uint8Array): Uint8Array {
   if (secret.length !== 32) {
@@ -85,10 +99,15 @@ export function publicKeyB64(publicKey: Uint8Array): string {
  * secret used to derive the manifest key + every collab-file key.
  *
  * @throws {IdentityError} `unsupportedShareToken` for a v5 ShareToken (the binding
- *   is not in the pinned WASM); `share` if the bare-envelope HPKE decrypt fails
- *   (wrong recipient key / tampering).
+ *   is not in the pinned WASM) or for a bare envelope when `allowBareEnvelope` is
+ *   not set (production is fail-closed v5-only); `share` if the bare-envelope HPKE
+ *   decrypt fails (wrong recipient key / tampering).
  */
-export function recoverLinkSecret(workerSecret: Uint8Array, wrappedLinkSecret: string): Uint8Array {
+export function recoverLinkSecret(
+  workerSecret: Uint8Array,
+  wrappedLinkSecret: string,
+  opts: RecoverOptions = {},
+): Uint8Array {
   if (workerSecret.length !== 32) {
     throw new IdentityError("key", `X25519 secret must be 32 bytes, got ${workerSecret.length}`);
   }
@@ -112,8 +131,18 @@ export function recoverLinkSecret(workerSecret: Uint8Array, wrappedLinkSecret: s
   }
 
   // A bare HPKE envelope (`testHpkeEncryptDek` format): the only shape the pinned
-  // WASM can unwrap today. `testHpkeDecryptDek` returns the 32-byte DEK.
+  // WASM can unwrap today. It is GATED — the live path must not silently accept a
+  // shape that drops v5's recipient/group/expiry AAD binding (it is fail-closed
+  // v5-only until the binding lands; only tests opt in via `allowBareEnvelope`).
   if ("encapsulated_key" in parsed && "ciphertext" in parsed) {
+    if (!opts.allowBareEnvelope) {
+      throw new IdentityError(
+        "unsupportedShareToken",
+        "wrapped_link_secret is a bare HPKE envelope; this shape is disabled on the live path " +
+          "(it lacks v5's recipient/group/expiry AAD binding). The production contract is a v5 " +
+          "ShareToken pending a fula-client DEK binding — see the PR notes.",
+      );
+    }
     try {
       const dek = testHpkeDecryptDek(workerSecret, wrappedLinkSecret);
       if (dek.length !== 32) {

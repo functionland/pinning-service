@@ -1,14 +1,27 @@
 /**
- * FxFiles → Worker collaboration CONNECT flow + per-connection custody.
+ * FxFiles → Worker collaboration CONNECT flow + per-user-account custody.
  * ════════════════════════════════════════════════════════════════════════════
  *
  * This REPLACES the bespoke per-user "AI workspace" capability (workspace_secret /
  * mcp_secret / gateway refresh) with the collaboration-group model (mirrors the
  * merged Rust `fula-mcp` rework). Two authenticated routes drive it:
  *
- *   GET  /collab/connection   → the Worker's per-connection X25519 PUBLIC key +
- *                               FULA-id, so FxFiles can wrap the group link secret
- *                               TO this connection. (loadOrGenerateMcpIdentity)
+ *   GET  /collab/connection   → the Worker's X25519 PUBLIC key + FULA-id, so
+ *                               FxFiles can wrap the group link secret TO this
+ *                               connection. (loadOrGenerateMcpIdentity)
+ *
+ * ## ⚠️ KEYING IS PER FULA USER ACCOUNT (one group per user at a time)
+ *
+ * Custody is keyed solely by `user_id = SHA-256(verified email)` (the D1 PK), so
+ * there is exactly ONE keypair + ONE bundle per Fula user. Consequences (no
+ * cross-user breach — different emails ⇒ different rows — but flag for the owner):
+ *   • Two MCP clients of the SAME Google account (e.g. Claude.ai AND ChatGPT)
+ *     share the one keypair + bundle.
+ *   • A second `POST /collab/bundle` SILENTLY OVERWRITES the first group's bundle
+ *     (the connection now operates on the newer group).
+ * If concurrent multi-client / multi-group per account is ever required, key the
+ * custody by `(user_id, client_id)` or `(user_id, group_id)` instead — a schema +
+ * plumbing change deliberately deferred for this proposed-contract PR.
  *   POST /collab/bundle        → store the delivered capability bundle
  *                               { webui_base, group_id, manifest_bucket,
  *                                 manifest_key, wrapped_link_secret,
@@ -67,6 +80,13 @@ export interface CapabilityEnv {
   OPENBAO_ROLE_ID: string;
   OPENBAO_SECRET_ID: string;
   OPENBAO_TRANSIT_KEY: string;
+  /**
+   * DEV-ONLY escape hatch (unset in production): when "1", the link-secret unwrap
+   * accepts a bare HPKE envelope (the `testHpkeEncryptDek` format) in addition to
+   * the real v5 ShareToken. Left UNSET so the live path is fail-closed v5-only
+   * until a fula-client DEK binding lands (see ./fula/collab/identity.ts).
+   */
+  COLLAB_ALLOW_BARE_HPKE?: string;
 }
 
 /** Routes the collab connect endpoints are served at. */
@@ -267,7 +287,11 @@ export async function loadCollabSession(
     let mcpPubB64: string;
     try {
       mcpPubB64 = publicKeyB64(publicKeyFromSecret(secret));
-      linkSecret = recoverLinkSecret(secret, bundle.wrapped_link_secret);
+      // Live path is fail-closed v5-only; the bare-envelope shape is enabled ONLY
+      // by the dev escape hatch (unset in production — see CapabilityEnv).
+      linkSecret = recoverLinkSecret(secret, bundle.wrapped_link_secret, {
+        allowBareEnvelope: env.COLLAB_ALLOW_BARE_HPKE === "1",
+      });
     } finally {
       secret.fill(0);
     }

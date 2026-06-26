@@ -36,6 +36,12 @@ import { parseManifest, type CollaborationGroup } from "./manifest.js";
  *  manifest is a file index, not file data, so 16 MiB is generous. */
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 
+/** Maximum bytes we will buffer for a single file fetch (collab blob / owner-file
+ *  ciphertext or one chunk). Bounds the ~3x read-path expansion (ct + plaintext +
+ *  base64) against the isolate memory ceiling; collab files the AI stores are below
+ *  the content store cap, and owner files are read one chunk at a time. */
+const MAX_FILE_BYTES = 32 * 1024 * 1024;
+
 /** Discriminated error kinds for the collab HTTP client. */
 export type CollabErrorKind =
   | "transport"
@@ -178,7 +184,7 @@ export async function fetchCollabFile(
   }
   if (resp.status === 404) throw new CollabError("notFound", `collab object not found: collab file ${fileId}`);
   if (!resp.ok) throw new CollabError("status", `collab endpoint file(GET) returned HTTP ${resp.status}`, resp.status);
-  return new Uint8Array(await resp.arrayBuffer());
+  return readCappedBytes(resp, MAX_FILE_BYTES, "file(GET)");
 }
 
 /**
@@ -206,7 +212,7 @@ export async function fulaFetch(
   if (!resp.ok) {
     throw new CollabError("status", `collab endpoint fula-fetch(GET) returned HTTP ${resp.status}`, resp.status);
   }
-  return new Uint8Array(await resp.arrayBuffer());
+  return readCappedBytes(resp, MAX_FILE_BYTES, "fula-fetch(GET)");
 }
 
 // ── WRITE (Bearer collab_write_token) ────────────────────────────────────────
@@ -307,6 +313,19 @@ async function readCappedText(resp: Response, what: string): Promise<string> {
     throw new CollabError("tooLarge", `collab ${what} response exceeded the ${MAX_MANIFEST_BYTES}-byte cap`);
   }
   return new TextDecoder("utf-8").decode(buf);
+}
+
+/** Read a binary response body with an OOM cap (Content-Length precheck + post-read). */
+async function readCappedBytes(resp: Response, max: number, what: string): Promise<Uint8Array> {
+  const len = Number(resp.headers.get("content-length") ?? "0");
+  if (Number.isFinite(len) && len > max) {
+    throw new CollabError("tooLarge", `collab ${what} response exceeded the ${max}-byte cap`);
+  }
+  const buf = new Uint8Array(await resp.arrayBuffer());
+  if (buf.length > max) {
+    throw new CollabError("tooLarge", `collab ${what} response exceeded the ${max}-byte cap`);
+  }
+  return buf;
 }
 
 /** Parse the `currentVersion` off a 409 body / ETag (best-effort). */

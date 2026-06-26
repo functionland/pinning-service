@@ -4,9 +4,9 @@
  *
  * We use `@functionland/fula-client` — the SAME wasm-bindgen build of the Rust
  * `fula-js`/`fula-client`/`fula-crypto` stack that the FxFiles app uses — so the
- * Worker reads/writes the AI-workspace forest in a format FxFiles' own client can
- * decrypt. The npm package is PINNED to 0.6.16 to match FxFiles' native
- * `fula_client ^0.6.16` (see package.json + the version assertion in the tests).
+ * Worker reads/writes encrypted objects in a format FxFiles' own client can
+ * decrypt. The npm package is PINNED to ^0.6.17 to match FxFiles' native
+ * `fula_client ^0.6.17` (see package.json + the version assertion in the tests).
  *
  * WASM-IN-WORKER GLUE (advisor-reviewed — Codex GPT-5.5 + Cursor; empirically
  * proven by the crypto round-trip test):

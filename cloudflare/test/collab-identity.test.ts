@@ -69,15 +69,31 @@ describe("recoverLinkSecret — the HPKE unwrap seam", () => {
     expect(env.wrapped_key).toBeUndefined();
     expect(env.encapsulated_key).toBeTruthy();
 
-    const recovered = recoverLinkSecret(workerSecret, wrapped);
+    // Bare-envelope is GATED: the live path is fail-closed v5-only, so without
+    // an explicit opt-in this rejects (asserted below); only tests opt in.
+    expect(() => recoverLinkSecret(workerSecret, wrapped)).toThrow(IdentityError);
+    const recovered = recoverLinkSecret(workerSecret, wrapped, { allowBareEnvelope: true });
     expect(hex(recovered)).toBe(hex(linkSecret));
+  });
+
+  it("the bare-envelope path is disabled on the live path (fail-closed v5-only)", () => {
+    const workerSecret = blake3DeriveKey("test:worker:v1", new Uint8Array(32).fill(1));
+    const workerPub = derivePublicKeyFromSecret(workerSecret);
+    const wrapped = testHpkeEncryptDek(workerPub, new Uint8Array(32).fill(7));
+    try {
+      recoverLinkSecret(workerSecret, wrapped); // no allowBareEnvelope ⇒ rejected
+      throw new Error("expected recoverLinkSecret to reject the bare envelope");
+    } catch (e) {
+      expect(e).toBeInstanceOf(IdentityError);
+      expect((e as IdentityError).kind).toBe("unsupportedShareToken");
+    }
   });
 
   it("a STRANGER worker key cannot recover the link secret", () => {
     const workerPub = derivePublicKeyFromSecret(blake3DeriveKey("test:worker:v1", new Uint8Array(32).fill(1)));
     const stranger = blake3DeriveKey("test:stranger:v1", new Uint8Array(32).fill(2));
     const wrapped = testHpkeEncryptDek(workerPub, new Uint8Array(32).fill(7));
-    expect(() => recoverLinkSecret(stranger, wrapped)).toThrow(IdentityError);
+    expect(() => recoverLinkSecret(stranger, wrapped, { allowBareEnvelope: true })).toThrow(IdentityError);
   });
 
   it("a v5 ShareToken surfaces the precise upstream-binding dependency (not a silent fail)", () => {

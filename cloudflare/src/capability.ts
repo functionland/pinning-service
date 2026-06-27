@@ -1,56 +1,68 @@
 /**
- * The FxFiles → Worker delegation endpoint (`POST /capability`) + audit (H2).
+ * FxFiles → Worker collaboration CONNECT flow + per-user-account custody.
  * ════════════════════════════════════════════════════════════════════════════
  *
- * DELEGATION AUTH — the design (advisor-reviewed: Codex GPT-5.5 + Cursor)
- * ──────────────────────────────────────────────────────────────────────
- * FxFiles (the mobile app that HOLDS the master KEK) must hand the Worker a
- * SCOPED capability — { workspace_secret (≠ KEK), mcp_secret, refresh_token,
- * refresh_url, endpoint } — authenticated as the SPECIFIC Fula user, WITHOUT the
- * Worker ever holding the pinning service's JWT_SECRET.
+ * This REPLACES the bespoke per-user "AI workspace" capability (workspace_secret /
+ * mcp_secret / gateway refresh) with the collaboration-group model (mirrors the
+ * merged Rust `fula-mcp` rework). Two authenticated routes drive it:
  *
- * How: FxFiles runs the Worker's OWN Google OAuth (it is just another OAuth
- * client of this Worker — the same provider H1 already exposes; reuse it) and so
- * obtains a Worker ACCESS TOKEN bound to the user's verified Google identity. It
- * then POSTs the capability JSON to `/capability` with `Authorization: Bearer
- * <that worker access token>`. The Worker validates the token via the OAuth
- * provider's own `unwrapToken` (which looks the opaque token up in KV, REJECTS a
- * forged/unknown token, ENFORCES expiry, and decrypts the grant props using a key
- * wrapped WITH the token — so a tampered token can't even decrypt props). The
- * verified `userId` (= SHA-256(lowercased email)) drives `sealCapability`.
+ *   GET  /collab/connection   → the Worker's X25519 PUBLIC key + FULA-id, so
+ *                               FxFiles can wrap the group link secret TO this
+ *                               connection. (loadOrGenerateMcpIdentity)
  *
- * Why this is sound:
- *   • Authenticates as the specific user — the token's `userId`/`props` are the
- *     verified Google identity, cross-checked here against props.userId AND
- *     re-derived from props.email (defense in depth).
- *   • The Worker never holds the pinning JWT_SECRET — it validates ITS OWN tokens
- *     against ITS OWN KV; it never mints or verifies a pinning/gateway JWT.
- *   • Bearer-token app→API POST: CSRF is not in play (no ambient cookie auth on
- *     this route; the credential is an explicit Authorization header). The bearer
- *     is the only thing that authorizes the write.
- *   • Replay: the request is naturally IDEMPOTENT — `sealCapability` UPSERTs one
- *     row per user with a fresh DEK/record_id, so a replayed POST simply re-seals
- *     the same (or a newer) capability. Each call is audited (with the record_id),
- *     so a replay/anomaly is visible. (A stricter per-request nonce/jti is a
- *     possible future hardening; not required for correctness here.)
+ * ## ⚠️ KEYING IS PER FULA USER ACCOUNT (one group per user at a time)
  *
- * Scope check: we require the token to carry the `mcp` scope (the only scope this
- * AS grants) — an over-broad or scopeless token is refused. Possession-proof of
- * the workspace_secret is deliberately NOT required: OAuth already authenticates
- * the user, and requiring extra secret material to "prove possession" would only
- * widen exposure. (Codex/Cursor agreed this is optional, not load-bearing.)
+ * Custody is keyed solely by `user_id = SHA-256(verified email)` (the D1 PK), so
+ * there is exactly ONE keypair + ONE bundle per Fula user. Consequences (no
+ * cross-user breach — different emails ⇒ different rows — but flag for the owner):
+ *   • Two MCP clients of the SAME Google account (e.g. Claude.ai AND ChatGPT)
+ *     share the one keypair + bundle.
+ *   • A second `POST /collab/bundle` SILENTLY OVERWRITES the first group's bundle
+ *     (the connection now operates on the newer group).
+ * If concurrent multi-client / multi-group per account is ever required, key the
+ * custody by `(user_id, client_id)` or `(user_id, group_id)` instead — a schema +
+ * plumbing change deliberately deferred for this proposed-contract PR.
+ *   POST /collab/bundle        → store the delivered capability bundle
+ *                               { webui_base, group_id, manifest_bucket,
+ *                                 manifest_key, wrapped_link_secret,
+ *                                 collab_write_token?, refresh_token?, refresh_url? }.
+ *
+ * Auth is UNCHANGED from the old `/capability` delegation: FxFiles holds a Worker
+ * OAuth access token (the same provider the MCP exposes), and the Worker validates
+ * it via `OAUTH_PROVIDER.unwrapToken` (rejects forged/expired, decrypts props),
+ * requires the `mcp` scope, and derives the verified `user_id = SHA-256(email)`.
+ *
+ * ## Custody — KEPT (OpenBao envelope), simplified payload
+ *
+ * We REUSE the OpenBao-wrapped D1 envelope (custody.ts) — but the sealed payload is
+ * now {@link CollabCustodyData} = the Worker's persistent X25519 SECRET key + the
+ * latest delivered bundle. Keeping OpenBao still buys the at-rest guarantee: the
+ * X25519 secret is what UNWRAPS the link secret, and the bundle (which also carries
+ * the `wrapped_link_secret` + long-lived `refresh_token`) sits in the SAME sealed
+ * row — so a D1 dump without a live OpenBao decrypts to nothing. (Owner sign-off
+ * note in the PR: this is why OpenBao is retained rather than plaintext D1.)
+ *
+ * ## ⚠️ This is a PROPOSED delivery contract (no producer exists yet)
+ *
+ * As of this PR NO client wraps a collab link secret to an MCP pubkey on either end
+ * (FxFiles still ships the old workspace model; the server has no collab-bundle
+ * producer). So this connect flow + bundle shape is a PROPOSED seam, validated by
+ * unit tests (auth, validation, seal/open round-trip) but NOT exercisable end to
+ * end. See the PR notes. The link-secret unwrap itself needs a fula-client binding
+ * for the real v5-ShareToken contract (see ./fula/collab/identity.ts).
  */
 
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { openBaoFromEnv } from "./openbao.js";
-import {
-  sealCapability,
-  openCapability,
-  type Capability,
-  type CapabilityData,
-  type D1Like,
-} from "./custody.js";
+import { sealCapability, openCapability, type Capability, type D1Like } from "./custody.js";
 import { emailToUserId } from "./userId.js";
+import {
+  encodeFulaId,
+  publicKeyB64,
+  publicKeyFromSecret,
+  recoverLinkSecret,
+} from "./fula/collab/identity.js";
+import type { CollabSession } from "./fula/collab/tools.js";
 
 /** The auth props the OAuth grant carries (set by the Google federation). */
 interface FulaAuthProps {
@@ -60,7 +72,7 @@ interface FulaAuthProps {
   [k: string]: unknown;
 }
 
-/** Env shape the capability endpoint needs. */
+/** Env shape the collab connect endpoints + session loader need. */
 export interface CapabilityEnv {
   OAUTH_PROVIDER: OAuthHelpers;
   CUSTODY_DB: D1Like;
@@ -68,154 +80,316 @@ export interface CapabilityEnv {
   OPENBAO_ROLE_ID: string;
   OPENBAO_SECRET_ID: string;
   OPENBAO_TRANSIT_KEY: string;
+  /**
+   * DEV-ONLY escape hatch (unset in production): when "1", the link-secret unwrap
+   * accepts a bare HPKE envelope (the `testHpkeEncryptDek` format) in addition to
+   * the real v5 ShareToken. Left UNSET so the live path is fail-closed v5-only
+   * until a fula-client DEK binding lands (see ./fula/collab/identity.ts).
+   */
+  COLLAB_ALLOW_BARE_HPKE?: string;
 }
 
-/** The route the delegation endpoint is served at. */
-export const CAPABILITY_ROUTE = "/capability";
+/** Routes the collab connect endpoints are served at. */
+export const COLLAB_CONNECTION_ROUTE = "/collab/connection";
+export const COLLAB_BUNDLE_ROUTE = "/collab/bundle";
 
 /**
- * Handle `POST /capability`. Returns a Response. Never logs the capability body
- * or any secret. On success: 204 No Content (nothing to return — the capability
- * is now custodied). On any auth/validation failure: a terse 4xx, fail-closed.
+ * The capability bundle delivered per AI connection (mirrors the Rust
+ * `CapabilityBundleJson`). Every URL is HTTPS (or loopback for dev). The
+ * `wrapped_link_secret` is a serialized fula ShareToken (the real contract) or a
+ * bare HPKE envelope (interim) addressed to THIS connection's X25519 pubkey.
  */
-export async function handleCapability(
-  request: Request,
-  env: CapabilityEnv,
-): Promise<Response> {
-  if (request.method !== "POST") {
-    return json(405, { error: "method_not_allowed" });
-  }
+export interface CollabBundleData {
+  webui_base: string;
+  group_id: string;
+  manifest_bucket: string;
+  manifest_key: string;
+  wrapped_link_secret: string;
+  collab_write_token?: string;
+  refresh_token?: string;
+  refresh_url?: string;
+  user_id?: string;
+  [k: string]: unknown;
+}
 
-  // ── 1. Authenticate the caller as the specific Fula user ──────────────────
-  const bearer = extractBearer(request);
-  if (!bearer) {
-    return unauthorized("missing_bearer");
-  }
-  // unwrapToken: validates against KV, rejects forged/unknown tokens, enforces
-  // expiry, and decrypts props with a key wrapped WITH the token. Returns null
-  // on ANY of those failures. We never see the pinning JWT_SECRET.
-  const summary = await env.OAUTH_PROVIDER.unwrapToken<FulaAuthProps>(bearer);
-  if (!summary) {
-    return unauthorized("invalid_token");
-  }
-  // Scope gate: the token MUST carry the `mcp` scope this AS grants. A scopeless
-  // or differently-scoped token is refused (no scope escalation into custody).
-  const scopes = summary.scope ?? summary.grant?.scope ?? [];
-  if (!scopes.includes("mcp")) {
-    return unauthorized("insufficient_scope");
-  }
+/**
+ * What the Worker seals per user (OpenBao-wrapped D1): the connection's persistent
+ * X25519 SECRET key (base64) + the latest delivered bundle. The secret is generated
+ * once at first `GET /collab/connection` and never leaves the Worker (only its
+ * public key / FULA-id are exposed).
+ */
+export interface CollabCustodyData {
+  mcp_secret_b64: string;
+  bundle?: CollabBundleData;
+  [k: string]: unknown;
+}
 
-  // Resolve the authenticated user_id. The token's own `userId` is authoritative
-  // (set at federation = SHA-256(lowercased email)); cross-check it against the
-  // decrypted props and re-derive from the email as defense in depth.
-  const props = summary.grant?.props ?? {};
-  const tokenUserId = summary.userId;
-  let userId = tokenUserId;
-  if (typeof props.email === "string" && props.email) {
-    const derived = await emailToUserId(props.email);
-    if (derived !== tokenUserId) {
-      // The verified identity and the token subject disagree — refuse.
-      return unauthorized("identity_mismatch");
-    }
-    userId = derived;
-  } else if (typeof props.userId === "string" && props.userId !== tokenUserId) {
-    return unauthorized("identity_mismatch");
-  }
-  if (!/^[0-9a-f]{64}$/.test(userId)) {
-    return unauthorized("invalid_subject");
-  }
+// ── Connect endpoints ────────────────────────────────────────────────────────
 
-  // ── 2. Parse + validate the capability body ───────────────────────────────
+/**
+ * `GET /collab/connection` — return the Worker's per-connection X25519 public key
+ * + FULA-id (generating + sealing the keypair on first call). FxFiles addresses
+ * the wrapped link secret to this key.
+ *
+ * KNOWN LIMITATION (flagged): two concurrent FIRST requests for the same user can
+ * each generate a keypair and race the D1 upsert (last-writer-wins) → a bundle
+ * wrapped to the losing pubkey can't be unwrapped. The window is narrow (the
+ * pubkey fetch precedes bundle delivery, and a single client serializes it).
+ */
+export async function handleCollabConnection(request: Request, env: CapabilityEnv): Promise<Response> {
+  if (request.method !== "GET") return json(405, { error: "method_not_allowed" });
+  const auth = await authenticateUser(request, env);
+  if (auth instanceof Response) return auth;
+
+  let identity: { mcpPubB64: string; mcpFulaId: string };
+  try {
+    identity = await loadOrGenerateMcpIdentity(env, auth.userId);
+  } catch {
+    await recordAudit(env.CUSTODY_DB, auth.userId, "collab_identity_failed", {});
+    return json(503, { error: "custody_unavailable" });
+  }
+  await recordAudit(env.CUSTODY_DB, auth.userId, "collab_connection", {});
+  return json(200, { mcp_pub_b64: identity.mcpPubB64, mcp_fula_id: identity.mcpFulaId });
+}
+
+/**
+ * `POST /collab/bundle` — store the delivered capability bundle for this user. The
+ * connection keypair MUST already exist (the client fetched the pubkey first to
+ * wrap the link secret), else 409 — we never generate a fresh keypair here, which
+ * would not match the pubkey the bundle was wrapped to.
+ */
+export async function handleCollabBundle(request: Request, env: CapabilityEnv): Promise<Response> {
+  if (request.method !== "POST") return json(405, { error: "method_not_allowed" });
+  const auth = await authenticateUser(request, env);
+  if (auth instanceof Response) return auth;
+
   let body: unknown;
   try {
     body = await request.json();
   } catch {
     return json(400, { error: "invalid_json" });
   }
-  const cap = validateCapability(body);
-  if (!cap) {
-    return json(400, { error: "invalid_capability" });
-  }
+  const bundle = validateBundle(body);
+  if (!bundle) return json(400, { error: "invalid_bundle" });
 
-  // ── 3. Seal it (in-memory only during sealing; then OpenBao-wrapped at rest) ─
-  let recordId: string;
   try {
-    const bao = openBaoFromEnv(env);
-    recordId = await sealCapability(env.CUSTODY_DB, bao, userId, cap);
-  } catch {
-    // Fail closed: audit the failure; do not surface internal error detail to
-    // the client (the audit row carries no secret material).
-    await recordAudit(env.CUSTODY_DB, userId, "capability_seal_failed", {});
+    await storeCollabBundle(env, auth.userId, bundle);
+  } catch (e) {
+    if (e instanceof NoConnectionIdentityError) {
+      return json(409, { error: "no_connection_identity", detail: "GET /collab/connection first" });
+    }
+    await recordAudit(env.CUSTODY_DB, auth.userId, "collab_bundle_seal_failed", {});
     return json(503, { error: "custody_unavailable" });
   }
-
-  // ── 4. Supplementary audit (non-secret context; best-effort) ──────────────
-  // sealCapability already wrote an ATOMIC `capability_sealed` audit row in the
-  // same D1 batch as the credential, so the seal is never unaudited. This extra
-  // `capability_delegated` row adds delegation context (the client_id) and is
-  // best-effort — its failure must not undo a successful seal.
-  await recordAudit(env.CUSTODY_DB, userId, "capability_delegated", {
-    record_id: recordId,
-    client_id: summary.grant?.clientId,
+  await recordAudit(env.CUSTODY_DB, auth.userId, "collab_bundle_delivered", {
+    group_id: bundle.group_id,
   });
-
   return new Response(null, { status: 204 });
 }
 
+// ── Identity + bundle custody ────────────────────────────────────────────────
+
+/** Raised when a bundle is delivered before the connection keypair was created. */
+export class NoConnectionIdentityError extends Error {
+  constructor() {
+    super("no_connection_identity");
+    this.name = "NoConnectionIdentityError";
+  }
+}
+
 /**
- * Load + decrypt a user's custodied capability for a session (H3 entry point).
- * ════════════════════════════════════════════════════════════════════════════
- * H3 (the tools) will call this ONCE per authenticated MCP session to obtain the
- * in-memory Capability, use it to refresh the Layer-1 gateway token + dispatch
- * tools, then `dispose()` it. We expose ONLY the load+decrypt here (no tools yet).
- *
- * Returns null if the user has no custodied capability. THROWS (fail-closed) if
- * OpenBao is unreachable (no live KEK) or the row fails AEAD/identity verification
- * — H3 must treat a throw as "custody unavailable", never as "no capability".
- * The caller OWNS the returned Capability and MUST `dispose()` it after use.
+ * Load (or first-run generate + seal) the connection's persistent X25519 keypair.
+ * Returns the public key (base64) + FULA-id. The SECRET never leaves the seal.
  */
-export async function loadCapabilityForSession(
+export async function loadOrGenerateMcpIdentity(
   env: CapabilityEnv,
   userId: string,
-): Promise<Capability | null> {
+): Promise<{ mcpPubB64: string; mcpFulaId: string }> {
   const bao = openBaoFromEnv(env);
-  return openCapability(env.CUSTODY_DB, bao, userId);
+  const existing = await openCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId);
+  if (existing) {
+    try {
+      const secret = base64ToBytes(existing.get().mcp_secret_b64);
+      const pub = publicKeyFromSecret(secret);
+      secret.fill(0);
+      return { mcpPubB64: publicKeyB64(pub), mcpFulaId: encodeFulaId(pub) };
+    } finally {
+      existing.dispose();
+    }
+  }
+  // First run: generate a fresh X25519 secret, seal it (no bundle yet).
+  const secret = crypto.getRandomValues(new Uint8Array(32));
+  try {
+    const pub = publicKeyFromSecret(secret);
+    await sealCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId, { mcp_secret_b64: bytesToBase64(secret) });
+    return { mcpPubB64: publicKeyB64(pub), mcpFulaId: encodeFulaId(pub) };
+  } finally {
+    secret.fill(0);
+  }
 }
 
-// ── Capability body validation ───────────────────────────────────────────────
-// Accept ONLY the five known string fields; reject anything missing/mistyped.
-// We do not store extra keys (avoids smuggling unexpected data into the blob).
-function validateCapability(body: unknown): CapabilityData | null {
+/**
+ * Re-seal the connection custody with the delivered bundle, PRESERVING the existing
+ * X25519 secret (the bundle was wrapped to its pubkey). Throws
+ * {@link NoConnectionIdentityError} if no keypair exists yet.
+ */
+export async function storeCollabBundle(
+  env: CapabilityEnv,
+  userId: string,
+  bundle: CollabBundleData,
+): Promise<void> {
+  const bao = openBaoFromEnv(env);
+  const existing = await openCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId);
+  if (!existing) throw new NoConnectionIdentityError();
+  try {
+    const mcpSecretB64 = existing.get().mcp_secret_b64;
+    await sealCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId, { mcp_secret_b64: mcpSecretB64, bundle });
+  } finally {
+    existing.dispose();
+  }
+}
+
+/**
+ * Open the raw sealed collab custody for a user (keypair + bundle). Returns null
+ * when there is no row. The caller OWNS the {@link Capability} and MUST dispose it.
+ * (Exposed for the keying-seam test + {@link loadCollabSession}.)
+ */
+export async function loadCollabCustody(
+  env: CapabilityEnv,
+  userId: string,
+): Promise<Capability<CollabCustodyData> | null> {
+  const bao = openBaoFromEnv(env);
+  return openCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId);
+}
+
+/**
+ * Build a {@link CollabSession} for a user: load the sealed keypair + bundle,
+ * recover the link secret with the keypair, and wire the write-token refresh.
+ * Returns null when there is no custody OR no delivered bundle (the AI has not
+ * been connected to a group yet). THROWS on custody/unwrap failure (fail-closed).
+ *
+ * The recovered link secret + refreshed write token live ONLY for this request
+ * (the session is per-tool-call; nothing secret is cached across isolates).
+ */
+export async function loadCollabSession(
+  env: CapabilityEnv,
+  userId: string,
+  fetchImpl: typeof fetch,
+): Promise<CollabSession | null> {
+  const cap = await loadCollabCustody(env, userId);
+  if (!cap) return null;
+  try {
+    const data = cap.get();
+    if (!data.bundle) return null; // keypair exists but no group bundle yet
+    const bundle = data.bundle;
+    const secret = base64ToBytes(data.mcp_secret_b64);
+    let linkSecret: Uint8Array;
+    let mcpPubB64: string;
+    try {
+      mcpPubB64 = publicKeyB64(publicKeyFromSecret(secret));
+      // Live path is fail-closed v5-only; the bare-envelope shape is enabled ONLY
+      // by the dev escape hatch (unset in production — see CapabilityEnv).
+      linkSecret = recoverLinkSecret(secret, bundle.wrapped_link_secret, {
+        allowBareEnvelope: env.COLLAB_ALLOW_BARE_HPKE === "1",
+      });
+    } finally {
+      secret.fill(0);
+    }
+
+    let writeToken: string | undefined = bundle.collab_write_token;
+    const session: CollabSession = {
+      fetchImpl,
+      webuiBase: bundle.webui_base,
+      groupId: bundle.group_id,
+      manifestBucket: bundle.manifest_bucket,
+      linkSecret,
+      mcpPublicB64: mcpPubB64,
+      collabWriteToken: () => writeToken,
+      setCollabWriteToken: (t: string) => {
+        writeToken = t;
+      },
+      refreshUrl: bundle.refresh_url,
+      refreshToken: bundle.refresh_token,
+    };
+    return session;
+  } finally {
+    cap.dispose(); // best-effort zeroize the sealed plaintext (keypair + bundle)
+  }
+}
+
+// ── Bundle validation ────────────────────────────────────────────────────────
+
+/** Accept only the known fields; require the load-bearing ones; reject non-https URLs. */
+function validateBundle(body: unknown): CollabBundleData | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
-  const need = (k: string): string | null =>
+  const req = (k: string): string | null =>
     typeof b[k] === "string" && (b[k] as string).length > 0 ? (b[k] as string) : null;
-  const workspace_secret = need("workspace_secret");
-  const mcp_secret = need("mcp_secret");
-  const refresh_token = need("refresh_token");
-  const refresh_url = need("refresh_url");
-  const endpoint = need("endpoint");
-  if (!workspace_secret || !mcp_secret || !refresh_token || !refresh_url || !endpoint) {
-    return null;
-  }
-  // refresh_url / endpoint must be https URLs (no plaintext exfil targets).
-  if (!isHttpsUrl(refresh_url) || !isHttpsUrl(endpoint)) return null;
-  return { workspace_secret, mcp_secret, refresh_token, refresh_url, endpoint };
+  const webui_base = req("webui_base");
+  const group_id = req("group_id");
+  const manifest_bucket = req("manifest_bucket");
+  const manifest_key = req("manifest_key");
+  const wrapped_link_secret = req("wrapped_link_secret");
+  if (!webui_base || !group_id || !manifest_bucket || !manifest_key || !wrapped_link_secret) return null;
+  if (!isHttpsOrLoopback(webui_base)) return null;
+  const refresh_url = typeof b.refresh_url === "string" && b.refresh_url ? b.refresh_url : undefined;
+  if (refresh_url !== undefined && !isHttpsOrLoopback(refresh_url)) return null;
+
+  const out: CollabBundleData = { webui_base, group_id, manifest_bucket, manifest_key, wrapped_link_secret };
+  if (typeof b.collab_write_token === "string" && b.collab_write_token) out.collab_write_token = b.collab_write_token;
+  if (typeof b.refresh_token === "string" && b.refresh_token) out.refresh_token = b.refresh_token;
+  if (refresh_url) out.refresh_url = refresh_url;
+  if (typeof b.user_id === "string" && b.user_id) out.user_id = b.user_id;
+  return out;
 }
 
-function isHttpsUrl(s: string): boolean {
+/** https:// anywhere, or http:// only for an EXACT loopback host (dev). */
+function isHttpsOrLoopback(s: string): boolean {
+  let u: URL;
   try {
-    return new URL(s).protocol === "https:";
+    u = new URL(s);
   } catch {
     return false;
   }
+  if (u.protocol === "https:") return true;
+  if (u.protocol === "http:") {
+    return u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]" || u.hostname === "::1";
+  }
+  return false;
+}
+
+// ── Shared auth (token unwrap + scope + verified user_id) ─────────────────────
+
+/** Authenticate the caller as a specific Fula user, or return a 4xx Response. */
+async function authenticateUser(
+  request: Request,
+  env: CapabilityEnv,
+): Promise<{ userId: string } | Response> {
+  const bearer = extractBearer(request);
+  if (!bearer) return unauthorized("missing_bearer");
+  const summary = await env.OAUTH_PROVIDER.unwrapToken<FulaAuthProps>(bearer);
+  if (!summary) return unauthorized("invalid_token");
+  const scopes = summary.scope ?? summary.grant?.scope ?? [];
+  if (!scopes.includes("mcp")) return unauthorized("insufficient_scope");
+
+  const props = summary.grant?.props ?? {};
+  const tokenUserId = summary.userId;
+  let userId = tokenUserId;
+  if (typeof props.email === "string" && props.email) {
+    const derived = await emailToUserId(props.email);
+    if (derived !== tokenUserId) return unauthorized("identity_mismatch");
+    userId = derived;
+  } else if (typeof props.userId === "string" && props.userId !== tokenUserId) {
+    return unauthorized("identity_mismatch");
+  }
+  if (!/^[0-9a-f]{64}$/.test(userId)) return unauthorized("invalid_subject");
+  return { userId };
 }
 
 // ── Append-only audit ────────────────────────────────────────────────────────
 /**
- * Insert an audit row. `detail` is a small JSON object of NON-SECRET context —
- * never the capability, the DEK, or any plaintext secret. Best-effort: an audit
- * write failure must not mask the primary outcome, but we surface nothing secret.
+ * Insert an audit row. `detail` is a small JSON object of NON-SECRET context.
+ * Best-effort: an audit write failure must not mask the primary outcome.
  */
 export async function recordAudit(
   db: D1Like,
@@ -225,9 +399,7 @@ export async function recordAudit(
 ): Promise<void> {
   try {
     await db
-      .prepare(
-        `INSERT INTO mcp_audit (user_id, action, ts, detail) VALUES (?1, ?2, ?3, ?4)`,
-      )
+      .prepare(`INSERT INTO mcp_audit (user_id, action, ts, detail) VALUES (?1, ?2, ?3, ?4)`)
       .bind(userId, action, Math.floor(Date.now() / 1000), JSON.stringify(detail))
       .run();
   } catch {
@@ -246,16 +418,22 @@ function extractBearer(request: Request): string | null {
 function unauthorized(error: string): Response {
   return new Response(JSON.stringify({ error }), {
     status: 401,
-    headers: {
-      "content-type": "application/json",
-      "WWW-Authenticate": `Bearer error="${error}"`,
-    },
+    headers: { "content-type": "application/json", "WWW-Authenticate": `Bearer error="${error}"` },
   });
 }
 
 function json(status: number, obj: unknown): Response {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
+  return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+}
+
+function base64ToBytes(s: string): Uint8Array {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  return btoa(bin);
 }

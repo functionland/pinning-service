@@ -69,10 +69,11 @@ describe("fula-client WASM — init + version pin", () => {
   });
 
   it("is pinned to the SAME version FxFiles ships (byte-format parity guard)", () => {
-    // FxFiles uses `fula_client ^0.6.16`; if these ever diverge, the on-disk
-    // envelope/metadata format may differ silently — fail loudly here instead.
+    // FxFiles ships `fula_client ^0.6.19` (post the Method-2 recipient bindings); if
+    // these ever diverge, the on-disk envelope/metadata format may differ silently —
+    // fail loudly here instead.
     expect(getVersion()).toBe(PINNED_FULA_CLIENT_VERSION);
-    expect(getVersion()).toBe("0.6.16");
+    expect(getVersion()).toBe("0.6.19");
   });
 });
 

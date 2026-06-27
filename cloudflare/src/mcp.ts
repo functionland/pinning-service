@@ -25,17 +25,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
 import { z } from "zod";
 import { emailToUserId } from "./userId.js";
-import type { CapabilityEnv } from "./capability.js";
+import { loadCollabSession, type CapabilityEnv } from "./capability.js";
 import {
   storeFile,
   readFile,
   listFiles,
   search,
-  tagFile,
-  listTags,
+  createFolder,
+  removeFile,
+  type CollabSession,
   type ToolResult,
-} from "./fula/tools.js";
+} from "./fula/collab/tools.js";
 import { CATEGORIES } from "./fula/classify.js";
+import { decodeContent, ContentError } from "./fula/content.js";
 
 /** Path the MCP Streamable-HTTP endpoint is served at. Must equal the
  *  OAuthProvider `apiRoute` in index.ts and the `resource` in the RFC 9728
@@ -94,20 +96,51 @@ async function resolveUserId(): Promise<string | null> {
   return resolveUserIdFromProps(auth?.props as FulaAuthProps | undefined);
 }
 
-/** Wrap a tool body with identity resolution + a uniform "not authenticated". */
-async function withUser(
-  run: (userId: string) => Promise<ToolResult>,
+/** A tool result for an unrecoverable pre-flight failure (not authed / not connected). */
+function toolError(text: string): ToolResult {
+  return { isError: true, content: [{ type: "text", text }] };
+}
+
+/**
+ * Resolve the identity, load the per-connection collaboration session, and run
+ * `body` against it. Surfaces a friendly message when the AI has no Fula identity
+ * or has not been connected to a collaboration group yet (no bundle delivered).
+ */
+async function withCollabSession(
+  env: CapabilityEnv,
+  body: (session: CollabSession) => Promise<ToolResult>,
 ): Promise<ToolResult> {
   const userId = await resolveUserId();
-  if (!userId) {
-    return {
-      isError: true,
-      content: [
-        { type: "text", text: "Not authenticated: no Fula identity in this MCP session." },
-      ],
-    };
+  if (!userId) return toolError("Not authenticated: no Fula identity in this MCP session.");
+  let session: CollabSession | null;
+  try {
+    // The global fetch must keep its `this` (globalThis) inside Workers.
+    session = await loadCollabSession(env, userId, fetch.bind(globalThis));
+  } catch {
+    return toolError(
+      "Could not open your collaboration connection (the link secret could not be recovered — " +
+        "the connection may need to be re-authorized from FxFiles).",
+    );
   }
-  return run(userId);
+  if (!session) {
+    return toolError(
+      "No collaboration group is connected to this AI yet. Open FxFiles, connect this AI assistant " +
+        "to a collaboration group, then retry.",
+    );
+  }
+  try {
+    return await body(session);
+  } finally {
+    // Best-effort wipe the recovered link secret from isolate memory once the tool
+    // call completes — it derives every manifest + collab-file key (GLM-5.2 review).
+    // JS gives no hard zeroization guarantee, but we own this buffer and the session
+    // is per-request + discarded; the returned ToolResult never references it.
+    try {
+      session.linkSecret.fill(0);
+    } catch {
+      /* noop */
+    }
+  }
 }
 
 /**
@@ -177,135 +210,131 @@ export function buildServer(env?: CapabilityEnv): McpServer {
     },
   );
 
-  // ── The workspace tools (H3) ───────────────────────────────────────────────
-  // Only registered when a real env is supplied (they need custody + OpenBao).
-  // The `env` is closed over per request — there is no ambient env inside a tool
-  // callback in Workers, so capturing it here is how the tools reach custody.
+  // ── The collaboration tools ────────────────────────────────────────────────
+  // Only registered when a real env is supplied (they need custody + OpenBao to
+  // load the per-connection bundle). Every tool operates over the ONE collaboration
+  // group the AI connection was bound to (no `ai/` workspace scope). The `env` is
+  // closed over per request — there is no ambient env in a tool callback in Workers.
   if (env) {
     const categoryEnum = z.enum(CATEGORIES);
 
     server.registerTool(
       "fula_store_file",
       {
-        title: "Store a file in the AI workspace",
+        title: "Store a file in the collaboration group",
         description:
-          "Encrypt and upload a file into your private AI workspace (a dedicated, " +
-          "end-to-end-encrypted area, FxFiles-compatible format). Returns the key " +
-          "you use to read it back. `encoding` MUST be 'base64' for binary files " +
-          "and 'utf8' for text — choosing wrong corrupts the bytes. Files are " +
-          "AI-workspace-private: the AI can read them back; the FxFiles app cannot " +
-          "yet read AI-written files.",
+          "Encrypt and upload a file into the connected collaboration group (shared, " +
+          "end-to-end-encrypted with the group link). Returns the file_id you use to " +
+          "read or remove it. `encoding` MUST be 'base64' for binary files and 'utf8' " +
+          "for text — choosing wrong corrupts the bytes. Use `subfolder` (e.g. '/notes') " +
+          "to place it in a folder.",
         inputSchema: {
           content: z.string().describe("File contents, encoded per `encoding`."),
-          encoding: z
-            .enum(["utf8", "base64"])
-            .describe("'utf8' for text, 'base64' for binary. Required."),
-          name: z.string().optional().describe("Filename (drives category + key)."),
+          encoding: z.enum(["utf8", "base64"]).describe("'utf8' for text, 'base64' for binary. Required."),
+          name: z.string().describe("Filename (drives the category + logical path)."),
           mime: z.string().optional().describe("MIME type, e.g. image/png."),
-          tags: z.array(z.string()).optional().describe("Optional tags (advisory)."),
+          subfolder: z.string().optional().describe("Containing folder, e.g. '/notes' (omit for the group root)."),
           category: categoryEnum.optional().describe("Override the auto category."),
         },
       },
       async (a) =>
-        withUser((userId) =>
-          storeFile(env, userId, {
-            content: a.content,
-            encoding: a.encoding,
-            name: a.name,
+        withCollabSession(env, (session) => {
+          let data: Uint8Array;
+          try {
+            data = decodeContent(a.content, a.encoding);
+          } catch (e) {
+            return Promise.resolve(toolError(e instanceof ContentError ? e.message : "invalid content"));
+          }
+          const isText = a.encoding === "utf8";
+          return storeFile(session, {
+            data,
+            fileName: a.name,
             mime: a.mime,
-            tags: a.tags,
+            text: isText ? a.content : undefined,
+            subfolder: a.subfolder,
             category: a.category,
-          }),
-        ),
+          });
+        }),
     );
 
     server.registerTool(
       "fula_read_file",
       {
-        title: "Read a file from the AI workspace",
+        title: "Read a file from the collaboration group",
         description:
-          "Download and decrypt one of YOUR AI-workspace files by its key " +
-          "(ai/<category>/<id>-<name>). Returns the content. Defaults to 'base64' " +
-          "(lossless for any bytes); pass encoding 'utf8' to get text directly " +
-          "(errors if the file is not valid UTF-8).",
+          "Download and decrypt a group file by its `file_id` (from fula_store_file / " +
+          "fula_list_files) or by its logical `path`. Returns base64 content. Files the " +
+          "FxFiles owner added (owner-encrypted) are not yet readable via the hosted MCP.",
         inputSchema: {
-          key: z.string().describe("The workspace key returned by fula_store_file."),
-          encoding: z
-            .enum(["utf8", "base64"])
-            .optional()
-            .describe("Output encoding; default 'base64'."),
+          file_id: z.string().optional().describe("The file id returned by fula_store_file / fula_list_files."),
+          path: z.string().optional().describe("Alternatively, the file's logical path, e.g. '/notes/memo.txt'."),
         },
       },
-      async (a) =>
-        withUser((userId) => readFile(env, userId, { key: a.key, encoding: a.encoding })),
+      async (a) => withCollabSession(env, (session) => readFile(session, { fileId: a.file_id, path: a.path })),
     );
 
     server.registerTool(
       "fula_list_files",
       {
-        title: "List AI-workspace files",
+        title: "List collaboration-group files",
         description:
-          "List the files in your AI workspace (confined to the ai/ scope), " +
-          "optionally filtered by category or a key substring.",
+          "List the files in the connected collaboration group, optionally narrowed by " +
+          "a `folder` (e.g. '/notes') or `category`. Set `include_directories` to also " +
+          "return folder markers (for building a tree).",
         inputSchema: {
+          folder: z.string().optional().describe("Only entries under this folder."),
           category: categoryEnum.optional().describe("Only this category."),
-          prefix: z.string().optional().describe("Keep keys containing this substring."),
+          include_directories: z.boolean().optional().describe("Include folder markers (default false)."),
         },
       },
       async (a) =>
-        withUser((userId) => listFiles(env, userId, { category: a.category, prefix: a.prefix })),
+        withCollabSession(env, (session) =>
+          listFiles(session, { folder: a.folder, category: a.category, includeDirectories: a.include_directories }),
+        ),
     );
 
-    // ── fula_search (H3b) ───────────────────────────────────────────────────
     server.registerTool(
       "fula_search",
       {
-        title: "Search AI-workspace files",
+        title: "Search collaboration-group files",
         description:
-          "Search YOUR AI workspace by filename: returns files whose name contains " +
-          "`query` (case-insensitive substring; an empty query returns every file). " +
-          "Optionally pass `tag` to also restrict to files carrying that tag name " +
-          "(combined with the name match). Only your own ai/ workspace is searched.",
+          "Search the connected group by filename or path: returns files whose name or " +
+          "logical path contains `query` (case-insensitive substring). An empty query " +
+          "returns nothing.",
         inputSchema: {
-          query: z.string().describe("Filename substring (case-insensitive; empty matches all)."),
-          tag: z
-            .string()
-            .optional()
-            .describe("Optional: also require this tag name (AND-combined with query)."),
+          query: z.string().describe("Filename / path substring (case-insensitive; empty returns nothing)."),
         },
       },
-      async (a) => withUser((userId) => search(env, userId, { query: a.query, tag: a.tag })),
+      async (a) => withCollabSession(env, (session) => search(session, a.query)),
     );
 
-    // ── fula_tag_file (H3b) ─────────────────────────────────────────────────
     server.registerTool(
-      "fula_tag_file",
+      "fula_create_folder",
       {
-        title: "Tag an AI-workspace file",
+        title: "Create a folder in the collaboration group",
         description:
-          "Add one or more tags to one of YOUR AI-workspace files (by its key from " +
-          "fula_store_file / fula_list_files). Tags are written in FxFiles' native " +
-          "tag format so the FxFiles app can later adopt them. Tag names dedupe " +
-          "case-insensitively; re-tagging the same file with the same tag is a no-op.",
+          "Create a folder (directory marker) at `path` (e.g. '/notes/2026') in the " +
+          "connected group, so subsequent files can be organized under it.",
         inputSchema: {
-          key: z.string().describe("The workspace file key (ai/<category>/<id>-<name>)."),
-          tags: z.array(z.string()).describe("One or more tag names to apply. Required."),
+          path: z.string().describe("The folder path to create, e.g. '/notes/2026'."),
         },
       },
-      async (a) => withUser((userId) => tagFile(env, userId, { key: a.key, tags: a.tags })),
+      async (a) => withCollabSession(env, (session) => createFolder(session, a.path)),
     );
 
-    // ── fula_list_tags (H3b) ────────────────────────────────────────────────
     server.registerTool(
-      "fula_list_tags",
+      "fula_remove_file",
       {
-        title: "List AI-workspace tags",
+        title: "Remove a file from the collaboration group",
         description:
-          "List all tags in your AI workspace (the FxFiles-format tag cloud): each " +
-          "tag's name, color, and how many files carry it.",
-        inputSchema: {},
+          "Remove a file from the group manifest by its `file_id` (a tombstone — the " +
+          "encrypted object is NOT globally deleted, so other members are unaffected). " +
+          "Idempotent: removing an absent id is a no-op.",
+        inputSchema: {
+          file_id: z.string().describe("The file id to remove (from fula_store_file / fula_list_files)."),
+        },
       },
-      async () => withUser((userId) => listTags(env, userId)),
+      async (a) => withCollabSession(env, (session) => removeFile(session, a.file_id)),
     );
   }
 

@@ -149,22 +149,24 @@ function enforceCanonicalHost(request: Request, env: Env): Response | null {
 }
 
 /**
- * CORS for the custom `/capability` endpoint. It is called CROSS-ORIGIN by the
- * FxFiles WEB app (e.g. https://files.fx.land → https://mcp.cloud.fx.land), so the
- * browser sends a preflight `OPTIONS` first. The OAuth endpoints (/authorize,
- * /token, /register) get the library's CORS, but `/capability` is a custom
- * apiHandler route, so the provider answers its `OPTIONS` with 405 — failing the
- * preflight and blocking the POST. We answer the preflight here and echo CORS on
- * the response. The Bearer access token remains the security boundary (CORS cannot
- * be abused without a valid token), so we reflect the request Origin to support any
- * FxFiles web deployment without a hardcoded allowlist.
+ * CORS for the custom `/collab/*` connect routes (`GET /collab/connection`,
+ * `POST /collab/bundle`). They are called CROSS-ORIGIN by the FxFiles WEB app
+ * (e.g. https://files.fx.land → https://mcp.cloud.fx.land), so the browser sends a
+ * preflight `OPTIONS` first. The OAuth endpoints get the library's CORS, but these
+ * are custom defaultHandler routes, so we answer the preflight here and echo CORS
+ * on the response. The Bearer access token remains the security boundary (CORS
+ * cannot be abused without a valid token), so we reflect the request Origin to
+ * support any FxFiles web deployment without a hardcoded allowlist.
  */
-const CAPABILITY_PATH = "/capability";
+const COLLAB_PATH_PREFIX = "/collab/";
+function isCollabPath(pathname: string): boolean {
+  return pathname.startsWith(COLLAB_PATH_PREFIX);
+}
 function capabilityCorsHeaders(request: Request): Record<string, string> {
   const origin = request.headers.get("Origin");
   return {
     "Access-Control-Allow-Origin": origin ?? "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
@@ -174,16 +176,16 @@ function capabilityCorsHeaders(request: Request): Record<string, string> {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    // Cross-origin preflight for the FxFiles-web → /capability POST (see above).
-    if (request.method === "OPTIONS" && url.pathname === CAPABILITY_PATH) {
+    // Cross-origin preflight for the FxFiles-web → /collab/* connect routes (see above).
+    if (request.method === "OPTIONS" && isCollabPath(url.pathname)) {
       return new Response(null, { status: 204, headers: capabilityCorsHeaders(request) });
     }
     const blocked = enforceCanonicalHost(request, env);
     if (blocked) return blocked;
     const provider = buildOAuthProvider(env.CANONICAL_ORIGIN || url.origin);
     const response = await provider.fetch(request, env, ctx);
-    // Echo CORS on the /capability response so the browser can read the result.
-    if (url.pathname === CAPABILITY_PATH) {
+    // Echo CORS on the /collab/* response so the browser can read the result.
+    if (isCollabPath(url.pathname)) {
       const headers = new Headers(response.headers);
       for (const [key, value] of Object.entries(capabilityCorsHeaders(request))) {
         headers.set(key, value);

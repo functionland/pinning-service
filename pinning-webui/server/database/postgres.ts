@@ -1096,6 +1096,27 @@ export interface McpConnectionScope {
   collab?: { groupIds: string[] };
 }
 
+/**
+ * ADDITIVE (hosted-MCP collab bundle): the pointers + wrapped group link secret
+ * a paired AI connection needs to act on ONE collaboration group. Stored on the
+ * connection row (nullable `bundle` column) by C1 (POST /api/mcp/connections/bundle,
+ * user-authed) and read back by C2 (GET .../by-pubkey/:pubkey/bundle, service-authed)
+ * so the hosted Worker can build a CollabSession.
+ *
+ * `wrapped_link_secret` is CIPHERTEXT — a fula ShareToken JSON sealed to the
+ * connection's X25519 pubkey. Only the Worker holding the matching secret can
+ * unwrap it, so it is safe at rest here. `webui_base` is DELIBERATELY NOT stored:
+ * C2 derives it from its own request Host (the service-authed caller), re-validated
+ * by the Worker — narrowing the SSRF surface vs. persisting a broad-population C1
+ * client value.
+ */
+export interface McpConnectionBundle {
+  group_id: string;
+  manifest_bucket: string;
+  manifest_key: string;
+  wrapped_link_secret: string;
+}
+
 export interface McpConnectionRow {
   id: string;
   user_id: string;
@@ -1105,6 +1126,12 @@ export interface McpConnectionRow {
   revoked: boolean;
   created_at: string;
   last_refreshed_at: string | null;
+  /**
+   * OPTIONAL — only populated by queries that SELECT it (the by-pubkey bundle
+   * fetch). Most connection queries omit it, so treat `undefined` as "column not
+   * loaded" and `null` as "stored bundle is absent".
+   */
+  bundle?: McpConnectionBundle | null;
 }
 
 /** Fields needed to insert a connection (id/created_at default server-side). */
@@ -1137,6 +1164,20 @@ export async function createMcpConnectionsTable(): Promise<void> {
   `);
   // The refresh path looks up by refresh_token_hash; the UNIQUE constraint above
   // already creates a backing index, so no separate index is needed.
+
+  // ADDITIVE (hosted-MCP collab bundle): a nullable `bundle` JSONB holding the
+  // group pointers + wrapped link secret for a paired AI (see McpConnectionBundle).
+  // `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so the column is
+  // added via an idempotent ALTER that runs every boot (matches the
+  // createCollabWriteAuthSchema precedent). No data to migrate — bundles are new.
+  await query(`ALTER TABLE mcp_connections ADD COLUMN IF NOT EXISTS bundle JSONB`).catch(() => {});
+  // The by-pubkey bundle fetch (C2) selects the newest non-revoked row for
+  // (user_id, mcp_pub_b64); a partial index keeps that lookup cheap.
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_mcp_connections_user_pub_live
+      ON mcp_connections(user_id, mcp_pub_b64, created_at DESC)
+      WHERE NOT revoked
+  `).catch(() => {});
 }
 
 /**
@@ -1331,6 +1372,83 @@ export async function deauthorizeCollabGroupsForConnection(
   if ((upd.rowCount || 0) === 0) return null;
   row.scope = upd.rows[0].scope;
   return row;
+}
+
+// ============================================
+// Hosted-MCP collab bundle — store (C1) + by-pubkey fetch (C2)
+// ============================================
+
+/**
+ * Find the CURRENT connection for (userId, pubkey): the newest non-revoked row.
+ * Used by C1 (POST /api/mcp/connections/bundle) to resolve which row a bundle
+ * attaches to when no explicit connectionId is supplied, and to check the
+ * bundle's group_id against the row's authorized collab groups BEFORE storing.
+ * SELECTs `scope` (for that check) but NOT `bundle`. `mcpPubB64` MUST already be
+ * the canonical standard-base64 form (the caller normalizes it). Returns the row
+ * or null.
+ */
+export async function findNewestMcpConnectionByPubkey(
+  userId: string,
+  mcpPubB64: string,
+): Promise<McpConnectionRow | null> {
+  const result = await query<McpConnectionRow>(
+    `SELECT id, user_id, mcp_pub_b64, label, scope, revoked, created_at, last_refreshed_at
+       FROM mcp_connections
+      WHERE user_id = $1 AND mcp_pub_b64 = $2 AND NOT revoked
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1`,
+    [userId, mcpPubB64],
+  );
+  return result.rows[0] ?? null;
+}
+
+/**
+ * Attach/overwrite the collab bundle on a specific connection row. USER-SCOPED
+ * and re-asserts NOT revoked in the WHERE, so a connection revoked between the
+ * caller's resolve and this write is never modified (returns null → the route
+ * fails closed). Overwrite is intentional — MVP is one group per agent, so
+ * re-pairing replaces the prior bundle. Returns the updated id, or null when the
+ * row is missing / not this user's / revoked.
+ */
+export async function setMcpConnectionBundleById(
+  id: string,
+  userId: string,
+  bundle: McpConnectionBundle,
+): Promise<string | null> {
+  const result = await query<{ id: string }>(
+    `UPDATE mcp_connections SET bundle = $1
+       WHERE id = $2 AND user_id = $3 AND NOT revoked
+       RETURNING id`,
+    [JSON.stringify(bundle), id, userId],
+  );
+  return result.rows[0]?.id ?? null;
+}
+
+/**
+ * The C2 read: the newest non-revoked connection for (userId, pubkey) that HAS a
+ * stored bundle. Requiring a non-null bundle (not merely "newest") makes the read
+ * robust to a bundle-less newer row appearing after C1 (e.g. a bare re-mint
+ * between pairing and fetch) — C2 returns the last-bundled pairing rather than
+ * 404-ing, and it converges with C1's write target. SELECTs `scope` so the caller
+ * can mint the group-scoped collab token from the SAME row (co-locating the token
+ * scope with the bundle). CROSS-USER ISOLATION: the (user_id, pubkey) filter is
+ * in SQL, so a service-auth caller only ever sees a connection it owns.
+ * `mcpPubB64` MUST be canonical standard-base64. Returns the row (with `bundle`)
+ * or null.
+ */
+export async function findMcpConnectionWithBundleByPubkey(
+  userId: string,
+  mcpPubB64: string,
+): Promise<McpConnectionRow | null> {
+  const result = await query<McpConnectionRow>(
+    `SELECT id, user_id, mcp_pub_b64, label, scope, bundle, revoked, created_at, last_refreshed_at
+       FROM mcp_connections
+      WHERE user_id = $1 AND mcp_pub_b64 = $2 AND NOT revoked AND bundle IS NOT NULL
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1`,
+    [userId, mcpPubB64],
+  );
+  return result.rows[0] ?? null;
 }
 
 /**

@@ -63,6 +63,9 @@ import {
   listMcpConnectionsForUser,
   listRevokedConnectionPubkeys,
   findMcpConnectionById,
+  findNewestMcpConnectionByPubkey,
+  findMcpConnectionWithBundleByPubkey,
+  setMcpConnectionBundleById,
   authorizeCollabGroupsForConnection,
   deauthorizeCollabGroupsForConnection,
   createCollabManifestsTable,
@@ -83,6 +86,7 @@ import {
   MCP_TOKEN_USE,
 } from './mcpTokens.js';
 import { validateGrantsPayload } from './mcpGrants.js';
+import { validateBundlePayload } from './mcpBundle.js';
 import { newRefreshToken, hashRefreshToken, mintFromConnection, mintCollabFromConnection } from './mcpConnections.js';
 import {
   verifyCollabWriteToken,
@@ -2402,6 +2406,181 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
     } catch (error) {
       console.error('[webui] Error de-authorizing collab groups:', error);
       res.status(500).json({ error: 'Failed to de-authorize collab groups' });
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Hosted-MCP collab bundle — producer (C1) + by-pubkey consumer (C2)
+  // ────────────────────────────────────────────────────────────────────────
+  //
+  // A paired AI (hosted on a Cloudflare Worker) holds an X25519 keypair per
+  // (user, oauth client). To let it act on ONE collaboration group, the FxFiles
+  // app (authed AS THE USER) stores a "bundle" for the AI's pubkey (C1): the
+  // group pointers + the group link secret WRAPPED (sealed) to that pubkey. The
+  // Worker later fetches the bundle BY PUBKEY (C2, service-auth'd) and unwraps it
+  // with its keypair to build a CollabSession.
+  //
+  // ISOLATION: a bundle is keyed to (user_id, pubkey). C1 attaches it to the
+  // caller's OWN connection; C2 returns it ONLY to a service-auth caller that
+  // asserts the SAME user_id (the (user_id, pubkey) filter is in SQL).
+  // `wrapped_link_secret` is ciphertext — safe at rest, and even a hypothetical
+  // isolation slip leaks only ciphertext, never a usable key.
+
+  // C1 — the user (session or Bearer api-key) publishes the bundle for an AI
+  // pubkey. `connection_id` (optional) pins the exact row the pairing just minted;
+  // otherwise the newest non-revoked connection for (user, pubkey). The bundle's
+  // group_id MUST already be authorized on that connection (POST .../collab-groups)
+  // so C2 can always mint a collab token that covers it → 409 otherwise.
+  app.post('/api/mcp/connections/bundle', requireSessionOrBearer, async (req: Request, res: Response) => {
+    try {
+      const userId = mcpResolveUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+
+      const validated = validateBundlePayload(req.body);
+      if (!validated.ok) {
+        return res.status(validated.status).json({ error: validated.error });
+      }
+      const { mcpPubB64, connectionId, bundle } = validated.value;
+
+      // Resolve the target connection row.
+      let conn;
+      if (connectionId) {
+        conn = await findMcpConnectionById(connectionId);
+        // Must exist, be the caller's, live, and bound to the SAME pubkey the
+        // secret was wrapped to (else the Worker could never unwrap it).
+        if (!conn || conn.user_id !== userId || conn.revoked || conn.mcp_pub_b64 !== mcpPubB64) {
+          return res.status(404).json({ error: 'Connection not found, not yours, revoked, or pubkey mismatch' });
+        }
+      } else {
+        conn = await findNewestMcpConnectionByPubkey(userId, mcpPubB64);
+        if (!conn) {
+          return res.status(404).json({ error: 'No connection for this pubkey — pair the AI first' });
+        }
+      }
+
+      // The bundle's group MUST be authorized on this connection: C2 mints the
+      // collab-write token from the row's scope.collab.groupIds (server truth), so
+      // a group_id outside that set could never be written by the AI. Reject at
+      // store time with a clear signal (authorize the group first).
+      const authorizedGroups = Array.isArray(conn.scope?.collab?.groupIds) ? conn.scope.collab!.groupIds : [];
+      if (!authorizedGroups.includes(bundle.group_id)) {
+        return res.status(409).json({ error: 'bundle group_id is not authorized on this connection — authorize the group first' });
+      }
+
+      const storedId = await setMcpConnectionBundleById(conn.id, userId, bundle);
+      if (!storedId) {
+        // Row revoked/removed between resolve and write — fail closed.
+        return res.status(409).json({ error: 'Connection no longer available' });
+      }
+
+      console.log(
+        `[webui] MCP bundle stored by ${userId.slice(0, 8)}… conn=${storedId.slice(0, 8)}… ` +
+          `pub=${mcpPubB64.slice(0, 8)}… group=${bundle.group_id.slice(0, 8)}…`,
+      );
+
+      res.json({ ok: true, connectionId: storedId, groupId: bundle.group_id });
+    } catch (error) {
+      console.error('[webui] Error storing MCP bundle:', error);
+      res.status(500).json({ error: 'Failed to store bundle' });
+    }
+  });
+
+  // C2 — the Worker fetches the bundle BY PUBKEY. Auth is the HMAC service-auth
+  // header ONLY (asserts the Worker's authenticated user_id); NEVER session/Bearer.
+  // Returns the stored bundle + a FRESH short-lived collab-write token minted from
+  // the connection's stored scope. `webui_base` is derived from THIS request's Host
+  // (the service-authed caller), NOT a stored C1 body value — a narrowing, since
+  // only a service-auth holder can influence it, and the Worker re-validates it
+  // (https/loopback). A configured canonical origin would be strictly more robust
+  // (see S3/S5).
+  //
+  // `:pubkey` MUST be base64url — a standard-base64 pubkey contains '/' and '+',
+  // which don't survive a path segment. normalizeMcpPubB64 re-canonicalizes it to
+  // the stored standard-base64 form for the lookup.
+  //
+  // This endpoint is under the global /api/ IP rate limiter, so the Worker MUST
+  // cache the (static) bundle + reuse the collab token until near its <=10-min
+  // expiry — reads need no C2 call at all.
+  app.get('/api/mcp/connections/by-pubkey/:pubkey/bundle', async (req: Request, res: Response) => {
+    try {
+      // Service-auth ONLY (fail-closed): a present-but-invalid header is a 401,
+      // never a fall-through to session/Bearer. `?? ''` is SAFE — verifyServiceAuth
+      // rejects an empty/'disabled' secret (returns null → 401), so a missing
+      // FULA_PIN_SERVICE_SECRET DISABLES the endpoint (fail-closed), never fail-open.
+      // (Same call shape as the existing /api/v1/storage service-auth path.)
+      const svcAuth = req.headers[SERVICE_AUTH_HEADER];
+      const userId = typeof svcAuth === 'string' ? verifyServiceAuth(svcAuth, config.pinServiceSecret ?? '') : null;
+      if (!userId) {
+        return res.status(401).json({ error: 'Invalid service authentication' });
+      }
+
+      const pubkey = normalizeMcpPubB64(req.params.pubkey);
+      if (!pubkey) {
+        return res.status(400).json({ error: 'pubkey must be base64url of a 32-byte X25519 public key' });
+      }
+
+      // The (user_id, pubkey) filter is in SQL — the cross-user isolation boundary.
+      const conn = await findMcpConnectionWithBundleByPubkey(userId, pubkey);
+      if (!conn || !conn.bundle) {
+        return res.status(404).json({ error: 'No bundle for this connection' });
+      }
+
+      // The bundle's group must STILL be authorized on the connection. A group
+      // de-authorized AFTER the bundle was stored (DELETE .../collab-groups) makes
+      // the bundle stale — withhold it (revokes the AI's READ access to that group
+      // on the next fetch, not just its writes), mirroring C1's store-time check.
+      // Same 404 as "no bundle" — no oracle for the distinction.
+      const liveGroups = Array.isArray(conn.scope?.collab?.groupIds) ? conn.scope.collab!.groupIds : [];
+      if (!liveGroups.includes(conn.bundle.group_id)) {
+        return res.status(404).json({ error: 'No bundle for this connection' });
+      }
+
+      // Mint a fresh short-lived collab-write token from the STORED scope (groups
+      // come ONLY off the row). The group_id-authorized check above guarantees a
+      // non-empty scope, so a token is minted; the `collab ?` guard stays as
+      // fail-closed defense. The write path re-checks revocation synchronously, so
+      // a token minted here for a just-revoked connection is still denied on use.
+      const collab = mintCollabFromConnection(
+        { id: conn.id, user_id: conn.user_id, mcp_pub_b64: conn.mcp_pub_b64, scope: conn.scope },
+        config.jwtSecret,
+      );
+
+      // Derived from THIS request's Host (respecting the trusted proxy), NOT a
+      // stored C1 body value. Host is itself client-supplied, so this NARROWS —
+      // rather than eliminates — the SSRF surface: only a service-auth caller can
+      // set it, and the Worker independently re-validates https/loopback before it
+      // fetches. A configured canonical origin would be strictly more robust.
+      const webuiBase = `${req.protocol}://${req.get('host')}`;
+
+      // GET returns a bearer token — no caching by intermediaries / the browser.
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+      res.set('Pragma', 'no-cache');
+
+      console.log(
+        `[webui] MCP bundle fetch user=${userId.slice(0, 8)}… conn=${conn.id.slice(0, 8)}… ` +
+          `pub=${pubkey.slice(0, 8)}… group=${conn.bundle.group_id.slice(0, 8)}…` +
+          (collab ? ` +collab(groups=${collab.claims.collab.groupIds.length})` : ' (no collab token)'),
+      );
+
+      res.json({
+        group_id: conn.bundle.group_id,
+        manifest_bucket: conn.bundle.manifest_bucket,
+        manifest_key: conn.bundle.manifest_key,
+        webui_base: webuiBase,
+        wrapped_link_secret: conn.bundle.wrapped_link_secret,
+        ...(collab
+          ? {
+              collab_write_token: collab.token,
+              collab_expires_at: collab.claims.exp,
+              collab_group_ids: collab.claims.collab.groupIds,
+            }
+          : {}),
+      });
+    } catch (error) {
+      console.error('[webui] Error fetching MCP bundle:', error);
+      res.status(500).json({ error: 'Failed to fetch bundle' });
     }
   });
 

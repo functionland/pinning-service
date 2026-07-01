@@ -64,7 +64,7 @@ import {
   type CollabBundleData,
 } from "../src/capability.js";
 import { emailToUserId } from "../src/userId.js";
-import { resolveUserIdFromProps, type FulaAuthProps } from "../src/mcp.js";
+import { resolveUserIdFromProps, resolveClientIdFromProps, type FulaAuthProps } from "../src/mcp.js";
 import type { D1Like } from "../src/custody.js";
 
 // The same human on BOTH sides of the seam.
@@ -112,8 +112,9 @@ function bundleRequest(body: unknown = BUNDLE): Request {
 
 beforeAll(async () => {
   const d1 = env.CUSTODY_DB as unknown as { exec(q: string): Promise<unknown> };
+  await d1.exec("DROP TABLE IF EXISTS mcp_capabilities");
   await d1.exec(
-    "CREATE TABLE IF NOT EXISTS mcp_capabilities (user_id TEXT PRIMARY KEY NOT NULL, record_id TEXT NOT NULL, capability_ciphertext BLOB NOT NULL, wrapped_dek TEXT NOT NULL, dek_version INTEGER NOT NULL DEFAULT 1, alg TEXT NOT NULL, endpoint TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER)",
+    "CREATE TABLE IF NOT EXISTS mcp_capabilities (user_id TEXT NOT NULL, client_id TEXT NOT NULL, record_id TEXT NOT NULL, capability_ciphertext BLOB NOT NULL, wrapped_dek TEXT NOT NULL, dek_version INTEGER NOT NULL DEFAULT 1, alg TEXT NOT NULL, endpoint TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER, PRIMARY KEY (user_id, client_id))",
   );
   await d1.exec(
     "CREATE TABLE IF NOT EXISTS mcp_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, action TEXT NOT NULL, ts INTEGER NOT NULL, detail TEXT)",
@@ -121,11 +122,25 @@ beforeAll(async () => {
   void db; // keep the helper referenced
 });
 
+describe("resolveClientIdFromProps — fail-closed per-AI keying (the live tool-dispatch path)", () => {
+  const base: FulaAuthProps = { email: "x@y.z", userId: "a".repeat(64) };
+  it("returns the client_id for well-formed props", () => {
+    expect(resolveClientIdFromProps({ ...base, clientId: "https://claude.ai" })).toBe("https://claude.ai");
+  });
+  it("returns null (fail closed) when client_id is absent / empty / non-string / over-length", () => {
+    expect(resolveClientIdFromProps(base)).toBeNull();
+    expect(resolveClientIdFromProps({ ...base, clientId: "" })).toBeNull();
+    expect(resolveClientIdFromProps({ ...base, clientId: 123 as unknown as string })).toBeNull();
+    expect(resolveClientIdFromProps({ ...base, clientId: "a".repeat(2049) })).toBeNull();
+    expect(resolveClientIdFromProps(undefined)).toBeNull();
+  });
+});
+
 describe("store ⇄ load collab-connection keying seam (always-on; mock OpenBao)", () => {
   it("CONNECT + deliver bundle, then LOAD by the H3-resolved key round-trips for the same human", async () => {
     // Build the grant `props` EXACTLY as google.ts does at federation.
     const lowered = EMAIL.toLowerCase();
-    const props: FulaAuthProps = { email: lowered, name: "Seam Tester", userId: await emailToUserId(lowered) };
+    const props: FulaAuthProps = { email: lowered, name: "Seam Tester", userId: await emailToUserId(lowered), clientId: "fxfiles" };
     const summary = { userId: props.userId, scope: ["mcp"], grant: { clientId: "fxfiles", props } };
 
     // STORE — drive the REAL connect handlers: keypair seal, then bundle re-seal.
@@ -143,7 +158,7 @@ describe("store ⇄ load collab-connection keying seam (always-on; mock OpenBao)
     expect(loadUserId).toMatch(/^[0-9a-f]{64}$/);
 
     // THE PROOF: the load finds + decrypts what the store sealed (keypair + bundle).
-    const cap = await loadCollabCustody(plainEnv(), loadUserId!);
+    const cap = await loadCollabCustody(plainEnv(), loadUserId!, "fxfiles");
     expect(cap).not.toBeNull();
     try {
       expect(typeof cap!.get().mcp_secret_b64).toBe("string");
@@ -161,13 +176,55 @@ describe("store ⇄ load collab-connection keying seam (always-on; mock OpenBao)
     };
     const otherUserId = await resolveUserIdFromProps(otherProps);
     expect(otherUserId).not.toBe(await emailToUserId(EMAIL.toLowerCase()));
-    const cap = await loadCollabCustody(plainEnv(), otherUserId!);
+    const cap = await loadCollabCustody(plainEnv(), otherUserId!, "fxfiles");
     expect(cap).toBeNull();
+  });
+
+  it("two AI clients for the SAME human get DISTINCT, isolated custody (claude ≠ chatgpt), EXECUTED", async () => {
+    // The per-AI isolation the whole feature promises — proven through the REAL
+    // store/load path with a mock OpenBao, so it runs WITHOUT a live KEK.
+    const lowered = EMAIL.toLowerCase();
+    const uid = await emailToUserId(lowered);
+    const CLAUDE = "https://claude.ai";
+    const CHATGPT = "https://chatgpt.com";
+    const sum = (clientId: string) => ({
+      userId: uid,
+      scope: ["mcp"],
+      grant: { clientId, props: { email: lowered, userId: uid, clientId } as FulaAuthProps },
+    });
+
+    // Each AI establishes its OWN connection keypair (same human, distinct client_id).
+    const cClaude = await handleCollabConnection(connectionRequest(), envWith(sum(CLAUDE)));
+    const cChatgpt = await handleCollabConnection(connectionRequest(), envWith(sum(CHATGPT)));
+    expect(cClaude.status).toBe(200);
+    expect(cChatgpt.status).toBe(200);
+    const idClaude = (await cClaude.json()) as { mcp_pub_b64: string };
+    const idChatgpt = (await cChatgpt.json()) as { mcp_pub_b64: string };
+    // DISTINCT public keys → distinct identities.
+    expect(idClaude.mcp_pub_b64).not.toBe(idChatgpt.mcp_pub_b64);
+
+    // Deliver a bundle to CLAUDE only.
+    expect((await handleCollabBundle(bundleRequest(), envWith(sum(CLAUDE)))).status).toBe(204);
+
+    // CLAUDE's custody has the bundle + its own secret; CHATGPT's is its OWN and
+    // has NO bundle — loading (uid, CHATGPT) never sees CLAUDE's data.
+    const capClaude = await loadCollabCustody(plainEnv(), uid, CLAUDE);
+    const capChatgpt = await loadCollabCustody(plainEnv(), uid, CHATGPT);
+    expect(capClaude).not.toBeNull();
+    expect(capChatgpt).not.toBeNull();
+    try {
+      expect(capClaude!.get().bundle?.group_id).toBe(BUNDLE.group_id);
+      expect(capChatgpt!.get().bundle).toBeUndefined();
+      expect(capClaude!.get().mcp_secret_b64).not.toBe(capChatgpt!.get().mcp_secret_b64);
+    } finally {
+      capClaude?.dispose();
+      capChatgpt?.dispose();
+    }
   });
 
   it("end-to-end through the OAuth-mounted Worker keys identically", async () => {
     const email = "seam-worker@example.com";
-    const props: FulaAuthProps = { email, userId: await emailToUserId(email) };
+    const props: FulaAuthProps = { email, userId: await emailToUserId(email), clientId: "fxfiles" };
     const summary = { userId: props.userId, scope: ["mcp"], grant: { clientId: "fxfiles", props } };
 
     const workerEnv = {
@@ -192,7 +249,7 @@ describe("store ⇄ load collab-connection keying seam (always-on; mock OpenBao)
 
     const loadUserId = await resolveUserIdFromProps(props);
     expect(loadUserId).toBe(await emailToUserId(email));
-    const cap = await loadCollabCustody(plainEnv(), loadUserId!);
+    const cap = await loadCollabCustody(plainEnv(), loadUserId!, "fxfiles");
     expect(cap).not.toBeNull();
     try {
       expect(cap!.get().bundle?.refresh_token).toBe(BUNDLE.refresh_token);

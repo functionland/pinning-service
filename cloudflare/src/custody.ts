@@ -32,16 +32,24 @@
  *     AAD to bind the row's identity (below).
  *
  * AAD — binds the ciphertext to the ROW IDENTITY (advisor-critical fix)
- *   AAD = domain-tag ‖ user_id ‖ record_id ‖ dek_version ‖ alg, each field
- *   length-prefixed (a deterministic, unambiguous binary encoding — NOT ad-hoc
- *   JSON). Binding `user_id` (not just `record_id`) is REQUIRED: the PK is
- *   user_id, so an attacker with D1 write who copies another user's ciphertext +
- *   wrapped_dek into a victim's row would otherwise decrypt successfully (cross-
- *   tenant escalation). With user_id in the AAD, that swap fails the Poly1305 tag.
- *   Binding `alg`/`dek_version` blocks an algorithm/format downgrade forge.
- *   DEFENSE IN DEPTH: user_id is ALSO embedded in the plaintext and re-checked
- *   after decryption, so even an AAD-construction bug cannot silently return
- *   another user's capability.
+ *   AAD = domain-tag ‖ user_id ‖ client_id ‖ record_id ‖ dek_version ‖ alg, each
+ *   field length-prefixed (a deterministic, unambiguous binary encoding — NOT
+ *   ad-hoc JSON). Binding `user_id` (not just `record_id`) is REQUIRED: an
+ *   attacker with D1 write who copies another user's ciphertext + wrapped_dek into
+ *   a victim's row would otherwise decrypt successfully (cross-tenant escalation);
+ *   with user_id in the AAD that swap fails the Poly1305 tag. Binding `client_id`
+ *   is the PER-AI ISOLATION boundary: the PK is (user_id, client_id), so each
+ *   connected AI (claude vs chatgpt) gets a DISTINCT record + keypair, and a D1
+ *   attacker who swaps one AI's ciphertext into another AI's row (same user) fails
+ *   the tag. Binding `alg`/`dek_version` blocks an algorithm/format downgrade.
+ *   DEFENSE IN DEPTH: BOTH user_id AND client_id are ALSO embedded in the
+ *   plaintext and re-checked after decryption, so even an AAD-construction bug
+ *   cannot silently return another user's OR another AI's capability.
+ *
+ * FAIL-CLOSED on client_id: seal/open REQUIRE a non-empty client_id (no default,
+ * no sentinel). A missing/blank client_id throws BEFORE any crypto — two AIs must
+ * never collide on a shared key slot. (Cross-USER isolation is independent: even a
+ * client_id bug can't cross users, since user_id is in the PK + AAD + embedded check.)
  */
 
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
@@ -118,6 +126,7 @@ export class Capability<T extends Record<string, unknown> = CapabilityData> {
 /** A row as persisted in D1 (mirrors schema.sql). */
 interface CapabilityRow {
   user_id: string;
+  client_id: string;
   record_id: string;
   capability_ciphertext: ArrayBuffer | Uint8Array;
   wrapped_dek: string;
@@ -141,12 +150,38 @@ export interface D1Like {
   batch(statements: D1StmtLike[]): Promise<unknown>;
 }
 
+/**
+ * True if `s` contains a C0 control char (U+0000..U+001F) or DEL (U+007F).
+ * Char-code based (NO control-char literals in source, which don't survive some
+ * tooling). Used to reject control chars in a client_id — a server-authoritative
+ * OAuth id should be printable; a NUL/control byte is a log/audit-JSON footgun
+ * (isolation still holds via byte-exact matching, but we fail closed anyway).
+ */
+function hasControlChar(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c <= 0x1f || c === 0x7f) return true;
+  }
+  return false;
+}
+
+/** Validate a client_id: non-empty printable string, <=2048. Shared by seal+open. */
+function isValidClientId(clientId: unknown): clientId is string {
+  return (
+    typeof clientId === "string" &&
+    clientId.length > 0 &&
+    clientId.length <= 2048 &&
+    !hasControlChar(clientId)
+  );
+}
+
 // ── AAD construction ─────────────────────────────────────────────────────────
 // Deterministic length-prefixed concatenation of the binding fields. Each field
 // is encoded as: uint32 big-endian length ‖ utf-8 bytes. This is unambiguous
 // (no field boundary can be shifted into another), unlike naive concatenation.
 function buildAad(parts: {
   userId: string;
+  clientId: string;
   recordId: string;
   dekVersion: number;
   alg: string;
@@ -155,6 +190,7 @@ function buildAad(parts: {
   const fields = [
     enc.encode(AAD_DOMAIN),
     enc.encode(parts.userId),
+    enc.encode(parts.clientId),
     enc.encode(parts.recordId),
     enc.encode(String(parts.dekVersion)),
     enc.encode(parts.alg),
@@ -186,6 +222,7 @@ export async function sealCapability<T extends Record<string, unknown> = Capabil
   db: D1Like,
   bao: OpenBaoTransit,
   userId: string,
+  clientId: string,
   cap: T,
 ): Promise<string> {
   if (!/^[0-9a-f]{64}$/.test(userId)) {
@@ -193,15 +230,26 @@ export async function sealCapability<T extends Record<string, unknown> = Capabil
     // derives it from a verified token, but never trust the shape implicitly).
     throw new Error("sealCapability: invalid user_id");
   }
+  // FAIL-CLOSED: client_id is REQUIRED (no default, no sentinel). It is the
+  // PER-AI isolation key — a blank/absent value must never collapse two AIs
+  // (claude vs chatgpt) onto one key slot. OAuth client_ids may be CIMD https
+  // URLs, so we accept any non-empty PRINTABLE string within a sane cap (it is
+  // server-authoritative, read from the verified grant — see mcp.ts/google.ts).
+  // Byte-exact matching is intentional (NO normalization — that would risk two
+  // encodings mapping to one key slot); we only reject control chars/NUL.
+  if (!isValidClientId(clientId)) {
+    throw new Error("sealCapability: invalid client_id");
+  }
   const recordId = crypto.randomUUID();
   const dek = crypto.getRandomValues(new Uint8Array(32));
   const nonce = crypto.getRandomValues(new Uint8Array(NONCE_LEN));
 
-  // Embed user_id INSIDE the plaintext too (defense in depth — verified on open).
-  const sealed = { v: DEK_VERSION, user_id: userId, cap };
+  // Embed user_id AND client_id INSIDE the plaintext too (defense in depth —
+  // both are re-verified after decryption on open).
+  const sealed = { v: DEK_VERSION, user_id: userId, client_id: clientId, cap };
   const plaintext = new TextEncoder().encode(JSON.stringify(sealed));
 
-  const aad = buildAad({ userId, recordId, dekVersion: DEK_VERSION, alg: ALG });
+  const aad = buildAad({ userId, clientId, recordId, dekVersion: DEK_VERSION, alg: ALG });
   let ciphertext: Uint8Array;
   try {
     const aead = xchacha20poly1305(dek, nonce, aad);
@@ -233,9 +281,9 @@ export async function sealCapability<T extends Record<string, unknown> = Capabil
     db
       .prepare(
         `INSERT INTO mcp_capabilities
-           (user_id, record_id, capability_ciphertext, wrapped_dek, dek_version, alg, endpoint, created_at, last_used_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)
-         ON CONFLICT(user_id) DO UPDATE SET
+           (user_id, client_id, record_id, capability_ciphertext, wrapped_dek, dek_version, alg, endpoint, created_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)
+         ON CONFLICT(user_id, client_id) DO UPDATE SET
            record_id = excluded.record_id,
            capability_ciphertext = excluded.capability_ciphertext,
            wrapped_dek = excluded.wrapped_dek,
@@ -247,6 +295,7 @@ export async function sealCapability<T extends Record<string, unknown> = Capabil
       )
       .bind(
         userId,
+        clientId,
         recordId,
         ciphertext,
         wrappedDek,
@@ -259,7 +308,7 @@ export async function sealCapability<T extends Record<string, unknown> = Capabil
       .prepare(
         `INSERT INTO mcp_audit (user_id, action, ts, detail) VALUES (?1, ?2, ?3, ?4)`,
       )
-      .bind(userId, "capability_sealed", nowSec, JSON.stringify({ record_id: recordId })),
+      .bind(userId, "capability_sealed", nowSec, JSON.stringify({ record_id: recordId, client_id: clientId })),
   ]);
 
   return recordId;
@@ -279,13 +328,19 @@ export async function openCapability<T extends Record<string, unknown> = Capabil
   db: D1Like,
   bao: OpenBaoTransit,
   userId: string,
+  clientId: string,
 ): Promise<Capability<T> | null> {
+  // FAIL-CLOSED: same client_id requirement as seal — never open a shared/blank
+  // key slot (a blank client_id must not resolve to some other AI's row).
+  if (!isValidClientId(clientId)) {
+    throw new Error("openCapability: invalid client_id");
+  }
   const row = await db
     .prepare(
-      `SELECT user_id, record_id, capability_ciphertext, wrapped_dek, dek_version, alg, endpoint, created_at, last_used_at
-         FROM mcp_capabilities WHERE user_id = ?1`,
+      `SELECT user_id, client_id, record_id, capability_ciphertext, wrapped_dek, dek_version, alg, endpoint, created_at, last_used_at
+         FROM mcp_capabilities WHERE user_id = ?1 AND client_id = ?2`,
     )
-    .bind(userId)
+    .bind(userId, clientId)
     .first<CapabilityRow>();
   if (!row) return null;
 
@@ -312,9 +367,11 @@ export async function openCapability<T extends Record<string, unknown> = Capabil
   const dek = await bao.unwrapDek(row.wrapped_dek);
 
   // Rebuild the AAD from the ROW's identity fields. A row swapped under another
-  // user_id rebuilds a DIFFERENT AAD → the Poly1305 tag fails → decrypt throws.
+  // user_id OR another client_id (same user's other AI) rebuilds a DIFFERENT AAD
+  // → the Poly1305 tag fails → decrypt throws.
   const aad = buildAad({
     userId: row.user_id,
+    clientId: row.client_id,
     recordId: row.record_id,
     dekVersion: row.dek_version,
     alg: row.alg,
@@ -332,15 +389,16 @@ export async function openCapability<T extends Record<string, unknown> = Capabil
     clean(dek);
   }
 
-  // Parse + verify the embedded user_id (defense in depth vs cross-row swap).
-  let parsed: { v?: number; user_id?: string; cap?: T };
+  // Parse + verify the embedded user_id AND client_id (defense in depth vs a
+  // cross-user OR cross-AI row swap — even if the AAD were mis-built).
+  let parsed: { v?: number; user_id?: string; client_id?: string; cap?: T };
   try {
     parsed = JSON.parse(new TextDecoder().decode(plaintext));
   } catch {
     clean(plaintext);
     throw new Error("openCapability: malformed plaintext");
   }
-  if (parsed.user_id !== userId || !parsed.cap) {
+  if (parsed.user_id !== userId || parsed.client_id !== clientId || !parsed.cap) {
     clean(plaintext);
     throw new Error("openCapability: identity binding mismatch");
   }

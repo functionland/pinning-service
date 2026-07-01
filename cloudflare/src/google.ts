@@ -242,7 +242,11 @@ async function handleCallback(request: Request, env: FederationEnv): Promise<Res
   // the MCP authorization. The grant's `userId` is the PSEUDONYMOUS hash (never
   // the raw email); the email lives only in the E2E-encrypted `props`.
   const userId = await emailToUserId(email);
-  const props = { email, name, userId };
+  // Inject the OAuth client_id (stable per DCR client, server-authoritative,
+  // validated non-empty at /authorize) into the grant props. The custody layer
+  // keys per (user_id, client_id) so each connected AI (claude vs chatgpt) is a
+  // DISTINCT, isolated identity — see src/custody.ts + mcp.ts resolveClientIdFromProps.
+  const props = { email, name, userId, clientId: parsed.authRequest.clientId };
 
   // DOWNSCOPE: the library advertises scopes_supported but does NOT enforce it at
   // grant time, so a client requesting `scope=mcp admin` would otherwise get

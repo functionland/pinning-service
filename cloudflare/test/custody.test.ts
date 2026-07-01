@@ -69,6 +69,11 @@ const BUNDLE: CollabBundleData = {
 
 const USER_A = "a".repeat(64);
 const USER_B = "b".repeat(64);
+// Two distinct AI clients for the SAME user — the per-AI isolation axis. OAuth
+// client_ids may be CIMD https URLs (Claude.ai / ChatGPT), so we use URL-shaped
+// values to exercise that.
+const CLIENT_A = "https://claude.ai";
+const CLIENT_B = "https://chatgpt.com";
 
 function db(): D1Like {
   return env.CUSTODY_DB as unknown as D1Like;
@@ -97,14 +102,14 @@ function deadBao(): OpenBaoTransit {
 }
 
 /** Raw read of the persisted row (to inspect what is actually at rest). */
-async function readRow(userId: string): Promise<Record<string, unknown> | null> {
+async function readRow(userId: string, clientId: string): Promise<Record<string, unknown> | null> {
   return (env.CUSTODY_DB as unknown as {
     prepare(q: string): {
       bind(...v: unknown[]): { first<T>(): Promise<T | null> };
     };
   })
-    .prepare("SELECT * FROM mcp_capabilities WHERE user_id = ?1")
-    .bind(userId)
+    .prepare("SELECT * FROM mcp_capabilities WHERE user_id = ?1 AND client_id = ?2")
+    .bind(userId, clientId)
     .first<Record<string, unknown>>();
 }
 
@@ -114,8 +119,11 @@ beforeAll(async () => {
   // exec runs one statement per call in miniflare's D1; split on the blank-line
   // boundaries of schema.sql's CREATE statements. We inline them here so the test
   // is self-contained and does not depend on wrangler applying migrations.
+  // DROP first so a persisted old-schema table (single-PK) is replaced by the
+  // composite (user_id, client_id) PK — disposable test D1, safe to rebuild.
+  await d1.exec("DROP TABLE IF EXISTS mcp_capabilities");
   await d1.exec(
-    "CREATE TABLE IF NOT EXISTS mcp_capabilities (user_id TEXT PRIMARY KEY NOT NULL, record_id TEXT NOT NULL, capability_ciphertext BLOB NOT NULL, wrapped_dek TEXT NOT NULL, dek_version INTEGER NOT NULL DEFAULT 1, alg TEXT NOT NULL, endpoint TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER)",
+    "CREATE TABLE IF NOT EXISTS mcp_capabilities (user_id TEXT NOT NULL, client_id TEXT NOT NULL, record_id TEXT NOT NULL, capability_ciphertext BLOB NOT NULL, wrapped_dek TEXT NOT NULL, dek_version INTEGER NOT NULL DEFAULT 1, alg TEXT NOT NULL, endpoint TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER, PRIMARY KEY (user_id, client_id))",
   );
   await d1.exec(
     "CREATE TABLE IF NOT EXISTS mcp_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, action TEXT NOT NULL, ts INTEGER NOT NULL, detail TEXT)",
@@ -126,10 +134,10 @@ beforeAll(async () => {
 describeLive("seal → open round-trip (REAL OpenBao transit)", () => {
   it("round-trips the capability through a genuine wrap/unwrap", async () => {
     const bao = liveBao();
-    const recordId = await sealCapability(db(), bao, USER_A, CAP);
+    const recordId = await sealCapability(db(), bao, USER_A, CLIENT_A, CAP);
     expect(recordId).toMatch(/^[0-9a-f-]{36}$/);
 
-    const opened = await openCapability(db(), bao, USER_A);
+    const opened = await openCapability(db(), bao, USER_A, CLIENT_A);
     expect(opened).not.toBeNull();
     expect(opened!.get()).toEqual(CAP);
     opened!.dispose();
@@ -139,14 +147,14 @@ describeLive("seal → open round-trip (REAL OpenBao transit)", () => {
 
   it("re-seal rotates record_id + wrapped_dek (old backup of the row is stale)", async () => {
     const bao = liveBao();
-    await sealCapability(db(), bao, USER_A, CAP);
-    const r1 = await readRow(USER_A);
-    await sealCapability(db(), bao, USER_A, CAP);
-    const r2 = await readRow(USER_A);
+    await sealCapability(db(), bao, USER_A, CLIENT_A, CAP);
+    const r1 = await readRow(USER_A, CLIENT_A);
+    await sealCapability(db(), bao, USER_A, CLIENT_A, CAP);
+    const r2 = await readRow(USER_A, CLIENT_A);
     expect(r1!.record_id).not.toBe(r2!.record_id);
     expect(r1!.wrapped_dek).not.toBe(r2!.wrapped_dek);
     // still opens to the same capability after rotation
-    const opened = await openCapability(db(), bao, USER_A);
+    const opened = await openCapability(db(), bao, USER_A, CLIENT_A);
     expect(opened!.get()).toEqual(CAP);
     opened!.dispose();
   });
@@ -157,10 +165,10 @@ describeLive("THE GUARANTEE: a D1 dump without a live OpenBao decrypts to NOTHIN
   it("open FAILS CLOSED when OpenBao is unreachable (wrapped DEK is opaque)", async () => {
     // 1) Seal a REAL row with the live OpenBao — now D1 holds the real ciphertext
     //    + the real OpenBao-wrapped DEK.
-    await sealCapability(db(), liveBao(), USER_A, CAP);
+    await sealCapability(db(), liveBao(), USER_A, CLIENT_A, CAP);
 
     // 2) Take the full row exactly as a DB dump would yield it.
-    const dump = await readRow(USER_A);
+    const dump = await readRow(USER_A, CLIENT_A);
     expect(dump).not.toBeNull();
     expect(typeof dump!.wrapped_dek).toBe("string");
     expect((dump!.wrapped_dek as string).startsWith("vault:")).toBe(true);
@@ -168,12 +176,12 @@ describeLive("THE GUARANTEE: a D1 dump without a live OpenBao decrypts to NOTHIN
     // 3) The attacker has the dump + the Worker's config/secrets (env.OPENBAO_*),
     //    but NO reachable OpenBao. Model that with a client pointed at a dead
     //    address. The unwrap MUST fail → open MUST throw → no plaintext.
-    await expect(openCapability(db(), deadBao(), USER_A)).rejects.toThrow();
+    await expect(openCapability(db(), deadBao(), USER_A, CLIENT_A)).rejects.toThrow();
   });
 
   it("the wrapped DEK cannot be unwrapped offline (no KEK on the Worker)", async () => {
-    await sealCapability(db(), liveBao(), USER_A, CAP);
-    const dump = await readRow(USER_A);
+    await sealCapability(db(), liveBao(), USER_A, CLIENT_A, CAP);
+    const dump = await readRow(USER_A, CLIENT_A);
     // Directly attempt the unwrap an attacker would need — with no live OpenBao.
     await expect(deadBao().unwrapDek(dump!.wrapped_dek as string)).rejects.toThrow();
     // And the ciphertext alone, without the unwrapped DEK, is just bytes: the
@@ -190,7 +198,7 @@ describeLive("THE GUARANTEE: a D1 dump without a live OpenBao decrypts to NOTHIN
 describeLive("AAD binding: tampered identity fields fail decryption", () => {
   it("a SWAPPED record_id makes the tag fail (open throws)", async () => {
     const bao = liveBao();
-    await sealCapability(db(), bao, USER_A, CAP);
+    await sealCapability(db(), bao, USER_A, CLIENT_A, CAP);
     // Tamper: change record_id in the row (AAD will no longer match what sealed).
     await (env.CUSTODY_DB as unknown as {
       prepare(q: string): { bind(...v: unknown[]): { run(): Promise<unknown> } };
@@ -198,25 +206,26 @@ describeLive("AAD binding: tampered identity fields fail decryption", () => {
       .prepare("UPDATE mcp_capabilities SET record_id = ?2 WHERE user_id = ?1")
       .bind(USER_A, crypto.randomUUID())
       .run();
-    await expect(openCapability(db(), bao, USER_A)).rejects.toThrow();
+    await expect(openCapability(db(), bao, USER_A, CLIENT_A)).rejects.toThrow();
   });
 
   it("CROSS-ROW SWAP: user A's ciphertext under user B's PK fails (user_id in AAD)", async () => {
     const bao = liveBao();
     // Seal A, then copy A's crypto material into a B row (the exact attack Codex
     // flagged: D1 write moves {ciphertext, wrapped_dek, record_id} to a victim).
-    await sealCapability(db(), bao, USER_A, CAP);
-    const a = await readRow(USER_A);
+    await sealCapability(db(), bao, USER_A, CLIENT_A, CAP);
+    const a = await readRow(USER_A, CLIENT_A);
     await (env.CUSTODY_DB as unknown as {
       prepare(q: string): { bind(...v: unknown[]): { run(): Promise<unknown> } };
     })
       .prepare(
-        `INSERT INTO mcp_capabilities (user_id, record_id, capability_ciphertext, wrapped_dek, dek_version, alg, endpoint, created_at, last_used_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)
-         ON CONFLICT(user_id) DO UPDATE SET record_id=excluded.record_id, capability_ciphertext=excluded.capability_ciphertext, wrapped_dek=excluded.wrapped_dek, dek_version=excluded.dek_version, alg=excluded.alg`,
+        `INSERT INTO mcp_capabilities (user_id, client_id, record_id, capability_ciphertext, wrapped_dek, dek_version, alg, endpoint, created_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)
+         ON CONFLICT(user_id, client_id) DO UPDATE SET record_id=excluded.record_id, capability_ciphertext=excluded.capability_ciphertext, wrapped_dek=excluded.wrapped_dek, dek_version=excluded.dek_version, alg=excluded.alg`,
       )
       .bind(
         USER_B,
+        CLIENT_A,
         a!.record_id,
         a!.capability_ciphertext,
         a!.wrapped_dek,
@@ -228,12 +237,12 @@ describeLive("AAD binding: tampered identity fields fail decryption", () => {
       .run();
     // Opening B rebuilds the AAD with user_id=B → tag fails → throw. The victim
     // NEVER receives user A's capability.
-    await expect(openCapability(db(), bao, USER_B)).rejects.toThrow();
+    await expect(openCapability(db(), bao, USER_B, CLIENT_A)).rejects.toThrow();
   });
 
   it("a tampered alg fails (downgrade/forge blocked)", async () => {
     const bao = liveBao();
-    await sealCapability(db(), bao, USER_A, CAP);
+    await sealCapability(db(), bao, USER_A, CLIENT_A, CAP);
     await (env.CUSTODY_DB as unknown as {
       prepare(q: string): { bind(...v: unknown[]): { run(): Promise<unknown> } };
     })
@@ -241,27 +250,95 @@ describeLive("AAD binding: tampered identity fields fail decryption", () => {
       .bind(USER_A, "aes-256-gcm")
       .run();
     // Unknown alg is rejected up front (and would also fail the AAD tag).
-    await expect(openCapability(db(), bao, USER_A)).rejects.toThrow();
+    await expect(openCapability(db(), bao, USER_A, CLIENT_A)).rejects.toThrow();
   });
 
   it("a tampered dek_version fails the AAD tag", async () => {
     const bao = liveBao();
-    await sealCapability(db(), bao, USER_A, CAP);
+    await sealCapability(db(), bao, USER_A, CLIENT_A, CAP);
     await (env.CUSTODY_DB as unknown as {
       prepare(q: string): { bind(...v: unknown[]): { run(): Promise<unknown> } };
     })
       .prepare("UPDATE mcp_capabilities SET dek_version = ?2 WHERE user_id = ?1")
       .bind(USER_A, 999)
       .run();
-    await expect(openCapability(db(), bao, USER_A)).rejects.toThrow();
+    await expect(openCapability(db(), bao, USER_A, CLIENT_A)).rejects.toThrow();
+  });
+});
+
+// ── 4b. PER-AI ISOLATION (client_id) — claude ≠ chatgpt, EXECUTED ─────────────
+describeLive("per-AI isolation: distinct client_ids for the SAME user are isolated", () => {
+  const CAP_B: CapabilityData = {
+    ...CAP,
+    workspace_secret: "Y2xpZW50LUItd29ya3NwYWNlLXNlY3JldC1kaXN0aW5jdA==",
+    mcp_secret: "Y2xpZW50LUIteDI1NTE5LWNvbm5lY3Rpb24tc2VjcmV0",
+  };
+
+  it("two client_ids for one user → distinct rows, each opens to ITS OWN capability", async () => {
+    const bao = liveBao();
+    await sealCapability(db(), bao, USER_A, CLIENT_A, CAP);
+    await sealCapability(db(), bao, USER_A, CLIENT_B, CAP_B);
+
+    // Distinct rows for the same user (different record_id + wrapped_dek).
+    const rowA = await readRow(USER_A, CLIENT_A);
+    const rowB = await readRow(USER_A, CLIENT_B);
+    expect(rowA).not.toBeNull();
+    expect(rowB).not.toBeNull();
+    expect(rowA!.record_id).not.toBe(rowB!.record_id);
+    expect(rowA!.wrapped_dek).not.toBe(rowB!.wrapped_dek);
+
+    // Each AI opens ONLY its own capability — no cross-talk.
+    const openedA = await openCapability(db(), bao, USER_A, CLIENT_A);
+    const openedB = await openCapability(db(), bao, USER_A, CLIENT_B);
+    expect(openedA!.get()).toEqual(CAP);
+    expect(openedB!.get()).toEqual(CAP_B);
+    openedA!.dispose();
+    openedB!.dispose();
+  });
+
+  it("CROSS-CLIENT SWAP: client A's ciphertext under the SAME user's client B row FAILS (client_id in AAD)", async () => {
+    const bao = liveBao();
+    // Lift client A's crypto material into the (USER_A, CLIENT_B) row — the per-AI
+    // analogue of the cross-user swap. The AAD binds client_id, so opening as
+    // CLIENT_B rebuilds a DIFFERENT AAD → the Poly1305 tag fails → throw. This is
+    // "claude cannot open chatgpt's sealed keypair" proven by execution.
+    await sealCapability(db(), bao, USER_A, CLIENT_A, CAP);
+    const a = await readRow(USER_A, CLIENT_A);
+    await (env.CUSTODY_DB as unknown as {
+      prepare(q: string): { bind(...v: unknown[]): { run(): Promise<unknown> } };
+    })
+      .prepare(
+        `INSERT INTO mcp_capabilities (user_id, client_id, record_id, capability_ciphertext, wrapped_dek, dek_version, alg, endpoint, created_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)
+         ON CONFLICT(user_id, client_id) DO UPDATE SET record_id=excluded.record_id, capability_ciphertext=excluded.capability_ciphertext, wrapped_dek=excluded.wrapped_dek, dek_version=excluded.dek_version, alg=excluded.alg`,
+      )
+      .bind(USER_A, CLIENT_B, a!.record_id, a!.capability_ciphertext, a!.wrapped_dek, a!.dek_version, a!.alg, a!.endpoint, a!.created_at)
+      .run();
+    await expect(openCapability(db(), bao, USER_A, CLIENT_B)).rejects.toThrow();
+  });
+});
+
+// ── 4c. client_id is REQUIRED — fail closed BEFORE any crypto (no OpenBao needed) ─
+describe("client_id is REQUIRED: seal/open throw on a blank client_id before any crypto", () => {
+  it("sealCapability with an empty client_id throws (never collapses to a shared slot)", async () => {
+    // deadBao() would be contacted only AFTER validation — this throws first.
+    await expect(sealCapability(db(), deadBao(), USER_A, "", CAP)).rejects.toThrow(/client_id/);
+  });
+  it("openCapability with an empty client_id throws before the row lookup / unwrap", async () => {
+    await expect(openCapability(db(), deadBao(), USER_A, "")).rejects.toThrow(/client_id/);
+  });
+  it("rejects a client_id containing a control char / NUL (printable-only, byte-exact)", async () => {
+    const withNul = "cli" + String.fromCharCode(0) + "ent";
+    await expect(sealCapability(db(), deadBao(), USER_A, withNul, CAP)).rejects.toThrow(/client_id/);
+    await expect(openCapability(db(), deadBao(), USER_A, withNul)).rejects.toThrow(/client_id/);
   });
 });
 
 // ── 5. Nothing secret persisted in plaintext ─────────────────────────────────
 describeLive("at-rest hygiene: the D1 row holds ONLY ciphertext + opaque metadata", () => {
   it("no secret field value appears anywhere in the persisted row", async () => {
-    await sealCapability(db(), liveBao(), USER_A, CAP);
-    const row = await readRow(USER_A);
+    await sealCapability(db(), liveBao(), USER_A, CLIENT_A, CAP);
+    const row = await readRow(USER_A, CLIENT_A);
     // Serialize the ENTIRE row (all columns) and assert no secret leaks.
     const blob = new Uint8Array(row!.capability_ciphertext as ArrayBuffer);
     const rowDump = JSON.stringify({
@@ -371,7 +448,7 @@ describeLive("POST /collab/bundle plumbing (fake unwrapToken; real seal)", () =>
     const summary = {
       userId: USER_ID,
       scope: ["mcp"],
-      grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID } },
+      grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID, clientId: "fxfiles" } },
     };
     // 1. Establish the connection keypair (first call generates + seals it).
     const conn = await handleCollabConnection(connReq(), envWith(summary));
@@ -384,7 +461,7 @@ describeLive("POST /collab/bundle plumbing (fake unwrapToken; real seal)", () =>
     expect(res.status).toBe(204);
 
     // The custody re-opens with the keypair preserved + the bundle stored.
-    const opened = await loadCollabCustody(envWith(summary), USER_ID);
+    const opened = await loadCollabCustody(envWith(summary), USER_ID, "fxfiles");
     expect(opened).not.toBeNull();
     try {
       expect(opened!.get().bundle?.group_id).toBe(BUNDLE.group_id);
@@ -399,7 +476,7 @@ describeLive("POST /collab/bundle plumbing (fake unwrapToken; real seal)", () =>
     const summary = {
       userId: fresh,
       scope: ["mcp"],
-      grant: { clientId: "fxfiles", props: { email: "never-connected@example.com", userId: fresh } },
+      grant: { clientId: "fxfiles", props: { email: "never-connected@example.com", userId: fresh, clientId: "fxfiles" } },
     };
     const res = await handleCollabBundle(bundleReq(), envWith(summary));
     expect(res.status).toBe(409);
@@ -409,7 +486,7 @@ describeLive("POST /collab/bundle plumbing (fake unwrapToken; real seal)", () =>
     const summary = {
       userId: USER_ID,
       scope: ["openid"],
-      grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID } },
+      grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID, clientId: "fxfiles" } },
     };
     const res = await handleCollabBundle(bundleReq(), envWith(summary));
     expect(res.status).toBe(401);
@@ -431,7 +508,7 @@ describeLive("POST /collab/bundle plumbing (fake unwrapToken; real seal)", () =>
     const summary = {
       userId: USER_ID,
       scope: ["mcp"],
-      grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID } },
+      grant: { clientId: "fxfiles", props: { email: EMAIL, userId: USER_ID, clientId: "fxfiles" } },
     };
     const res = await handleCollabBundle(bundleReq({ webui_base: "https://x" }), envWith(summary));
     expect(res.status).toBe(400);

@@ -18,6 +18,12 @@
 -- refresh_token, refresh_url, endpoint } — see src/custody.ts Capability.
 --   user_id               : SHA-256(lowercased email) hex — the stable Fula id
 --                           (the OAuth grant subject; never the raw email).
+--   client_id             : the connected AI's OAuth client_id (Claude vs ChatGPT
+--                           — a CIMD https URL or a registered id). Part of the
+--                           COMPOSITE PRIMARY KEY (user_id, client_id) and bound
+--                           into the AEAD AAD + embedded plaintext, so each AI gets
+--                           a DISTINCT keypair and neither can open the other's
+--                           record (per-AI isolation). See src/custody.ts.
 --   record_id             : a FRESH per-record UUID, distinct from user_id. It is
 --                           bound into the AEAD as Associated Data (AAD), so a row
 --                           lifted into another user_id's PK slot FAILS to decrypt
@@ -34,8 +40,17 @@
 --                           AAD so a downgrade to a weaker alg can't be forged.
 --   endpoint              : non-secret storage endpoint (operational metadata).
 --   created_at/last_used_at: epoch seconds; operational, non-secret.
+-- ONE-TIME COMPOSITE-KEY REBUILD: mcp_capabilities previously had PRIMARY KEY
+-- (user_id). SQLite/D1 cannot ALTER a primary key, so this migration DROPs and
+-- recreates the table with the composite (user_id, client_id) PK (per-AI
+-- isolation). SAFE PRE-LAUNCH ONLY: hosted AI-MCP has no live producer yet, so
+-- there are NO sealed AI keypairs to preserve. DO NOT re-run this DROP after
+-- go-live — it would discard every connected AI's sealed keypair and force all
+-- users to re-pair. (User-gated: the operator applies this file explicitly.)
+DROP TABLE IF EXISTS mcp_capabilities;
 CREATE TABLE IF NOT EXISTS mcp_capabilities (
-  user_id               TEXT PRIMARY KEY NOT NULL,
+  user_id               TEXT NOT NULL,
+  client_id             TEXT NOT NULL,
   record_id             TEXT NOT NULL,
   capability_ciphertext BLOB NOT NULL,
   wrapped_dek           TEXT NOT NULL,
@@ -43,7 +58,8 @@ CREATE TABLE IF NOT EXISTS mcp_capabilities (
   alg                   TEXT NOT NULL,
   endpoint              TEXT,
   created_at            INTEGER NOT NULL,
-  last_used_at          INTEGER
+  last_used_at          INTEGER,
+  PRIMARY KEY (user_id, client_id)
 );
 
 -- ── Append-only audit log ────────────────────────────────────────────────────

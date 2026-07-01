@@ -60,6 +60,13 @@ export interface FulaAuthProps {
   name?: string;
   /** SHA-256(lowercased email) hex — also passed as the grant's `userId`. */
   userId: string;
+  /**
+   * The connected AI's OAuth client_id (e.g. Claude vs ChatGPT). Set by
+   * google.ts at federation from the verified AuthRequest. The PER-AI ISOLATION
+   * key: custody is keyed per (user_id, client_id). Optional in the type only for
+   * backward-compat with pre-S2 grants — the live path FAILS CLOSED if it's absent.
+   */
+  clientId?: string;
   [key: string]: unknown;
 }
 
@@ -96,6 +103,25 @@ async function resolveUserId(): Promise<string | null> {
   return resolveUserIdFromProps(auth?.props as FulaAuthProps | undefined);
 }
 
+/**
+ * Resolve the connected AI's `client_id` from the grant props — the PER-AI keying
+ * for custody. Returns null when absent / empty / non-string / over-length; the
+ * caller FAILS CLOSED (a blank client_id must NEVER collapse two AIs onto one key
+ * slot). A pre-S2 grant (no clientId) or a non-conforming client therefore cannot
+ * open/seal custody until it re-authorizes. Factored out (like
+ * `resolveUserIdFromProps`) so the seam test drives the real derivation.
+ */
+export function resolveClientIdFromProps(props: FulaAuthProps | undefined): string | null {
+  const c = props?.clientId;
+  return typeof c === "string" && c.length > 0 && c.length <= 2048 ? c : null;
+}
+
+/** Resolve the client_id from the current MCP auth context (null if absent). */
+function resolveClientId(): string | null {
+  const auth = getMcpAuthContext();
+  return resolveClientIdFromProps(auth?.props as FulaAuthProps | undefined);
+}
+
 /** A tool result for an unrecoverable pre-flight failure (not authed / not connected). */
 function toolError(text: string): ToolResult {
   return { isError: true, content: [{ type: "text", text }] };
@@ -112,10 +138,18 @@ async function withCollabSession(
 ): Promise<ToolResult> {
   const userId = await resolveUserId();
   if (!userId) return toolError("Not authenticated: no Fula identity in this MCP session.");
+  // Per-AI isolation: the client_id keys custody. FAIL CLOSED if absent (a pre-S2
+  // grant or a non-conforming client) — never fall back to a shared key slot.
+  const clientId = resolveClientId();
+  if (!clientId) {
+    return toolError(
+      "Not authenticated: no AI client identity in this MCP session (re-connect this AI from FxFiles).",
+    );
+  }
   let session: CollabSession | null;
   try {
     // The global fetch must keep its `this` (globalThis) inside Workers.
-    session = await loadCollabSession(env, userId, fetch.bind(globalThis));
+    session = await loadCollabSession(env, userId, clientId, fetch.bind(globalThis));
   } catch {
     return toolError(
       "Could not open your collaboration connection (the link secret could not be recovered — " +

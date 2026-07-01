@@ -69,6 +69,8 @@ interface FulaAuthProps {
   email?: string;
   name?: string;
   userId?: string;
+  /** The connected AI's OAuth client_id — the per-AI custody key (set by google.ts). */
+  clientId?: string;
   [k: string]: unknown;
 }
 
@@ -143,7 +145,7 @@ export async function handleCollabConnection(request: Request, env: CapabilityEn
 
   let identity: { mcpPubB64: string; mcpFulaId: string };
   try {
-    identity = await loadOrGenerateMcpIdentity(env, auth.userId);
+    identity = await loadOrGenerateMcpIdentity(env, auth.userId, auth.clientId);
   } catch {
     await recordAudit(env.CUSTODY_DB, auth.userId, "collab_identity_failed", {});
     return json(503, { error: "custody_unavailable" });
@@ -173,7 +175,7 @@ export async function handleCollabBundle(request: Request, env: CapabilityEnv): 
   if (!bundle) return json(400, { error: "invalid_bundle" });
 
   try {
-    await storeCollabBundle(env, auth.userId, bundle);
+    await storeCollabBundle(env, auth.userId, auth.clientId, bundle);
   } catch (e) {
     if (e instanceof NoConnectionIdentityError) {
       return json(409, { error: "no_connection_identity", detail: "GET /collab/connection first" });
@@ -204,9 +206,10 @@ export class NoConnectionIdentityError extends Error {
 export async function loadOrGenerateMcpIdentity(
   env: CapabilityEnv,
   userId: string,
+  clientId: string,
 ): Promise<{ mcpPubB64: string; mcpFulaId: string }> {
   const bao = openBaoFromEnv(env);
-  const existing = await openCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId);
+  const existing = await openCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId, clientId);
   if (existing) {
     try {
       const secret = base64ToBytes(existing.get().mcp_secret_b64);
@@ -221,7 +224,7 @@ export async function loadOrGenerateMcpIdentity(
   const secret = crypto.getRandomValues(new Uint8Array(32));
   try {
     const pub = publicKeyFromSecret(secret);
-    await sealCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId, { mcp_secret_b64: bytesToBase64(secret) });
+    await sealCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId, clientId, { mcp_secret_b64: bytesToBase64(secret) });
     return { mcpPubB64: publicKeyB64(pub), mcpFulaId: encodeFulaId(pub) };
   } finally {
     secret.fill(0);
@@ -236,14 +239,15 @@ export async function loadOrGenerateMcpIdentity(
 export async function storeCollabBundle(
   env: CapabilityEnv,
   userId: string,
+  clientId: string,
   bundle: CollabBundleData,
 ): Promise<void> {
   const bao = openBaoFromEnv(env);
-  const existing = await openCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId);
+  const existing = await openCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId, clientId);
   if (!existing) throw new NoConnectionIdentityError();
   try {
     const mcpSecretB64 = existing.get().mcp_secret_b64;
-    await sealCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId, { mcp_secret_b64: mcpSecretB64, bundle });
+    await sealCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId, clientId, { mcp_secret_b64: mcpSecretB64, bundle });
   } finally {
     existing.dispose();
   }
@@ -257,9 +261,10 @@ export async function storeCollabBundle(
 export async function loadCollabCustody(
   env: CapabilityEnv,
   userId: string,
+  clientId: string,
 ): Promise<Capability<CollabCustodyData> | null> {
   const bao = openBaoFromEnv(env);
-  return openCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId);
+  return openCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId, clientId);
 }
 
 /**
@@ -274,9 +279,10 @@ export async function loadCollabCustody(
 export async function loadCollabSession(
   env: CapabilityEnv,
   userId: string,
+  clientId: string,
   fetchImpl: typeof fetch,
 ): Promise<CollabSession | null> {
-  const cap = await loadCollabCustody(env, userId);
+  const cap = await loadCollabCustody(env, userId, clientId);
   if (!cap) return null;
   try {
     const data = cap.get();
@@ -360,11 +366,12 @@ function isHttpsOrLoopback(s: string): boolean {
 
 // ── Shared auth (token unwrap + scope + verified user_id) ─────────────────────
 
-/** Authenticate the caller as a specific Fula user, or return a 4xx Response. */
+/** Authenticate the caller as a specific Fula user + AI client, or return a 4xx
+ *  Response. FAILS CLOSED if the grant lacks a client_id (per-AI custody key). */
 async function authenticateUser(
   request: Request,
   env: CapabilityEnv,
-): Promise<{ userId: string } | Response> {
+): Promise<{ userId: string; clientId: string } | Response> {
   const bearer = extractBearer(request);
   if (!bearer) return unauthorized("missing_bearer");
   const summary = await env.OAUTH_PROVIDER.unwrapToken<FulaAuthProps>(bearer);
@@ -383,7 +390,13 @@ async function authenticateUser(
     return unauthorized("identity_mismatch");
   }
   if (!/^[0-9a-f]{64}$/.test(userId)) return unauthorized("invalid_subject");
-  return { userId };
+  // Per-AI isolation: the client_id keys custody. FAIL CLOSED if the grant lacks
+  // one (a pre-S2 grant / non-conforming client) — never a shared key slot.
+  const clientId = props.clientId;
+  if (typeof clientId !== "string" || clientId.length === 0 || clientId.length > 2048) {
+    return unauthorized("missing_client_id");
+  }
+  return { userId, clientId };
 }
 
 // ── Append-only audit ────────────────────────────────────────────────────────

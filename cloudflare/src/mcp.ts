@@ -25,7 +25,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
 import { z } from "zod";
 import { emailToUserId } from "./userId.js";
-import { loadCollabSession, type CapabilityEnv } from "./capability.js";
+import { loadCollabSession, loadOrGenerateMcpIdentity, type CapabilityEnv } from "./capability.js";
 import {
   storeFile,
   readFile,
@@ -250,6 +250,48 @@ export function buildServer(env?: CapabilityEnv): McpServer {
   // group the AI connection was bound to (no `ai/` workspace scope). The `env` is
   // closed over per request — there is no ambient env in a tool callback in Workers.
   if (env) {
+    // ── fula_identity — the AI's Fula identity (the pairing tool) ─────────────
+    // The user calls this FIRST: it returns THIS AI connection's stable FULA-... id
+    // (its X25519 public key), which the user pastes into FxFiles ("Share with AI
+    // Agent") to grant this AI access to a collaboration group. The per-(user,
+    // client_id) keypair is generated + sealed on first call. FAILS CLOSED without
+    // a resolvable user_id + client_id (same as the collab tools).
+    server.registerTool(
+      "fula_identity",
+      {
+        title: "Show this AI's Fula identity",
+        description:
+          "Return THIS AI connection's Fula identity — a stable FULA-... id (its X25519 " +
+          "public key). Share that id with the FxFiles owner: in FxFiles, 'Share with AI " +
+          "Agent' → paste the id to grant this AI access to a collaboration group. Takes no input.",
+        inputSchema: {},
+      },
+      async () => {
+        const userId = await resolveUserId();
+        if (!userId) return toolError("Not authenticated: no Fula identity in this MCP session.");
+        const clientId = resolveClientId();
+        if (!clientId) {
+          return toolError(
+            "Not authenticated: no AI client identity in this MCP session (re-connect this AI from FxFiles).",
+          );
+        }
+        let identity: { mcpPubB64: string; mcpFulaId: string };
+        try {
+          identity = await loadOrGenerateMcpIdentity(env, userId, clientId);
+        } catch {
+          return toolError("Could not load your Fula AI identity (custody unavailable — please retry).");
+        }
+        const payload = {
+          fula_id: identity.mcpFulaId,
+          mcp_pub_b64: identity.mcpPubB64,
+          message:
+            "Share this Fula id (the FULA-... value) with the FxFiles owner. In FxFiles, open " +
+            "'Share with AI Agent' and paste it to grant this AI access to a collaboration group.",
+        };
+        return { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload };
+      },
+    );
+
     const categoryEnum = z.enum(CATEGORIES);
 
     server.registerTool(

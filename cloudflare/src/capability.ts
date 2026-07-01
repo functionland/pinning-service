@@ -89,6 +89,21 @@ export interface CapabilityEnv {
    * until a fula-client DEK binding lands (see ./fula/collab/identity.ts).
    */
   COLLAB_ALLOW_BARE_HPKE?: string;
+  /**
+   * The pinning-webui origin the Worker calls to fetch a connection's collab
+   * bundle BY PUBKEY (C2). NON-secret public URL (e.g. https://cloud.fx.land),
+   * set in wrangler.toml [vars]. Optional in the type; `fetchBundleByPubkey` fails
+   * CLOSED if unset. (This is where C2 is called; the bundle it returns carries a
+   * `webui_base` — the same origin, server-derived by C2 — used for collab I/O.)
+   */
+  FULA_WEBUI_BASE?: string;
+  /**
+   * HMAC secret shared with pinning-webui's service-auth (verifyServiceAuth). The
+   * Worker mints an `X-Fula-Service-Auth` header asserting its VERIFIED user_id to
+   * fetch the bundle (C2). A Worker SECRET — NEVER in [vars]. Optional in the type;
+   * `fetchBundleByPubkey` fails CLOSED if unset.
+   */
+  FULA_PIN_SERVICE_SECRET?: string;
 }
 
 /** Routes the collab connect endpoints are served at. */
@@ -267,14 +282,107 @@ export async function loadCollabCustody(
   return openCapability<CollabCustodyData>(env.CUSTODY_DB, bao, userId, clientId);
 }
 
+// ── Service-auth fetch of the collab bundle BY PUBKEY (C2) ────────────────────
+
 /**
- * Build a {@link CollabSession} for a user: load the sealed keypair + bundle,
- * recover the link secret with the keypair, and wire the write-token refresh.
- * Returns null when there is no custody OR no delivered bundle (the AI has not
- * been connected to a group yet). THROWS on custody/unwrap failure (fail-closed).
+ * base64url (no padding) of raw bytes — matches Node's `.toString('base64url')`,
+ * the exact encoding pinning-webui's `verifyServiceAuth` decodes.
+ */
+function base64Url(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * Mint an `X-Fula-Service-Auth` header asserting `userId` for a short window, in
+ * the wire format pinning-webui's `verifyServiceAuth` expects (and the Go/Rust
+ * minters produce):
+ *   v1.<b64url(user_id)>.<exp_unix>.<b64url(HMAC_SHA256(secret, "v1."+uidB64+"."+exp))>
+ * The signed message is the ASCII prefix before the final segment. Locked to the
+ * cross-language shared test vector (see serviceAuth). NEVER logs the secret/header.
+ * `userId` MUST be the VERIFIED MCP user (the Worker holds the secret and could
+ * assert any id — callers pass only the grant-derived user_id).
+ */
+export async function mintServiceAuthHeader(userId: string, secret: string, nowSec?: number): Promise<string> {
+  const exp = (nowSec ?? Math.floor(Date.now() / 1000)) + 120; // short; server rejects now >= exp
+  const uidB64 = base64Url(new TextEncoder().encode(userId));
+  const msg = `v1.${uidB64}.${exp}`;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(msg));
+  return `${msg}.${base64Url(new Uint8Array(sig))}`;
+}
+
+/**
+ * Fetch a connection's delivered collab bundle from pinning-webui BY PUBKEY (C2),
+ * authenticated with a minted service-auth header asserting `userId` (the VERIFIED
+ * MCP user — NEVER a client-supplied value). Returns the validated bundle, or null
+ * when there is no bundle for this connection (404 ⇒ the AI is not connected to a
+ * group yet). FAILS CLOSED: missing config, a non-404 error status, transport
+ * failure, or an unparseable/invalid bundle all THROW.
  *
- * The recovered link secret + refreshed write token live ONLY for this request
- * (the session is per-tool-call; nothing secret is cached across isolates).
+ * `mcpPubB64` is the STANDARD-base64 pubkey; it goes in the path as base64url (a
+ * standard-base64 pubkey's '/' + '+' don't survive a path segment — pinning-webui
+ * re-canonicalizes via normalizeMcpPubB64).
+ */
+async function fetchBundleByPubkey(
+  env: CapabilityEnv,
+  userId: string,
+  mcpPubB64: string,
+  fetchImpl: typeof fetch,
+): Promise<CollabBundleData | null> {
+  const secret = env.FULA_PIN_SERVICE_SECRET;
+  const base = env.FULA_WEBUI_BASE?.replace(/\/+$/, "");
+  if (!secret || !base) {
+    // Fail closed — never an unauthenticated or mis-targeted fetch.
+    throw new Error("fetchBundleByPubkey: service-auth not configured (FULA_PIN_SERVICE_SECRET / FULA_WEBUI_BASE)");
+  }
+  const pubUrl = mcpPubB64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const auth = await mintServiceAuthHeader(userId, secret);
+  let res: Response;
+  try {
+    res = await fetchImpl(`${base}/api/mcp/connections/by-pubkey/${pubUrl}/bundle`, {
+      method: "GET",
+      headers: { "X-Fula-Service-Auth": auth },
+      // NEVER follow a 3xx: this request carries the X-Fula-Service-Auth header,
+      // and a redirect would replay it to the redirect target. The endpoint never
+      // legitimately redirects, so fail closed (a 3xx throws → "transport error").
+      redirect: "error",
+    });
+  } catch {
+    throw new Error("fetchBundleByPubkey: transport error contacting pinning-webui");
+  }
+  if (res.status === 404) return null; // no bundle for this connection yet
+  if (!res.ok) throw new Error(`fetchBundleByPubkey: unexpected status ${res.status}`);
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    throw new Error("fetchBundleByPubkey: invalid JSON from pinning-webui");
+  }
+  const bundle = validateBundle(body);
+  if (!bundle) throw new Error("fetchBundleByPubkey: invalid bundle from pinning-webui");
+  return bundle;
+}
+
+/**
+ * Build a {@link CollabSession} for a user's AI (per client_id): load the sealed
+ * X25519 keypair from custody, FETCH the delivered bundle from pinning-webui BY
+ * PUBKEY (C2, service-auth'd), recover the group link secret with the keypair, and
+ * wire the write token. Returns null when there is no custody OR no delivered
+ * bundle (the AI has not been connected to a group yet). THROWS on custody/unwrap/
+ * fetch failure (fail-closed).
+ *
+ * The bundle NO LONGER lives in custody — custody holds only the keypair secret;
+ * FxFiles delivers the bundle to pinning-webui (C1) and the Worker fetches it here.
+ * The recovered link secret + write token live ONLY for this request (the session
+ * is per-tool-call; nothing secret is cached across isolates).
  */
 export async function loadCollabSession(
   env: CapabilityEnv,
@@ -282,26 +390,32 @@ export async function loadCollabSession(
   clientId: string,
   fetchImpl: typeof fetch,
 ): Promise<CollabSession | null> {
+  // Load ONLY the per-(user,client) keypair secret from custody.
   const cap = await loadCollabCustody(env, userId, clientId);
   if (!cap) return null;
+  let secret: Uint8Array;
   try {
-    const data = cap.get();
-    if (!data.bundle) return null; // keypair exists but no group bundle yet
-    const bundle = data.bundle;
-    const secret = base64ToBytes(data.mcp_secret_b64);
-    let linkSecret: Uint8Array;
-    let mcpPubB64: string;
-    try {
-      mcpPubB64 = publicKeyB64(publicKeyFromSecret(secret));
-      // Live path is fail-closed v5-only; the bare-envelope shape is enabled ONLY
-      // by the dev escape hatch (unset in production — see CapabilityEnv).
-      linkSecret = recoverLinkSecret(secret, bundle.wrapped_link_secret, {
-        allowBareEnvelope: env.COLLAB_ALLOW_BARE_HPKE === "1",
-      });
-    } finally {
-      secret.fill(0);
-    }
-
+    secret = base64ToBytes(cap.get().mcp_secret_b64);
+  } finally {
+    cap.dispose(); // best-effort zeroize the sealed plaintext (the keypair)
+  }
+  try {
+    const mcpPubB64 = publicKeyB64(publicKeyFromSecret(secret));
+    // Fetch the delivered bundle from pinning-webui by this connection's pubkey
+    // (C2). null ⇒ no collaboration group connected to this AI yet.
+    const bundle = await fetchBundleByPubkey(env, userId, mcpPubB64, fetchImpl);
+    if (!bundle) return null;
+    // Recover the group link secret with the keypair. Fail-closed v5-only unless
+    // the dev escape hatch is set (unset in production — see CapabilityEnv).
+    const linkSecret = recoverLinkSecret(secret, bundle.wrapped_link_secret, {
+      allowBareEnvelope: env.COLLAB_ALLOW_BARE_HPKE === "1",
+    });
+    // The C2 bundle carries a FRESH short-lived collab_write_token. It does NOT
+    // carry refresh_url/refresh_token (pinning-webui stores the refresh token
+    // hash-only) — so withCollabWriteRetry's refresh is intentionally NOT
+    // configured. The session is per-tool-call: a mid-call auth failure surfaces
+    // cleanly (refresh.ts skips refresh when the creds are absent), and the next
+    // tool call re-fetches C2 for a fresh token.
     let writeToken: string | undefined = bundle.collab_write_token;
     const session: CollabSession = {
       fetchImpl,
@@ -319,7 +433,7 @@ export async function loadCollabSession(
     };
     return session;
   } finally {
-    cap.dispose(); // best-effort zeroize the sealed plaintext (keypair + bundle)
+    secret.fill(0);
   }
 }
 

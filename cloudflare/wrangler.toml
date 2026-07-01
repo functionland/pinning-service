@@ -66,6 +66,10 @@ CANONICAL_ORIGIN = "https://mcp.cloud.fx.land"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+# The pinning-webui origin the Worker calls to fetch a connection's collab bundle
+# BY PUBKEY (C2). NON-secret public URL. MUST equal the deployed pinning-webui
+# origin — CONFIRM the exact host at S5 (this default is per the plan's KEY FACT 2).
+FULA_WEBUI_BASE = "https://cloud.fx.land"
 
 # ── Custom domain / route (commented — user-gated deploy) ────────────────────
 # Uncomment ONE of these at H4 once the user picks the hosted MCP hostname and
@@ -94,3 +98,15 @@ GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 # The Worker's OpenBao policy grants ONLY transit/encrypt + transit/decrypt on
 # this key (no key read/export) — so even a fully-compromised Worker can wrap and
 # unwrap DEKs (rate-limited + audited) but can NEVER exfiltrate the KEK itself.
+#
+# ── Service-auth to pinning-webui (fetch the collab bundle by pubkey, C2) ─────
+#   FULA_PIN_SERVICE_SECRET — HMAC secret SHARED with the pinning-webui
+#                            service-auth (its own FULA_PIN_SERVICE_SECRET,
+#                            verified by verifyServiceAuth). The Worker mints an
+#                            X-Fula-Service-Auth header asserting its VERIFIED
+#                            user_id to GET /api/mcp/connections/by-pubkey/:pubkey/bundle.
+#                            MUST equal the pinning-webui value. A leak lets a
+#                            holder mint short-lived collab-WRITE tokens for
+#                            AI-connected groups (bounded to the AI-collab surface;
+#                            cannot read file contents — the link secret stays
+#                            HPKE-sealed). Treat as a gateway-level secret.

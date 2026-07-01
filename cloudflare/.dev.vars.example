@@ -27,3 +27,13 @@ OPENBAO_ADDR="https://bao.example.com"
 OPENBAO_ROLE_ID="00000000-0000-0000-0000-000000000000"
 OPENBAO_SECRET_ID="00000000-0000-0000-0000-000000000000"
 OPENBAO_TRANSIT_KEY="fula-mcp-workspace-kek"
+
+# ── Service-auth to pinning-webui (fetch a connection's collab bundle by pubkey, C2) ─
+# HMAC secret SHARED with the pinning-webui's own FULA_PIN_SERVICE_SECRET (verified
+# there by verifyServiceAuth). The Worker mints an X-Fula-Service-Auth header
+# asserting its verified user_id to GET the bundle. MUST equal the pinning-webui
+# value. Generate a shared value:  openssl rand -hex 32
+FULA_PIN_SERVICE_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
+# Optional local override of the pinning-webui origin (defaults to wrangler.toml
+# [vars] FULA_WEBUI_BASE = https://cloud.fx.land). For local end-to-end set e.g.:
+# FULA_WEBUI_BASE="http://localhost:3001"

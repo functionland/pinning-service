@@ -55,6 +55,11 @@ describe("identity interstitial rendering", () => {
     expect(html).toContain('method="POST"');
     expect(html).toContain('nonce="n0nc3hex"');
     expect(html).toContain("Share with AI Agent");
+    // The step-by-step instructions the user must follow.
+    expect(html).toContain("Next steps");
+    expect(html).toContain("New Collaborate");
+    expect(html).toContain("files.fx.land");
+    expect(html).toContain("Finish connecting");
   });
 
   it("HTML-escapes the id defensively (no raw markup injected)", () => {

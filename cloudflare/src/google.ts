@@ -318,8 +318,14 @@ async function handleCallback(request: Request, env: FederationEnv): Promise<Res
         headers.set("x-content-type-options", "nosniff");
         headers.set("x-frame-options", "DENY");
         headers.set(
+          // No form-action directive: the "Finish" form POSTs to /callback/continue
+          // which 302s to the OAuth client's redirect_uri (cross-origin, e.g.
+          // claude.ai). form-action governs the whole redirect CHAIN, so 'self'
+          // would block the hand-back. Omitting it lets the form submit + redirect
+          // freely — safe here because default-src 'none' + the nonce'd script mean
+          // no injected code can run to retarget the single hardcoded form.
           "content-security-policy",
-          `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+          `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; frame-ancestors 'none'; base-uri 'none'`,
         );
         // Two Set-Cookie: clear the spent state cookie, set the short-lived continue
         // cookie. CSRF on POST /callback/continue is blocked by SameSite=Lax — this
@@ -451,21 +457,35 @@ export function renderIdentityInterstitial(fulaId: string, nonce: string): strin
   .finish { background: #06B597; color: #05231d; font-weight: 700; width: 100%; margin-top: 18px; padding: 14px; }
   .note { background: #0e1620; border: 1px solid #22303c; border-radius: 10px; padding: 12px; margin-top: 14px; font-size: 13px; color: #9fb0c0; }
   .fine { font-size: 12px; color: #6b7f90; }
+  h2 { font-size: 15px; margin: 20px 0 8px; }
+  ol.steps { margin: 0; padding-left: 20px; color: #cdd9e5; font-size: 13px; line-height: 1.7; }
+  ol.steps li { margin: 4px 0; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #06B597; word-break: break-all; }
 </style>
 </head>
 <body>
   <div class="card">
     <h1>✅ Your AI is connected to FxFiles</h1>
-    <p>Copy this AI's Fula identity, then in FxFiles open <strong>Share with AI Agent</strong> and paste it to grant this AI access to a collaboration group.</p>
+    <p>Copy your AI's Fula identity below, then follow the steps to give it access to a folder.</p>
     <div class="idrow">
       <input id="fid" value="${id}" readonly spellcheck="false" aria-label="Your AI's Fula identity">
       <button class="copy" id="copyBtn" type="button">Copy</button>
     </div>
     <div class="note">Didn't copy it now? You can ask your AI <strong>"What is my Fula id?"</strong> anytime and it will show this same id again.</div>
+    <h2>Next steps</h2>
+    <ol class="steps">
+      <li><strong>Copy the Fula ID</strong> above.</li>
+      <li>Click <strong>Finish connecting</strong> (below) to go back to your AI agent.</li>
+      <li>Open <strong>FxFiles</strong> — the app, or the web at <span class="mono">https://files.fx.land</span> — and sign in as usual.</li>
+      <li>Go to <strong>Shared → Collaborate</strong> and tap <strong>New Collaborate</strong> to create a shared folder (or open an existing one).</li>
+      <li>Open that folder and tap the <strong>Share with AI Agent</strong> icon.</li>
+      <li><strong>Paste the Fula ID</strong> in the box to allow the agent to access that folder.</li>
+    </ol>
+    <div class="note">Now you can ask the AI to write files &amp; folders into that collaborate — or add files yourself and ask it to read them. Remove a file from the collaborate to revoke the agent's access to it.</div>
     <form method="POST" action="/callback/continue">
       <button class="finish" type="submit">Finish connecting →</button>
     </form>
-    <p class="fine">Click <strong>Finish connecting</strong> to return to your AI and complete setup. This page also finishes automatically after a few seconds.</p>
+    <p class="fine">You must click <strong>Finish connecting</strong> to complete setup and return to your AI agent.</p>
   </div>
   <script nonce="${nonce}">
     (function () {
@@ -477,18 +497,6 @@ export function renderIdentityInterstitial(fulaId: string, nonce: string): strin
         try { navigator.clipboard.writeText(fid.value); } catch (e) {}
         btn.textContent = 'Copied';
         setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
-      });
-      // Anti-abandonment safety net: auto-finish so a user who copies and switches
-      // to FxFiles still completes the connection. Short enough to stay well inside
-      // any OAuth client's popup wait. A "submitted" guard (survives bfcache) makes
-      // the manual Finish and the auto-submit mutually exclusive - no double POST.
-      var form = document.forms[0];
-      var submitted = false;
-      var timer = setTimeout(function () { if (form && !submitted) { submitted = true; form.submit(); } }, 12000);
-      if (form) form.addEventListener('submit', function (e) {
-        if (submitted) { e.preventDefault(); return; }
-        submitted = true;
-        clearTimeout(timer);
       });
     })();
   </script>

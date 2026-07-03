@@ -150,7 +150,17 @@ async function withCollabSession(
   try {
     // The global fetch must keep its `this` (globalThis) inside Workers.
     session = await loadCollabSession(env, userId, clientId, fetch.bind(globalThis));
-  } catch {
+  } catch (e) {
+    // Log the specific failure server-side for ops/debugging (the kind + message
+    // describe only the failure KIND, never secret material); the user-facing message
+    // stays stable and non-leaky.
+    const kind =
+      e && typeof e === "object" && "kind" in e
+        ? String((e as { kind?: unknown }).kind)
+        : e instanceof Error
+          ? e.name
+          : "unknown";
+    console.error("[collab] loadCollabSession failed:", kind, "—", e instanceof Error ? e.message : String(e));
     return toolError(
       "Could not open your collaboration connection (the link secret could not be recovered — " +
         "the connection may need to be re-authorized from FxFiles).",

@@ -106,6 +106,17 @@ describe("loadCollabSession — by-pubkey C2 fetch (service-auth'd)", () => {
     expect(seenAuth).toMatch(/^v1\.[A-Za-z0-9_-]+\.\d+\.[A-Za-z0-9_-]+$/);
   });
 
+  it("a 3xx from C2 → throws (fail closed; never follows a redirect that would replay the service-auth header)", async () => {
+    const uid = await emailToUserId("s3-redirect@example.com");
+    const clientId = "https://claude.ai";
+    await loadOrGenerateMcpIdentity(plainEnv(), uid, clientId);
+    // We send redirect:"manual" (Workers rejects redirect:"error"), so a 3xx comes back
+    // as-is and MUST be rejected here — following it would replay X-Fula-Service-Auth.
+    const stubFetch = (async () =>
+      new Response("", { status: 302, headers: { location: "https://evil.example/steal" } })) as unknown as typeof fetch;
+    await expect(loadCollabSession(envWithSvc(), uid, clientId, stubFetch)).rejects.toThrow(/redirect/i);
+  });
+
   it("no keypair custody → null BEFORE any fetch (fail-closed, nothing to fetch)", async () => {
     const uid = await emailToUserId("s3-never-sealed@example.com");
     let called = false;

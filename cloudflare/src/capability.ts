@@ -343,20 +343,36 @@ async function fetchBundleByPubkey(
     // Fail closed — never an unauthenticated or mis-targeted fetch.
     throw new Error("fetchBundleByPubkey: service-auth not configured (FULA_PIN_SERVICE_SECRET / FULA_WEBUI_BASE)");
   }
-  const pubUrl = mcpPubB64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  // base64url (already URL-safe) of the Worker's OWN pubkey; encodeURIComponent is a
+  // no-op for that charset but hardens the path interpolation against any future change.
+  const pubUrl = encodeURIComponent(mcpPubB64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""));
   const auth = await mintServiceAuthHeader(userId, secret);
   let res: Response;
   try {
     res = await fetchImpl(`${base}/api/mcp/connections/by-pubkey/${pubUrl}/bundle`, {
       method: "GET",
       headers: { "X-Fula-Service-Auth": auth },
-      // NEVER follow a 3xx: this request carries the X-Fula-Service-Auth header,
-      // and a redirect would replay it to the redirect target. The endpoint never
-      // legitimately redirects, so fail closed (a 3xx throws → "transport error").
-      redirect: "error",
+      // NEVER follow a 3xx: this request carries the X-Fula-Service-Auth header, and
+      // following a redirect would replay it to the redirect target. Cloudflare Workers
+      // does NOT implement redirect:"error" (it throws "Invalid redirect value" before
+      // the request is even sent), so use "manual" — which likewise does NOT follow the
+      // redirect — and reject any 3xx ourselves below. Same fail-closed intent, edge-safe.
+      redirect: "manual",
     });
-  } catch {
+  } catch (fetchErr) {
+    // Log the real cause server-side (redirect vs unreachable / TLS / DNS); the thrown
+    // message stays stable and non-leaky. Name+message carry no secret material.
+    console.error(
+      "[collab] fetchBundleByPubkey fetch threw:",
+      fetchErr instanceof Error ? `${fetchErr.name}: ${fetchErr.message}` : String(fetchErr),
+    );
     throw new Error("fetchBundleByPubkey: transport error contacting pinning-webui");
+  }
+  // Fail closed on a redirect: under redirect:"manual" Cloudflare Workers returns the
+  // 3xx as-is (it does not follow it). The endpoint never legitimately redirects, and
+  // we must not follow it (that would replay the service-auth header to the target).
+  if (res.status >= 300 && res.status < 400) {
+    throw new Error(`fetchBundleByPubkey: unexpected redirect from pinning-webui (status ${res.status})`);
   }
   if (res.status === 404) return null; // no bundle for this connection yet
   if (!res.ok) throw new Error(`fetchBundleByPubkey: unexpected status ${res.status}`);

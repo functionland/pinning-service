@@ -349,8 +349,12 @@ export function buildServer(env?: CapabilityEnv): McpServer {
         title: "Read a file from the collaboration group",
         description:
           "Download and decrypt a group file by its `file_id` (from fula_store_file / " +
-          "fula_list_files) or by its logical `path`. Returns base64 content. Files the " +
-          "FxFiles owner added (owner-encrypted) are not yet readable via the hosted MCP.",
+          "fula_list_files) or by its logical `path`. Works for BOTH files added directly to " +
+          "the group (`enc_type:\"collab\"`) AND files the FxFiles owner shared in from their " +
+          "own storage (`enc_type:\"fula\"`) — both are readable here; do not skip a file based " +
+          "on its enc_type. Images come back as an inline image; other files come back as " +
+          "base64. Very large files may exceed the hosted inline limit — if so, the tool says " +
+          "so and they can be read on a local (native) FxFiles MCP.",
         inputSchema: {
           file_id: z.string().optional().describe("The file id returned by fula_store_file / fula_list_files."),
           path: z.string().optional().describe("Alternatively, the file's logical path, e.g. '/notes/memo.txt'."),

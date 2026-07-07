@@ -160,8 +160,25 @@ function makeSession(
   };
 }
 
+/** First text block's text (content is now a text|image union; tests assert on message strings). */
+function textOf(r: ToolResult): string {
+  const c = r.content.find((b) => b.type === "text");
+  return c && c.type === "text" ? c.text : "";
+}
+
 function payloadOf(r: ToolResult): any {
-  return r.structuredContent ?? JSON.parse(r.content[0]!.text);
+  // Prefer the first text block's JSON — for a file READ it carries the full payload
+  // (incl. base64 `content`), whereas structuredContent is now metadata-only. Fall back to
+  // structuredContent if the text block isn't JSON (e.g. an error message).
+  const t = textOf(r);
+  if (t) {
+    try {
+      return JSON.parse(t);
+    } catch {
+      /* not JSON */
+    }
+  }
+  return r.structuredContent ?? {};
 }
 
 let server: FakeCollabServer;
@@ -202,6 +219,48 @@ describe("storeFile → manifest append + blob upload, then readFile round-trips
     const listed = payloadOf(await listFiles(session, {}));
     const entry = (listed.files as Array<{ file_id: string; added_by_public_key: string }>).find((f) => f.file_id === p.file_id)!;
     expect(entry.added_by_public_key).toBe(MCP_PUB);
+  });
+});
+
+describe("readFile presentation: images as image blocks, oversize → read-locally", () => {
+  it("returns a decrypted image as a NATIVE image block (base64 never leaks into a text blob)", async () => {
+    // Valid JPEG magic (FF D8 FF …) so the byte-sniff — which reads the REAL decrypted
+    // bytes, not the declared mime — classifies it as an image.
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
+    const stored = payloadOf(await storeFile(session, { data: jpeg, fileName: "photo.jpg", mime: "image/jpeg" }));
+
+    const read = await readFile(session, { fileId: stored.file_id });
+    expect(read.isError).toBeFalsy();
+
+    // The picture comes back as an image content block carrying the exact bytes…
+    const img = read.content.find((c) => c.type === "image");
+    expect(img && img.type === "image" ? img.mimeType : null).toBe("image/jpeg");
+    const imgData = img && img.type === "image" ? img.data : "";
+    expect(Array.from(b64ToBytes(imgData))).toEqual(Array.from(jpeg));
+
+    // …metadata says encoding:"image" and carries NO base64 `content` field, and the base64
+    // is NOT duplicated into a text blob (that is the whole point — it must not hit the text budget).
+    expect(read.structuredContent!.encoding).toBe("image");
+    expect(read.structuredContent!.content).toBeUndefined();
+    expect(textOf(read)).not.toContain(imgData);
+  });
+
+  it("a non-image over the inline text limit fails closed with a read-locally message", async () => {
+    // 0x00 bytes → not a known image; one over MAX_INLINE_TEXT_BYTES (24 KiB).
+    const big = new Uint8Array(24 * 1024 + 1);
+    const stored = payloadOf(await storeFile(session, { data: big, fileName: "big.bin" }));
+
+    const read = await readFile(session, { fileId: stored.file_id });
+    expect(read.isError).toBe(true);
+    expect(textOf(read).toLowerCase()).toContain("too large");
+    expect(textOf(read).toLowerCase()).toContain("local");
+  });
+
+  it("a small non-image still returns base64 text (unchanged historical wire shape)", async () => {
+    const p = payloadOf(await storeFile(session, { data: enc("hello"), fileName: "note.txt", mime: "text/plain" }));
+    const read = payloadOf(await readFile(session, { fileId: p.file_id }));
+    expect(read.encoding).toBe("base64");
+    expect(new TextDecoder().decode(b64ToBytes(read.content))).toBe("hello");
   });
 });
 
@@ -304,7 +363,7 @@ describe("read-only + owner-file deferral", () => {
     const ro = makeSession(server, { writeToken: undefined });
     const res = await storeFile(ro, { data: enc("x"), fileName: "x.txt" });
     expect(res.isError).toBe(true);
-    expect(res.content[0]!.text.toLowerCase()).toContain("read-only");
+    expect(textOf(res).toLowerCase()).toContain("read-only");
   });
 
   it("an owner (encType:fula) file with NO share token fails closed", async () => {
@@ -325,7 +384,7 @@ describe("read-only + owner-file deferral", () => {
 
     const res = await readFile(session, { fileId: fula.id });
     expect(res.isError).toBe(true);
-    expect(res.content[0]!.text.toLowerCase()).toContain("share token");
+    expect(textOf(res).toLowerCase()).toContain("share token");
   });
 
   it("an owner (encType:fula) file with a malformed share token fails closed (no crash)", async () => {
@@ -347,7 +406,7 @@ describe("read-only + owner-file deferral", () => {
     // Reaches the 0.6.19 recipient binding, which rejects the malformed token.
     const res = await readFile(session, { fileId: fula.id });
     expect(res.isError).toBe(true);
-    expect(res.content[0]!.text.toLowerCase()).toContain("share token");
+    expect(textOf(res).toLowerCase()).toContain("share token");
   });
 });
 

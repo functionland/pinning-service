@@ -65,9 +65,16 @@ import {
   describeSharedFile,
 } from "../wasm.js";
 
+/** A single MCP content block: a text blob, or a native image (base64 `data` + `mimeType`).
+ *  The image variant lets a decrypted picture come back as something Claude/ChatGPT can SEE,
+ *  instead of a 4/3-inflated base64 TEXT blob that overflows the tool-result token budget. */
+export type ToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 /** A tool result the MCP layer understands (structurally a `CallToolResult`). */
 export interface ToolResult {
-  content: Array<{ type: "text"; text: string }>;
+  content: ToolContent[];
   structuredContent?: Record<string, unknown>;
   isError?: boolean;
   [x: string]: unknown;
@@ -88,6 +95,112 @@ const MAX_OWNER_FILE_CHUNKS = 512;
  *  plaintext + its base64 all coexist in the ~128 MiB isolate, so cap the total
  *  ciphertext fetched. Larger owner files are read on the LOCAL (native) MCP, which streams. */
 const MAX_OWNER_FILE_TOTAL_BYTES = 32 * 1024 * 1024;
+
+/** Raw-byte ceiling for returning a NON-image file inline as base64 TEXT. base64 inflates
+ *  4/3 AND tokenizes poorly, so even a ~55 KB file becomes ~75 K chars — already past a
+ *  typical AI tool-result token budget (it overflowed a real client at that size). Above
+ *  this we return a "decrypted OK but too large — read it locally" message instead of a blob
+ *  the client will reject. Far below the 32-MiB fetch/memory cap; tune as client budgets grow. */
+const MAX_INLINE_TEXT_BYTES = 24 * 1024;
+
+/** Raw-byte ceiling for returning an image as a NATIVE MCP image block. Kept deliberately
+ *  conservative at 1.5 MiB (~2 MiB base64-encoded) so it stays UNDER every connector's own
+ *  per-image / per-result cap — Anthropic rejects images whose base64 exceeds ~5 MB, and
+ *  ChatGPT / others impose lower, less-documented limits. Above this, read on a local MCP
+ *  (which streams). base64 tokenizes as image tiles, not per-char, so this still covers
+ *  typical photos while never tripping a silent connector-side rejection. */
+const MAX_INLINE_IMAGE_BYTES = 1536 * 1024;
+
+/** Magic-byte sniff of the DECRYPTED bytes → an image mimeType, or null if not a known image.
+ *  Authoritative (reads the real bytes) so a wrong/absent `contentType` can neither mislabel a
+ *  non-image as an image block nor hide a real one. Covers the formats FxFiles uploads. */
+function sniffImageMime(b: Uint8Array): string | null {
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (
+    b.length >= 8 &&
+    b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+    b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  if (b.length >= 6 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return "image/gif";
+  if (
+    b.length >= 12 &&
+    b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && // "RIFF"
+    b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50 // "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return null;
+}
+
+/**
+ * Shape a SUCCESSFULLY-decrypted file into a tool result the AI can actually consume.
+ *
+ * PRESENTATION ONLY — the file was already authorized (it is in THIS group's manifest) and
+ * already decrypted; this decides HOW the bytes come back, never WHETHER:
+ *  - a KNOWN image (magic-byte sniff) within budget → a native MCP image block, so the AI can
+ *    SEE it and it costs image tokens, not a 4/3-inflated base64 TEXT blob;
+ *  - anything else within the inline budget → base64 text (the historical wire shape, unchanged);
+ *  - over the (much-smaller-than-the-fetch-cap) inline budget → a clear "decrypted OK but too
+ *    large to inline; read it on a local MCP" message, NOT a base64 string that overflows the
+ *    client's tool-result token limit and surfaces to the user as an opaque failure.
+ *
+ * Same treatment for `enc_type` "collab" and "fula": the only difference upstream is how the
+ * ciphertext was fetched/decrypted; the plaintext is presented identically here.
+ */
+function readResult(
+  file: CollaborationFile,
+  encType: "collab" | "fula",
+  groupId: string,
+  plaintext: Uint8Array,
+): ToolResult {
+  const meta = {
+    file_id: file.id,
+    file_name: file.fileName,
+    path: logicalPathOf(file),
+    content_type: file.contentType,
+    enc_type: encType,
+    size: plaintext.length,
+    group_id: groupId,
+  };
+  const imageMime = sniffImageMime(plaintext);
+  if (imageMime) {
+    if (plaintext.length > MAX_INLINE_IMAGE_BYTES) {
+      return err(
+        `Image "${file.fileName}" decrypted OK (${plaintext.length} bytes) but exceeds the hosted ` +
+          `inline image limit (${MAX_INLINE_IMAGE_BYTES} bytes); read it on a local (native) FxFiles MCP.`,
+      );
+    }
+    // `content_type` is the (possibly wrong) server-claimed mime; `sniffed_mime` is what the
+    // bytes ACTUALLY are and is what the image block uses — surface both so a discrepancy
+    // (e.g. a .jpg that is really a PNG) is explicit rather than silently reconciled.
+    const imageMeta = { ...meta, encoding: "image", sniffed_mime: imageMime };
+    return {
+      // A tiny metadata text block (NO base64) so the model has the file's identity, PLUS the
+      // picture itself as a native image block (the base64 lives ONLY here, never in text).
+      content: [
+        { type: "text", text: JSON.stringify(imageMeta) },
+        { type: "image", data: base64Of(plaintext), mimeType: imageMime },
+      ],
+      structuredContent: imageMeta,
+    };
+  }
+  if (plaintext.length > MAX_INLINE_TEXT_BYTES) {
+    return err(
+      `File "${file.fileName}" decrypted OK (${plaintext.length} bytes) but is too large to return ` +
+        `inline via the hosted MCP (limit ${MAX_INLINE_TEXT_BYTES} bytes); read it on a local (native) FxFiles MCP.`,
+    );
+  }
+  // Non-image within budget → base64 TEXT (the historical wire shape). The base64 lives ONLY
+  // in the content text block — the channel the model always reads — while `structuredContent`
+  // stays metadata-only, so the bytes are never carried TWICE on the wire (GLM-5.2 review).
+  const textPayload = { ...meta, encoding: "base64", content: base64Of(plaintext) };
+  return {
+    content: [{ type: "text", text: JSON.stringify(textPayload) }],
+    structuredContent: { ...meta, encoding: "base64" },
+  };
+}
 
 /**
  * The per-connection collaboration session a tool runs against. Built from the
@@ -396,17 +509,7 @@ export async function readFile(session: CollabSession, args: ReadArgs): Promise<
     if (file.encType === "collab") {
       const blob = await fetchCollabFile(session.fetchImpl, session.webuiBase, session.groupId, file.id);
       const plaintext = await collabFileDecrypt(blob, session.linkSecret, file.id);
-      return ok({
-        file_id: file.id,
-        file_name: file.fileName,
-        path: logicalPathOf(file),
-        content_type: file.contentType,
-        enc_type: "collab",
-        size: plaintext.length,
-        encoding: "base64",
-        content: base64Of(plaintext),
-        group_id: session.groupId,
-      });
+      return readResult(file, "collab", session.groupId, plaintext);
     }
 
     if (file.encType === "fula") {
@@ -467,17 +570,7 @@ export async function readFile(session: CollabSession, args: ReadArgs): Promise<
         );
         plaintext = decryptSharedFileSingleBlock(session.linkSecret, tokenJson, file.storageKey, ct);
       }
-      return ok({
-        file_id: file.id,
-        file_name: file.fileName,
-        path: logicalPathOf(file),
-        content_type: file.contentType,
-        enc_type: "fula",
-        size: plaintext.length,
-        encoding: "base64",
-        content: base64Of(plaintext),
-        group_id: session.groupId,
-      });
+      return readResult(file, "fula", session.groupId, plaintext);
     }
     return err(`unknown encType \`${file.encType}\``);
   } catch (e) {

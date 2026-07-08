@@ -52,6 +52,9 @@ interface AssetAttach {
   /** Human-readable reason; surfaced as a note in the user-message text so
    *  Claude knows the URL line is the only reference it has. */
   error?: string;
+  /** Positive embedding instruction (e.g. for video, which is referenced by
+   *  URL only and never downloaded) — surfaced as a note in the user message. */
+  note?: string;
 }
 
 const FETCH_TIMEOUT_MS = 45_000;
@@ -73,8 +76,9 @@ File paths:
 - All internal references (CSS, JS, images) MUST use relative paths: href="./style.css" or src="./js/main.js"
 
 Assets:
-- Reference provided asset URLs directly in HTML using their full URLs (img src="https://...", video src="https://...")
-- These are external assets already hosted — use the URLs exactly as given
+- Reference provided asset URLs directly using their full URLs (they are already hosted — use them exactly as given).
+- IMAGES: <img src="https://..." style="max-width:100%">. VIDEOS (asset type "video"): embed an HTML5 player, NEVER an <img> — <video controls preload="metadata" playsinline style="max-width:100%;height:auto"><source src="https://..." type="video/mp4"></video> (match the <source> type to the file extension).
+- The site must otherwise be fully self-contained (no external scripts, styles, fonts, or images). The SINGLE permitted external resource is a YouTube/Vimeo video iframe: if the request references a youtube.com/youtu.be or vimeo.com link, embed a RESPONSIVE 16:9 iframe whose src is EXACTLY https://www.youtube.com/embed/<id> or https://player.vimeo.com/video/<id> (no other host), wrapped in a container with aspect-ratio:16/9 and using loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen. If the link is neither YouTube nor Vimeo, do not embed it.
 
 Content:
 - Use modern, responsive CSS with clean typography
@@ -98,7 +102,7 @@ const client = new Anthropic({
 // =============================================================================
 
 interface MediaInfo {
-  kind: 'image' | 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'text' | 'unknown';
+  kind: 'image' | 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'text' | 'video' | 'unknown';
   imageMime?: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
 }
 
@@ -130,6 +134,13 @@ function detectMedia(fileName: string): MediaInfo {
     case '.htm':
     case '.xml':
       return { kind: 'text' };
+    // Browser-playable video — referenced by URL only, never downloaded.
+    case '.mp4':
+    case '.m4v':
+    case '.mov':
+    case '.webm':
+    case '.ogv':
+      return { kind: 'video' };
     default:
       return { kind: 'unknown' };
   }
@@ -189,6 +200,20 @@ async function attachAsset(
   const media = detectMedia(asset.fileName);
   if (media.kind === 'unknown') {
     return { error: `unsupported file extension: ${path.extname(asset.fileName) || '(none)'}` };
+  }
+  if (media.kind === 'video') {
+    // Video is referenced by URL only — never downloaded or attached as a block
+    // (a 100MB+ clip would blow MAX_FETCH_BYTES and the request budget). Give
+    // Claude a positive embedding instruction rather than an "unsupported" note.
+    const vext = path.extname(asset.fileName).toLowerCase();
+    const srcType =
+      vext === '.webm' ? 'video/webm' : vext === '.ogv' ? 'video/ogg' : 'video/mp4';
+    return {
+      note:
+        'VIDEO asset — embed with an HTML5 player using the URL above, never an <img>: ' +
+        '<video controls preload="metadata" playsinline style="max-width:100%;height:auto">' +
+        `<source src="URL" type="${srcType}"></video>.`,
+    };
   }
 
   const tmpPath = path.join(tmpDir, `${Date.now()}-${safeBasename(asset.fileName)}`);
@@ -323,6 +348,8 @@ export async function generateWebsite(
       }
       if (result.block) {
         userMessage += `\n  (also attached as a ${result.block.type} block titled "${asset.fileName}")`;
+      } else if (result.note) {
+        userMessage += `\n  (${result.note})`;
       } else if (result.error) {
         userMessage += `\n  (note: file was NOT attached as a block — ${result.error}; use the URL above)`;
       }

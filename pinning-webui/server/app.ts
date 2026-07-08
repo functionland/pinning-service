@@ -801,7 +801,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           "https://accounts.google.com",
           "https://oauth2.googleapis.com",
           "https://www.googleapis.com",
-          // IPFS/S3
+          // Pinning API (public /api/v1/public-stats endpoint) + IPFS/S3
+          "https://api.cloud.fx.land",
           "https://ipfs.cloud.fx.land",
           "https://s3.cloud.fx.land",
           // Blockchain RPC endpoints

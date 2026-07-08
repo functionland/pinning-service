@@ -14,8 +14,12 @@ const usernameContextKeyPostgres = contextKey("username_postgres")
 func AuthMiddlewarePostgres(db *PostgresService) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip auth for login/register endpoints
-			if strings.HasPrefix(r.URL.Path, "/auth/") {
+			// Skip auth for login/register endpoints and the public stats
+			// endpoint (aggregate counts only — exposes no per-user data).
+			// EXACT-match the stats path (not a prefix) and require GET, so the
+			// bypass can never widen to another /api/v1/* route or method.
+			if strings.HasPrefix(r.URL.Path, "/auth/") ||
+				((r.URL.Path == "/api/v1/public-stats" || r.URL.Path == "/api/v1/public-stats/") && r.Method == http.MethodGet) {
 				next.ServeHTTP(w, r)
 				return
 			}

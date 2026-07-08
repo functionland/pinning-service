@@ -143,10 +143,15 @@ func main() {
 	adminAPIController := openapi.NewAdminAPIControllerPostgres(postgresService, systemKey)
 	adminRouter := openapi.NewAdminRouterPostgres(adminAPIController)
 
+	// Public, unauthenticated, cached stats endpoint (aggregate counts only).
+	publicStatsController := openapi.NewPublicStatsControllerPostgres(postgresService)
+	publicStatsRouter := openapi.NewPublicStatsRouterPostgres(publicStatsController)
+
 	// Initialize router
 	mainRouter := openapi.NewRouter(pinsAPIController)
 	additionalRouter := openapi.NewAdditionalRouterPostgres(pinsAPIController, userAPIController)
 	router := mux.NewRouter()
+	router.PathPrefix("/api/v1/public-stats").Handler(publicStatsRouter)
 	router.PathPrefix("/admin/").Handler(adminRouter)
 	router.PathPrefix("/auth/").Handler(additionalRouter)
 	router.PathPrefix("/").Handler(mainRouter)

@@ -180,23 +180,30 @@ func (s *PostgresService) computePublicStats(ctx context.Context) (*PublicStatsR
 		return nil, fmt.Errorf("pins aggregate: %w", err)
 	}
 
-	// FULA spent (all-time, cheap rollup column).
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(total_deducted_fula), 0) FROM user_credits`,
-	).Scan(&totals.FulaSpent); err != nil {
-		return nil, fmt.Errorf("fula spent: %w", err)
-	}
-
-	// Websites generated. ai_generations lives in the same DB but is owned by
-	// the AI service's own migrations — degrade to 0 if it isn't present yet.
+	// Websites generated + the FULA charged for them. ai_generations lives in the
+	// same DB but is owned by the AI service's migrations — degrade to 0 if it
+	// isn't present yet.
 	aiGen := aiGenExists(ctx, s.db)
+	var genSpent float64
 	if aiGen {
 		if err := s.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM ai_generations WHERE status = 'completed'`,
-		).Scan(&totals.Websites); err != nil {
-			return nil, fmt.Errorf("websites count: %w", err)
+			`SELECT COUNT(*), COALESCE(SUM(credits_charged), 0) FROM ai_generations WHERE status = 'completed'`,
+		).Scan(&totals.Websites, &genSpent); err != nil {
+			return nil, fmt.Errorf("websites/generation charges: %w", err)
 		}
 	}
+
+	// FULA spent = website-generation charges (ai_generations.credits_charged) +
+	// storage hourly deductions (credit_history, stored NEGATIVE so negated).
+	// user_credits.total_deducted_fula tracks ONLY storage (~468 of ~65k total),
+	// so it must be combined with the generation charges to reflect real spend.
+	var storageSpent float64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(-SUM(amount_fula), 0) FROM credit_history WHERE tx_type = 'hourly_deduction'`,
+	).Scan(&storageSpent); err != nil {
+		return nil, fmt.Errorf("storage spent: %w", err)
+	}
+	totals.FulaSpent = genSpent + storageSpent
 
 	totals.Co2SavedKg = float64(totals.StoredBytes) / 1e9 * co2KgSavedPerGB
 
@@ -251,9 +258,9 @@ func (s *PostgresService) computePublicStats(ctx context.Context) (*PublicStatsR
 		return nil, fmt.Errorf("users daily: %w", err)
 	}
 
-	// FULA spent per day (hourly storage deductions). credit_history stores
-	// deductions as NEGATIVE amounts, so negate the sum to report spend as a
-	// positive figure — consistent with totals.fula_spent (user_credits).
+	// FULA spent per day — part 1: storage hourly deductions (stored NEGATIVE, so
+	// negated to a positive figure). Generation charges are added below, so this
+	// accumulates (+=) into FulaSpent rather than overwriting it.
 	if err := s.queryDaily(ctx,
 		`SELECT to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS d, COALESCE(-SUM(amount_fula),0)
 		 FROM credit_history WHERE tx_type = 'hourly_deduction' AND created_at >= $1 GROUP BY d`,
@@ -265,27 +272,30 @@ func (s *PostgresService) computePublicStats(ctx context.Context) (*PublicStatsR
 				return err
 			}
 			if e := days[d]; e != nil {
-				e.FulaSpent = f
+				e.FulaSpent += f
 			}
 			return nil
 		}); err != nil {
 		return nil, fmt.Errorf("fula daily: %w", err)
 	}
 
-	// Websites generated per day (guarded).
+	// Websites generated per day + FULA spent per day, part 2: the generation
+	// charges for those websites (added to the storage spend accumulated above).
 	if aiGen {
 		if err := s.queryDaily(ctx,
-			`SELECT to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS d, COUNT(*)
+			`SELECT to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS d, COUNT(*), COALESCE(SUM(credits_charged),0)
 			 FROM ai_generations WHERE status = 'completed' AND created_at >= $1 GROUP BY d`,
 			windowStart,
 			func(rows *sql.Rows) error {
 				var d string
 				var n int64
-				if err := rows.Scan(&d, &n); err != nil {
+				var charged float64
+				if err := rows.Scan(&d, &n, &charged); err != nil {
 					return err
 				}
 				if e := days[d]; e != nil {
 					e.Websites = n
+					e.FulaSpent += charged
 				}
 				return nil
 			}); err != nil {

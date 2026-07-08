@@ -20,6 +20,7 @@ import GetKey from './pages/GetKey';
 import View from './pages/View';
 import Collab from './pages/Collab';
 import GetFxFiles from './pages/GetFxFiles';
+import Stats from './pages/Stats';
 import Layout from './components/Layout';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -83,6 +84,7 @@ function App() {
           <Route path="/view/:shareId" element={<View />} />
           <Route path="/collab/:groupId" element={<Collab />} />
           <Route path="/download" element={<GetFxFiles />} />
+          <Route path="/stats" element={<Stats />} />
           <Route path="/" element={
             <PrivateRoute>
               <Layout />

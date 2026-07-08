@@ -251,9 +251,11 @@ func (s *PostgresService) computePublicStats(ctx context.Context) (*PublicStatsR
 		return nil, fmt.Errorf("users daily: %w", err)
 	}
 
-	// FULA spent per day (hourly storage deductions).
+	// FULA spent per day (hourly storage deductions). credit_history stores
+	// deductions as NEGATIVE amounts, so negate the sum to report spend as a
+	// positive figure — consistent with totals.fula_spent (user_credits).
 	if err := s.queryDaily(ctx,
-		`SELECT to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS d, COALESCE(SUM(amount_fula),0)
+		`SELECT to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS d, COALESCE(-SUM(amount_fula),0)
 		 FROM credit_history WHERE tx_type = 'hourly_deduction' AND created_at >= $1 GROUP BY d`,
 		windowStart,
 		func(rows *sql.Rows) error {

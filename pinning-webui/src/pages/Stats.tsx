@@ -521,13 +521,68 @@ function StatsContent({
 
   return (
     <div className="space-y-10">
-      {/* Totals */}
-      <section>
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Network totals</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      {/* GLOBAL NETWORK TOTALS */}
+      <section className="relative py-12 px-4 sm:px-8 mb-8 overflow-hidden bg-white/40 rounded-[2.5rem]">
+        <h2 className="relative z-20 text-3xl sm:text-5xl font-extrabold text-center text-gray-900 mb-8 sm:mb-12 tracking-tight uppercase drop-shadow-sm">
+          Global Network Totals
+        </h2>
+
+        {/* Mobile Layout (stacked/grid) */}
+        <div className="md:hidden relative z-10 max-w-lg mx-auto flex flex-col gap-4">
+          <div className="absolute inset-0 flex items-center justify-center opacity-10 pointer-events-none">
+            <img src="/bg-icon.png" alt="" className="w-full h-auto object-contain blur-[1px]" />
+          </div>
           {kpis.map((k) => (
-            <KpiCard key={k.label} label={k.label} value={k.value} caption={k.caption} icon={k.icon} />
+            <FloatingKpiCard key={k.label} label={k.label} value={k.value} caption={k.caption} icon={k.icon} />
           ))}
+        </div>
+
+        {/* Desktop Layout (scattered like the image) */}
+        <div className="hidden md:block relative max-w-5xl mx-auto h-[550px] mt-4">
+          {/* Central Background Icon */}
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <img src="/bg-icon.png" alt="" className="w-[450px] opacity-[0.08] blur-[2px] object-contain" />
+          </div>
+
+          {/* SVG Connecting Lines */}
+          <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-40 z-0" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="lineGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#06B597" stopOpacity="0.8" />
+                <stop offset="100%" stopColor="#06B597" stopOpacity="0.1" />
+              </linearGradient>
+            </defs>
+            <path d="M 500 275 Q 300 200 150 150" fill="none" stroke="url(#lineGrad)" strokeWidth="1.5" />
+            <path d="M 500 275 Q 350 150 350 120" fill="none" stroke="url(#lineGrad)" strokeWidth="1.5" />
+            <path d="M 500 275 Q 650 150 650 120" fill="none" stroke="url(#lineGrad)" strokeWidth="1.5" />
+            <path d="M 500 275 Q 850 200 850 180" fill="none" stroke="url(#lineGrad)" strokeWidth="1.5" />
+            <path d="M 500 275 Q 250 350 180 320" fill="none" stroke="url(#lineGrad)" strokeWidth="1.5" />
+            <path d="M 500 275 Q 450 450 480 430" fill="none" stroke="url(#lineGrad)" strokeWidth="1.5" />
+            <path d="M 500 275 Q 750 400 780 380" fill="none" stroke="url(#lineGrad)" strokeWidth="1.5" />
+          </svg>
+
+          {/* Scattered Cards */}
+          <div className="absolute top-[18%] left-[2%] z-10 w-[200px]">
+            <FloatingKpiCard label={kpis[0].label} value={kpis[0].value} icon={kpis[0].icon} caption={kpis[0].caption} />
+          </div>
+          <div className="absolute top-[8%] left-[26%] z-10 w-[220px]">
+            <FloatingKpiCard label={kpis[1].label} value={kpis[1].value} icon={kpis[1].icon} caption={kpis[1].caption} />
+          </div>
+          <div className="absolute top-[6%] right-[24%] z-10 w-[220px]">
+            <FloatingKpiCard label={kpis[2].label} value={kpis[2].value} icon={kpis[2].icon} caption={kpis[2].caption} />
+          </div>
+          <div className="absolute top-[22%] right-[2%] z-10 w-[210px]">
+            <FloatingKpiCard label={kpis[3].label} value={kpis[3].value} icon={kpis[3].icon} caption={kpis[3].caption} />
+          </div>
+          <div className="absolute top-[52%] left-[8%] z-10 w-[230px]">
+            <FloatingKpiCard label={kpis[4].label} value={kpis[4].value} icon={kpis[4].icon} caption={kpis[4].caption} />
+          </div>
+          <div className="absolute top-[72%] left-[40%] z-10 w-[240px]">
+            <FloatingKpiCard label={kpis[5].label} value={kpis[5].value} icon={kpis[5].icon} caption={kpis[5].caption} />
+          </div>
+          <div className="absolute top-[60%] right-[6%] z-10 w-[240px]">
+            <FloatingKpiCard label={kpis[6].label} value={kpis[6].value} icon={kpis[6].icon} caption={kpis[6].caption} />
+          </div>
         </div>
       </section>
 
@@ -593,6 +648,35 @@ function StatsContent({
           </ChartCard>
         </div>
       </section>
+    </div>
+  );
+}
+
+function FloatingKpiCard({
+  label,
+  value,
+  caption,
+  icon,
+}: {
+  label: string;
+  value: string;
+  caption?: string;
+  icon: ReactNode;
+}) {
+  return (
+    <div className="bg-white rounded-2xl p-4 sm:p-5 flex flex-col shadow-lg shadow-gray-200/50 border border-gray-100 hover:-translate-y-1 transition-transform duration-300 w-full">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1">
+          <p className="text-sm font-medium text-gray-600 leading-none">{label}</p>
+          <p className="text-2xl sm:text-3xl font-extrabold text-gray-900 mt-2 tracking-tight break-words">{value}</p>
+          {caption && <p className="text-xs text-primary-600 font-medium mt-1">{caption}</p>}
+        </div>
+        <div className="shrink-0 w-8 h-8 rounded-lg bg-green-50 border border-green-200 flex items-center justify-center text-green-600 shadow-sm">
+          <div className="scale-75">
+            {icon}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

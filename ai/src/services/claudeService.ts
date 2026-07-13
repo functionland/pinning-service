@@ -24,6 +24,11 @@ import path from 'path';
 import mammoth from 'mammoth';
 import { parseOfficeAsync } from 'officeparser';
 import { config } from '../config/index.js';
+import {
+  composeWebsiteSystemPrompt,
+  DESIGN_SKILL_SHA256,
+  DESIGN_SKILL_UPSTREAM_COMMIT,
+} from '../prompts/designSkill.js';
 
 export interface WebsiteFile {
   path: string;
@@ -62,7 +67,7 @@ const FETCH_TIMEOUT_MS = 45_000;
  *  already enforced both, so this is just defence in depth on the network). */
 const MAX_FETCH_BYTES = 32 * 1024 * 1024;
 
-const SYSTEM_PROMPT = `You are a website builder. Generate a complete static website as a set of files.
+const BASE_SYSTEM_PROMPT = `You are a website builder. Generate a complete static website as a set of files.
 Return ONLY a JSON object with this structure:
 { "files": [ { "path": "index.html", "content": "..." }, { "path": "style.css", "content": "..." } ] }
 
@@ -92,6 +97,22 @@ Content:
 Output:
 - Do NOT wrap the JSON in markdown code blocks — return raw JSON only
 - Keep total output under 50 files`;
+
+// Compose once at process startup. When enabled, a missing or modified skill
+// fails startup rather than silently producing websites without the requested
+// design guidance. CLAUDE_DESIGN_SKILL_ENABLED=false is the explicit rollback.
+const SYSTEM_PROMPT = composeWebsiteSystemPrompt(
+  BASE_SYSTEM_PROMPT,
+  config.claudeDesignSkillEnabled,
+);
+
+if (config.claudeDesignSkillEnabled) {
+  console.log(
+    `[claude] Design skill enabled: commit ${DESIGN_SKILL_UPSTREAM_COMMIT.slice(0, 12)}, sha256 ${DESIGN_SKILL_SHA256.slice(0, 12)}...`,
+  );
+} else {
+  console.warn('[claude] Design skill disabled by CLAUDE_DESIGN_SKILL_ENABLED=false');
+}
 
 const client = new Anthropic({
   apiKey: config.claudeApiKey,
@@ -303,6 +324,7 @@ export async function generateWebsite(
   assets: Asset[],
   signal?: AbortSignal,
   tmpDir?: string,
+  anthropicClient: Anthropic = client,
 ): Promise<WebsiteFile[]> {
   // Try to download + attach every asset. Errors are captured per-asset so
   // a single bad file doesn't fail the whole generation — Claude still has
@@ -372,7 +394,7 @@ export async function generateWebsite(
 
   let response: Anthropic.Message;
   try {
-    const stream = client.messages.stream(
+    const stream = anthropicClient.messages.stream(
       {
         model: config.claudeModel,
         max_tokens: 64000,
@@ -418,7 +440,7 @@ export async function generateWebsite(
     console.warn(`[claude] Failed to parse response (${rawText.length} chars), last 200 chars: ...${rawText.slice(-200)}`);
     console.warn('[claude] Retrying with correction prompt');
     try {
-      const retryStream = client.messages.stream(
+      const retryStream = anthropicClient.messages.stream(
         {
           model: config.claudeModel,
           max_tokens: 64000,

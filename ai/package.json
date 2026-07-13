@@ -9,6 +9,7 @@
     "build": "node node_modules/typescript/bin/tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "test:live-design": "tsx src/scripts/liveDesignSkillSmoke.ts",
     "test:watch": "vitest",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"

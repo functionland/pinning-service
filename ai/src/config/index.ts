@@ -25,6 +25,10 @@ const configSchema = z.object({
   // Claude API
   claudeApiKey: z.string().min(1, 'CLAUDE_API_KEY is required'),
   claudeModel: z.string().default('claude-opus-4-6'),
+  claudeDesignSkillEnabled: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
 
   // Generation
   generationCostFula: z.coerce.number().int().nonnegative().default(1000),
@@ -78,6 +82,7 @@ function loadConfig(): Config {
     nodeEnv: process.env.NODE_ENV,
     claudeApiKey: process.env.CLAUDE_API_KEY,
     claudeModel: process.env.CLAUDE_MODEL,
+    claudeDesignSkillEnabled: process.env.CLAUDE_DESIGN_SKILL_ENABLED,
     generationCostFula: process.env.GENERATION_COST_FULA,
     generationCostFulaWithTracking: process.env.GENERATION_COST_FULA_WITH_TRACKING,
     freeGenerationsPerUser: process.env.FREE_GENERATIONS_PER_USER,
@@ -123,6 +128,7 @@ export function logConfig(): void {
   console.log(`  nodeEnv: ${config.nodeEnv}`);
   console.log(`  claudeApiKey: ${config.claudeApiKey ? '****' : '(not set)'}`);
   console.log(`  claudeModel: ${config.claudeModel}`);
+  console.log(`  claudeDesignSkillEnabled: ${config.claudeDesignSkillEnabled}`);
   console.log(`  generationCostFula: ${config.generationCostFula}`);
   console.log(`  generationCostFulaWithTracking: ${config.generationCostFulaWithTracking}`);
   console.log(`  freeGenerationsPerUser: ${config.freeGenerationsPerUser}`);

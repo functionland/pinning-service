@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Keep vendored third-party prompt assets stable across Windows and Ubuntu.
+ai/skills/** text eol=lf
+ai/third_party/emilkowalski-skills/** text eol=lf

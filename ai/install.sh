@@ -295,6 +295,7 @@ NODE_ENV=production
 # Claude API
 CLAUDE_API_KEY=$CLAUDE_API_KEY
 CLAUDE_MODEL=${CLAUDE_MODEL:-claude-opus-4-6}
+CLAUDE_DESIGN_SKILL_ENABLED=${CLAUDE_DESIGN_SKILL_ENABLED:-true}
 
 # Generation
 GENERATION_COST_FULA=${GENERATION_COST_FULA:-1000}
@@ -388,6 +389,9 @@ copy_files() {
 
     cp -r "$SCRIPT_DIR/src" "$INSTALL_DIR/"
     cp -r "$SCRIPT_DIR/migrations" "$INSTALL_DIR/"
+    cp -r "$SCRIPT_DIR/skills" "$INSTALL_DIR/"
+    mkdir -p "$INSTALL_DIR/third_party"
+    cp -r "$SCRIPT_DIR/third_party/emilkowalski-skills" "$INSTALL_DIR/third_party/"
     cp "$SCRIPT_DIR/package.json" "$INSTALL_DIR/"
     cp "$SCRIPT_DIR/tsconfig.json" "$INSTALL_DIR/"
     cp "$SCRIPT_DIR/.env.example" "$INSTALL_DIR/" 2>/dev/null || true

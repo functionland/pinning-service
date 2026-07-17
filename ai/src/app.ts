@@ -102,7 +102,7 @@ app.use(
   cors({
     origin: '*',
     allowMethods: ['GET', 'POST', 'OPTIONS'],
-    allowHeaders: ['Authorization', 'Content-Type'],
+    allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
     exposeHeaders: ['Content-Type'],
     maxAge: 86400,
   })

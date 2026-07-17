@@ -496,3 +496,91 @@ export async function generateWebsite(
 
   return parsed.files;
 }
+
+export async function askAi(
+  prompt: string,
+  files: { fileName: string; localPath: string }[],
+  signal?: AbortSignal,
+  anthropicClient: Anthropic = client
+): Promise<string> {
+  const attached: Array<{ fileName: string; result: AssetAttach }> = [];
+
+  for (const file of files) {
+    if (signal?.aborted) break;
+    const media = detectMedia(file.fileName);
+    if (media.kind === 'unknown' || media.kind === 'video') {
+       attached.push({ fileName: file.fileName, result: { error: `Unsupported file type for Ask AI` }});
+       continue;
+    }
+    
+    try {
+      if (media.kind === 'image') {
+        const data = fs.readFileSync(file.localPath).toString('base64');
+        attached.push({ fileName: file.fileName, result: { block: { type: 'image', source: { type: 'base64', media_type: media.imageMime!, data } } } });
+      } else if (media.kind === 'pdf') {
+        const data = fs.readFileSync(file.localPath).toString('base64');
+        attached.push({ fileName: file.fileName, result: { block: { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data }, title: file.fileName } } });
+      } else if (media.kind === 'docx') {
+        const result = await mammoth.extractRawText({ path: file.localPath });
+        const text = (result.value || '').trim();
+        if (!text) attached.push({ fileName: file.fileName, result: { error: 'docx contained no extractable text' } });
+        else attached.push({ fileName: file.fileName, result: { block: { type: 'document', source: { type: 'text', media_type: 'text/plain', data: text }, title: file.fileName } } });
+      } else if (media.kind === 'xlsx' || media.kind === 'pptx') {
+        const text = (await parseOfficeAsync(file.localPath)).trim();
+        if (!text) attached.push({ fileName: file.fileName, result: { error: `${media.kind} contained no extractable text` } });
+        else attached.push({ fileName: file.fileName, result: { block: { type: 'document', source: { type: 'text', media_type: 'text/plain', data: text }, title: file.fileName } } });
+      } else if (media.kind === 'text') {
+        const text = fs.readFileSync(file.localPath, 'utf-8');
+        attached.push({ fileName: file.fileName, result: { block: { type: 'document', source: { type: 'text', media_type: 'text/plain', data: text }, title: file.fileName } } });
+      }
+    } catch (err) {
+      attached.push({ fileName: file.fileName, result: { error: `extraction failed: ${(err as Error).message}` } });
+    }
+  }
+
+  let userMessage = `You are a helpful AI assistant. The user is asking you a question about the following files:\n\n`;
+  for (const { fileName, result } of attached) {
+    if (result.block) {
+      userMessage += `\n- Attached file: "${fileName}"`;
+    } else if (result.error) {
+      userMessage += `\n- Failed to attach "${fileName}": ${result.error}`;
+    }
+  }
+  userMessage += `\n\nUser Question:\n${prompt}`;
+
+  const messageContent: Array<TextBlockParam | AssetContentBlock> = [
+    { type: 'text', text: userMessage },
+  ];
+  for (const { result } of attached) {
+    if (result.block) {
+      messageContent.push(result.block);
+    }
+  }
+
+  let response: Anthropic.Message;
+  try {
+    const stream = anthropicClient.messages.stream(
+      {
+        model: config.claudeModel,
+        max_tokens: 4096,
+        system: "You are a helpful AI assistant. Analyze the provided files and answer the user's question clearly and concisely.",
+        messages: [{ role: 'user', content: messageContent }],
+      },
+      { signal },
+    );
+    response = await stream.finalMessage();
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Ask AI generation was cancelled');
+    }
+    throw error;
+  }
+
+  const textBlock = response.content.find((block) => block.type === 'text');
+  if (!textBlock || textBlock.type !== 'text') {
+    throw new Error('Claude returned no text response');
+  }
+
+  return textBlock.text.trim();
+}
+

@@ -9,6 +9,9 @@ import { app } from './app.js';
 import { config, logConfig } from './config/index.js';
 import { initializeDatabase, closeDatabase } from './database/index.js';
 import { stopAllJobs } from './services/generationService.js';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 // ASCII art banner
 const banner = `
@@ -23,6 +26,28 @@ async function main() {
 
   // Log configuration
   logConfig();
+  
+  // Cleanup stale ask temp files
+  try {
+    const tmpDir = os.tmpdir();
+    const files = fs.readdirSync(tmpDir);
+    let deletedCount = 0;
+    
+    for (const file of files) {
+      if (file.startsWith('ask-')) {
+        const fullPath = path.join(tmpDir, file);
+        if (fs.statSync(fullPath).isDirectory()) {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+          deletedCount++;
+        }
+      }
+    }
+    if (deletedCount > 0) {
+      console.log(`[janitor] Cleaned up ${deletedCount} stale 'ask-*' temp directories.`);
+    }
+  } catch (err) {
+    console.error('[janitor] Error cleaning up stale temp files:', err);
+  }
 
   // Initialize database
   console.log('\n[startup] Initializing database...');

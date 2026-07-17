@@ -158,7 +158,7 @@ app.route('/api/v1', pricingRoutes);
 app.route('/api/v1', generateRoutes);
 
 // Ask AI API routes
-app.route('/api/v1', askRoutes);
+app.route('/api/v1/ask', askRoutes);
 
 // ============================================
 // 404 Handler

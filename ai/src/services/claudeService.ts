@@ -563,10 +563,17 @@ export async function askAi(
       {
         model: config.claudeModel,
         max_tokens: 4096,
-        system: "You are a helpful AI assistant. Analyze the provided files and answer the user's question clearly and concisely.",
+        system: "You are a helpful AI assistant. Analyze the provided files and answer the user's question clearly and concisely. If the user asks about a URL, use your web_fetch tool to read it.",
         messages: [{ role: 'user', content: messageContent }],
+        tools: [
+          { type: 'web_search_20250305', name: 'web_search' } as any,
+          { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 5 } as any,
+        ],
       },
-      { signal },
+      { 
+        signal,
+        headers: { 'anthropic-beta': 'web-fetch-2025-09-10, web-search-2025-03-05' }
+      },
     );
     response = await stream.finalMessage();
   } catch (error) {

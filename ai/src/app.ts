@@ -14,6 +14,15 @@ import { v4 as uuidv4 } from 'uuid';
 import { healthRoutes } from './routes/health.js';
 import { generateRoutes } from './routes/generate.js';
 import { pricingRoutes } from './routes/pricing.js';
+import { askRoutes } from './routes/ask.js';
+import { cleanupExpiredAskCache } from './database/ask_postgres.js';
+
+// Run cleanup every 15 minutes
+setInterval(() => {
+  cleanupExpiredAskCache().catch(err => {
+    console.error('[cache] Error cleaning up expired ask responses:', err);
+  });
+}, 15 * 60 * 1000).unref();
 
 interface Env {
   Variables: {
@@ -147,6 +156,9 @@ app.route('/api/v1', pricingRoutes);
 
 // Generation API routes
 app.route('/api/v1', generateRoutes);
+
+// Ask AI API routes
+app.route('/api/v1', askRoutes);
 
 // ============================================
 // 404 Handler

@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS ask_generations (
+    id VARCHAR(36) PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    file_count INTEGER NOT NULL,
+    credits_charged INTEGER NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ask_response_cache (
+    idempotency_key VARCHAR(255) PRIMARY KEY,
+    response_text TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ask_user_stats (
+    user_id VARCHAR(255) PRIMARY KEY,
+    free_ask_used BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);

@@ -4,7 +4,6 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { config } from '../config/index.js';
 import { jwtValidatorMiddleware } from '../middleware/jwtValidator.js';
 import { askAi } from '../services/claudeService.js';
 import { deductCredits, refundCredits } from '../services/creditService.js';

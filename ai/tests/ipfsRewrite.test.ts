@@ -106,6 +106,33 @@ describe('publishWebsite HTML rewriting', () => {
     expect(result.cid).toMatch(/^baf/);
   });
 
+  it('strips model-authored CSP meta tags and lands deferred head scripts at end of body', async () => {
+    const uploads = mockGateway();
+    const files = [
+      {
+        path: 'index.html',
+        content:
+          '<html><head><meta http-equiv="Content-Security-Policy" content="default-src \'self\'; style-src \'self\' \'unsafe-inline\'">' +
+          '<script defer src="./app.js"></script></head>' +
+          '<body><h1 class="anim">Hi</h1></body></html>',
+      },
+      { path: 'app.js', content: 'document.querySelectorAll(".anim")' },
+    ];
+
+    await publishWebsite(files, 'job5', 'token', {});
+    const index = uploads.get('website-job5/index.html')!;
+    // CSP meta gone — it would block the inlined script on every gateway.
+    expect(index).not.toContain('Content-Security-Policy');
+    // Script no longer in <head>; inlined just before </body> so its DOM
+    // queries run against a parsed document (defer semantics preserved).
+    expect(index).not.toContain('src="./app.js"');
+    const scriptAt = index.indexOf('querySelectorAll');
+    const h1At = index.indexOf('<h1');
+    const bodyCloseAt = index.indexOf('</body>');
+    expect(scriptAt).toBeGreaterThan(h1At);
+    expect(scriptAt).toBeLessThan(bodyCloseAt);
+  });
+
   it('generated svg becomes a data: URI; unreferenced css still uploads as fallback', async () => {
     const uploads = mockGateway();
     const files = [

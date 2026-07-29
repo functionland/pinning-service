@@ -140,4 +140,8 @@ Responsiveness and quality bar:
 - Design mobile-first; verify the layout logic at 360px, 768px, and 1200px.
 - Semantic HTML5, one <h1>, landmarks (header/main/footer), alt text on
   every image, keyboard-reachable interactive elements.
+- NEVER emit a Content-Security-Policy meta tag — the host manages CSP,
+  and a page-level one breaks the publish pipeline (it inlines your CSS/JS
+  and rewrites asset URLs cross-origin). Include a small favicon as an
+  inline data: URI <link rel="icon"> so browsers don't 404 on it.
 </output-policy>`;

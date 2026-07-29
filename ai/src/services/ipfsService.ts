@@ -224,7 +224,16 @@ function inlineLocalCssJs(
       if (scriptRe.test(result)) {
         // Standard inline-script escape: "</script" inside strings/regexes.
         const js = file.content.replace(/<\/script/gi, '<\\/script');
-        result = result.replace(scriptRe, `<script>\n${js}\n</script>`);
+        // Remove the tag where it stood and append the inline script at
+        // the END OF BODY: the original tag may have carried `defer` in
+        // <head> (run-after-parse), which an in-place inline script would
+        // silently lose — its DOM queries would find nothing.
+        result = result.replace(scriptRe, '');
+        const inlineTag = `<script>\n${js}\n</script>`;
+        const closingBody = /<\/body\s*>/i;
+        result = closingBody.test(result)
+          ? result.replace(closingBody, `${inlineTag}\n$&`)
+          : `${result}\n${inlineTag}\n`;
         inlined.add(file.path);
       }
     }
@@ -236,6 +245,22 @@ function inlineLocalCssJs(
  *  bare-CID gateway response can never carry. */
 function svgDataUri(content: string): string {
   return `data:image/svg+xml;base64,${Buffer.from(content, 'utf-8').toString('base64')}`;
+}
+
+/**
+ * Remove model-authored Content-Security-Policy meta tags. A meta CSP
+ * travels with the HTML to every gateway and is written for the model's
+ * ORIGINAL file layout — after publish-time inlining and cross-origin
+ * gateway asset rewriting it blocks the site's own inline scripts
+ * ("default-src 'self'" → dead JS, invisible reveal-hidden content) and
+ * can block gateway-hosted images. Static IPFS content gains nothing
+ * from a self-imposed CSP; the gateways set their own headers.
+ */
+function stripCspMetaTags(html: string): string {
+  return html.replace(
+    /<meta\b[^>]*http-equiv\s*=\s*["']?content-security-policy["']?[^>]*>\s*/gi,
+    '',
+  );
 }
 
 /**
@@ -355,7 +380,7 @@ export async function publishWebsite(
     });
     const inlinedEverywhere = new Set<string>();
     const inlinePage = (html: string): string => {
-      const r = inlineLocalCssJs(html, inlineable);
+      const r = inlineLocalCssJs(stripCspMetaTags(html), inlineable);
       for (const p of r.inlined) {
         inlinedEverywhere.add(p);
       }

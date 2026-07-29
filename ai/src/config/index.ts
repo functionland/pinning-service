@@ -38,7 +38,10 @@ const configSchema = z.object({
     .enum(['true', 'false'])
     .default('true')
     .transform((value) => value === 'true'),
-  claudeBriefMaxTokens: z.coerce.number().int().positive().default(4000),
+  // Thinking tokens count against max_tokens — at effort=high the model can
+  // spend thousands thinking before writing the brief, so this needs real
+  // headroom or the pass yields no text and gets skipped.
+  claudeBriefMaxTokens: z.coerce.number().int().positive().default(16000),
   claudeBuildMaxTokens: z.coerce.number().int().positive().default(96000),
   claudePolishMaxTokens: z.coerce.number().int().positive().default(64000),
 

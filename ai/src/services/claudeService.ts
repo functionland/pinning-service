@@ -801,6 +801,11 @@ export async function generateWebsite(
       'high',
       'brief',
     );
+    if (a.stopReason === 'max_tokens') {
+      console.warn(
+        '[claude] Brief truncated at the token budget — raise CLAUDE_BRIEF_MAX_TOKENS (thinking counts against it)',
+      );
+    }
     brief = a.text.length > 0 ? a.text : null;
   } catch (err) {
     throwIfAborted();

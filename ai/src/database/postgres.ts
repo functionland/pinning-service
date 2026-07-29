@@ -102,6 +102,7 @@ export interface AiGeneration {
   updated_at: string;
   completed_at: string | null;
   enable_tracking: boolean;
+  pipeline_version: number | null;
 }
 
 // Create a new generation record (stores userId hash, not plain-text email)
@@ -111,13 +112,14 @@ export async function createGeneration(
   prompt: string,
   assets: any[],
   creditsCharged: number,
-  enableTracking: boolean
+  enableTracking: boolean,
+  pipelineVersion: number | null = null
 ): Promise<string> {
   const result = await query(
-    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message, enable_tracking)
-     VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation', $6)
+    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message, enable_tracking, pipeline_version)
+     VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation', $6, $7)
      RETURNING id`,
-    [id, userId, prompt, JSON.stringify(assets), creditsCharged, enableTracking]
+    [id, userId, prompt, JSON.stringify(assets), creditsCharged, enableTracking, pipelineVersion]
   );
   return result.rows[0].id;
 }

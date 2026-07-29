@@ -272,9 +272,18 @@ export async function publishWebsite(
   try {
     await ensureBucket(userToken, controller.signal);
 
-    // Separate HTML entry point from other assets
+    // Partition: index.html entry point, other .html pages (rewritten AND
+    // added to the cid map so index links resolve — subpage→index links
+    // cannot resolve under content addressing, which is why the prompts
+    // mandate single-page output; this is defense for accidental
+    // multi-page sites), and non-HTML assets.
     const indexFile = files.find(f => f.path === 'index.html');
-    const otherFiles = files.filter(f => f.path !== 'index.html');
+    const subPages = files.filter(
+      f => f.path !== 'index.html' && f.path.toLowerCase().endsWith('.html')
+    );
+    const otherFiles = files.filter(
+      f => f.path !== 'index.html' && !f.path.toLowerCase().endsWith('.html')
+    );
 
     if (!indexFile) {
       throw new Error('No index.html found in generated files');
@@ -294,6 +303,21 @@ export async function publishWebsite(
       );
       await parallelLimit(uploadTasks, UPLOAD_CONCURRENCY);
       console.log(`[ipfs] Asset uploads complete`);
+    }
+
+    // Step 1.5: Rewrite + upload each subpage (its asset refs now resolve),
+    // then add its CID to the map so index→subpage links resolve too.
+    for (const page of subPages) {
+      const rewrittenPage = rewriteHtml(page.content, cidMap);
+      const uploaded = await uploadFileToS3(
+        { path: page.path, content: rewrittenPage },
+        jobId,
+        userToken,
+        controller.signal
+      );
+      uploadedKeys.push(uploaded.s3Key);
+      cidMap[page.path] = `${gatewayBase}/${uploaded.cid}`;
+      console.log(`[ipfs] Subpage ${page.path} → ${uploaded.cid}`);
     }
 
     // Step 2: Rewrite index.html with absolute gateway URLs

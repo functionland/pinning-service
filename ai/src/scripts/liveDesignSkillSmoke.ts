@@ -55,8 +55,14 @@ const files = await (async () => {
           content: 'Use this attachment only as visual brand direction.',
         },
       ],
-      AbortSignal.timeout(300_000),
-      assetTmpDir,
+      {
+        // Multi-pass (brief → build → polish) legitimately runs past the old
+        // 5-minute ceiling.
+        signal: AbortSignal.timeout(900_000),
+        tmpDir: assetTmpDir,
+        pipelineVersion: 2,
+        onProgress: (message) => console.log(`[smoke] ${message}`),
+      },
     );
   } finally {
     fs.rmSync(assetTmpDir, { recursive: true, force: true });
@@ -139,6 +145,23 @@ for (const file of files) {
 
 if (!/prefers-reduced-motion/i.test(combined)) {
   throw new Error('Live smoke failed: requested reduced-motion handling is missing');
+}
+
+// Richness bar for the multi-pass pipeline: a real motion layer and a
+// non-trivial amount of code.
+if (!/@keyframes/i.test(combined) && !/IntersectionObserver/i.test(combined)) {
+  throw new Error(
+    'Live smoke failed: no motion layer (@keyframes / IntersectionObserver) in output',
+  );
+}
+const totalBytes = files.reduce(
+  (sum, file) => sum + Buffer.byteLength(file.content, 'utf8'),
+  0,
+);
+if (totalBytes < 25_000) {
+  throw new Error(
+    `Live smoke failed: output too small for the rich pipeline (${totalBytes} bytes < 25000)`,
+  );
 }
 
 const outputDirectory = process.env.LIVE_SMOKE_OUTPUT_DIR;

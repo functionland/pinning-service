@@ -64,6 +64,11 @@ MOTION — hand-rolled, dependency-free, purposeful:
 - One shared IntersectionObserver reveal utility: elements start with a
   small translate+opacity offset and settle on entry; stagger siblings with
   a per-element --delay custom property. Reveal once, don't re-hide.
+- NO-JS SAFETY (mandatory): the script's FIRST statement adds a "js" class
+  to <html>, and every reveal-hidden style is scoped behind it
+  (html.js .anim { opacity: 0; ... }). With JavaScript unavailable or
+  blocked, ALL content must be fully visible — a page that renders blank
+  without JS is a failure.
 - A page-load hero entrance (staggered keyframes) sets the tone in the
   first 600ms.
 - Micro-interactions on EVERY interactive element: hover lift/underline
@@ -79,6 +84,16 @@ IMAGERY — treat the user's assets as art direction, not attachments:
   rounded or clipped shapes, duotone/overlay treatments that tie them into
   the palette, captions in editorial layouts.
 - Never repeat the same image twice; never stretch or distort.
+
+NAVIGATION — overlays must be closed by default, in pure CSS:
+- Any menu/nav panel (mobile menu, fullscreen index, drawer) is HIDDEN in
+  its default CSS state (e.g. position:fixed + visibility:hidden, or
+  max-height:0 + overflow:hidden) and opens ONLY when a toggle adds an
+  explicit class, kept in sync with aria-expanded. Never rely on JS to
+  establish the CLOSED state.
+- A sticky/fixed header stays compact — never taller than ~15% of the
+  viewport when the menu is closed, and the open menu panel must never
+  permanently add height to it or cover content when "closed".
 
 DISTINCTIVENESS — banned and required:
 - BANNED: purple-gradient-on-white SaaS look; three identical feature cards

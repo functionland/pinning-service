@@ -85,15 +85,18 @@ IMAGERY — treat the user's assets as art direction, not attachments:
   the palette, captions in editorial layouts.
 - Never repeat the same image twice; never stretch or distort.
 
-NAVIGATION — overlays must be closed by default, in pure CSS:
-- Any menu/nav panel (mobile menu, fullscreen index, drawer) is HIDDEN in
-  its default CSS state (e.g. position:fixed + visibility:hidden, or
-  max-height:0 + overflow:hidden) and opens ONLY when a toggle adds an
-  explicit class, kept in sync with aria-expanded. Never rely on JS to
-  establish the CLOSED state.
+NAVIGATION:
+- The PRIMARY navigation (inline links in the header) is always visible on
+  desktop — never hide it behind a toggle when there is room for it.
+- Rules below apply ONLY to TOGGLED panels (mobile hamburger menu,
+  fullscreen index, drawer): such a panel is HIDDEN in its default CSS
+  state (e.g. position:fixed + visibility:hidden, or max-height:0 +
+  overflow:hidden) and opens ONLY when its toggle adds an explicit class,
+  kept in sync with aria-expanded. Never rely on JS to establish the
+  CLOSED state.
 - A sticky/fixed header stays compact — never taller than ~15% of the
-  viewport when the menu is closed, and the open menu panel must never
-  permanently add height to it or cover content when "closed".
+  viewport with panels closed, and a toggled panel must never permanently
+  add height to the header or cover content while "closed".
 
 DISTINCTIVENESS — banned and required:
 - BANNED: purple-gradient-on-white SaaS look; three identical feature cards

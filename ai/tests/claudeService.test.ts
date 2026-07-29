@@ -92,7 +92,10 @@ describe('Claude website generation with design guidance (single-pass)', () => {
     expect(request.model).toBe('claude-opus-4-6');
     expect(request.max_tokens).toBe(64000);
     expect(request.thinking).toEqual({ type: 'adaptive' });
-    expect(request.output_config).toEqual({ effort: 'medium' });
+    expect(request.output_config.effort).toBe('medium');
+    // File-producing passes are schema-constrained (guaranteed-valid JSON).
+    expect(request.output_config.format.type).toBe('json_schema');
+    expect(request.output_config.format.schema.required).toEqual(['files']);
     const sys = systemText(request);
     expect(sys).toContain('<emil-design-eng-skill>');
     expect(sys).toContain('<final-service-contract>');

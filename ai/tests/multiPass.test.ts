@@ -103,6 +103,7 @@ describe('multi-pass website generation', () => {
     );
 
     expect(briefReq.max_tokens).toBe(4000);
+    // Brief is free text — no schema constraint.
     expect(briefReq.output_config).toEqual({ effort: 'high' });
     expect(briefReq.thinking).toEqual({ type: 'adaptive' });
     expect(briefReq.messages).toHaveLength(1);
@@ -111,7 +112,8 @@ describe('multi-pass website generation', () => {
     );
 
     expect(buildReq.max_tokens).toBe(96000);
-    expect(buildReq.output_config).toEqual({ effort: 'high' });
+    expect(buildReq.output_config.effort).toBe('high');
+    expect(buildReq.output_config.format.type).toBe('json_schema');
     // Growing conversation: brief request → assistant brief → build ask.
     expect(buildReq.messages).toHaveLength(3);
     expect(buildReq.messages[1]).toEqual({ role: 'assistant', content: BRIEF });
@@ -120,7 +122,8 @@ describe('multi-pass website generation', () => {
     expect(buildReq.system).toEqual(briefReq.system);
 
     expect(polishReq.max_tokens).toBe(64000);
-    expect(polishReq.output_config).toEqual({ effort: 'medium' });
+    expect(polishReq.output_config.effort).toBe('medium');
+    expect(polishReq.output_config.format.type).toBe('json_schema');
     // Build raw JSON echoed as an assistant turn before the polish ask.
     expect(polishReq.messages).toHaveLength(5);
     expect(polishReq.messages[3].role).toBe('assistant');

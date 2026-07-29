@@ -102,6 +102,29 @@ function clipDocText(text: string): string {
     : text;
 }
 
+/** Structured-output schema for file-producing passes — the API then
+ *  GUARANTEES syntactically valid JSON of this shape, eliminating the
+ *  parse-failure → repair-retry path in the common case. */
+const FILES_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    files: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          content: { type: 'string' },
+        },
+        required: ['path', 'content'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['files'],
+  additionalProperties: false,
+};
+
 /** Wire size of an attached block's payload (base64 or text characters). */
 function blockWireBytes(block: AssetContentBlock): number {
   const source = block.source as { data?: unknown };
@@ -544,9 +567,10 @@ export async function generateWebsite(
     maxTokens: number,
     effort: 'low' | 'medium' | 'high',
     label: string,
+    filesJson = false,
   ): Promise<PassResult> => {
     console.log(
-      `[claude] Pass ${label}: model ${config.claudeModel}, max_tokens ${maxTokens}, effort ${effort}`,
+      `[claude] Pass ${label}: model ${config.claudeModel}, max_tokens ${maxTokens}, effort ${effort}${filesJson ? ', schema-constrained' : ''}`,
     );
     let response: Anthropic.Message;
     try {
@@ -556,7 +580,12 @@ export async function generateWebsite(
           max_tokens: maxTokens,
           system: SYSTEM_BLOCKS,
           thinking: { type: 'adaptive' },
-          output_config: { effort },
+          output_config: {
+            effort,
+            ...(filesJson
+              ? { format: { type: 'json_schema', schema: FILES_JSON_SCHEMA } }
+              : {}),
+          },
           messages,
         } as Anthropic.MessageStreamParams,
         { signal },
@@ -591,7 +620,7 @@ export async function generateWebsite(
     // must build on it (including any truncation-retry turn) so the model
     // keeps every constraint it was last given.
     let attemptMessages = messages;
-    let result = await runPass(attemptMessages, maxTokens, effort, label);
+    let result = await runPass(attemptMessages, maxTokens, effort, label, true);
     if (result.stopReason === 'max_tokens') {
       console.warn(
         `[claude] Pass ${label} truncated at ${result.text.length} chars — retrying at reduced scope`,
@@ -607,6 +636,7 @@ export async function generateWebsite(
         maxTokens,
         effort,
         `${label}-truncation-retry`,
+        true,
       );
       if (result.stopReason === 'max_tokens') {
         throw new Error('Generation output exceeded the size limit twice');
@@ -632,6 +662,7 @@ export async function generateWebsite(
         maxTokens,
         effort,
         `${label}-json-repair`,
+        true,
       );
       try {
         return { files: parseFilesJson(repair.text), rawText: repair.text };
@@ -820,6 +851,7 @@ export async function generateWebsite(
       config.claudePolishMaxTokens,
       'medium',
       'polish',
+      true,
     );
     if (polish.stopReason === 'max_tokens') {
       console.warn('[claude] Polish pass truncated — keeping build output');

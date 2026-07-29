@@ -54,7 +54,7 @@ const generateRequestSchema = z.object({
         content: z.string().max(100_000, 'Asset content max 100KB').optional(),
       })
     )
-    .max(10, 'Max 10 assets allowed')
+    .max(30, 'Max 30 assets allowed')
     .default([]),
   // Opt-in: when true, the IPFS publish step injects the fxfiles-analytics
   // <script> into the generated index.html before pinning. Default off so a

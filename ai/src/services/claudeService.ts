@@ -23,6 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import mammoth from 'mammoth';
 import { parseOfficeAsync } from 'officeparser';
+import sharp from 'sharp';
 import { config } from '../config/index.js';
 import {
   DESIGN_SKILL_SHA256,
@@ -76,6 +77,36 @@ const FETCH_TIMEOUT_MS = 45_000;
 /** Anthropic per-file ceiling (PDF cap; images cap at 5MB but the app has
  *  already enforced both, so this is just defence in depth on the network). */
 const MAX_FETCH_BYTES = 32 * 1024 * 1024;
+/** Cumulative budget for asset content attached to the request as blocks
+ *  (base64/text characters ≈ wire bytes). The Messages API caps requests
+ *  at 32MB; with up to 30 assets allowed, attachments must be bounded —
+ *  assets beyond the budget stay hosted and URL-referenced (the model
+ *  still places them in the HTML; it just doesn't see their content). */
+export const MAX_TOTAL_ATTACH_BYTES = 24 * 1024 * 1024;
+/** Images larger than this (or wider/taller than the max dimension) are
+ *  downscaled for ATTACHMENT ONLY — the hosted original the generated
+ *  site references stays full-resolution. The model only needs to SEE the
+ *  image to art-direct; ~2576px long edge is Claude's high-res ceiling. */
+const IMG_ATTACH_MAX_BYTES = 1_500_000;
+const IMG_ATTACH_MAX_DIM = 2576;
+/** Extracted document text is clipped to keep any single doc from eating
+ *  the whole attachment budget. */
+const MAX_DOC_TEXT_CHARS = 150_000;
+/** PDFs above this attach as extracted TEXT instead of base64 (the API
+ *  caps requests at 32MB and PDFs at ~100 pages anyway). */
+const PDF_ATTACH_MAX_BYTES = 15 * 1024 * 1024;
+
+function clipDocText(text: string): string {
+  return text.length > MAX_DOC_TEXT_CHARS
+    ? `${text.slice(0, MAX_DOC_TEXT_CHARS)}\n…[truncated]`
+    : text;
+}
+
+/** Wire size of an attached block's payload (base64 or text characters). */
+function blockWireBytes(block: AssetContentBlock): number {
+  const source = block.source as { data?: unknown };
+  return typeof source.data === 'string' ? source.data.length : 0;
+}
 
 const BASE_SYSTEM_PROMPT = `You are a website builder. Generate a complete static website as a set of files.
 Return ONLY a JSON object with this structure:
@@ -258,15 +289,89 @@ async function attachAsset(
 
   try {
     if (media.kind === 'image') {
-      const data = fs.readFileSync(tmpPath).toString('base64');
+      const raw = fs.readFileSync(tmpPath);
+      // Large/oversized images are downscaled for the ATTACHMENT copy only
+      // (the generated site references the full-resolution hosted URL).
+      // This is what lets users attach big photos: the model sees a
+      // ~2576px WebP (~200-500KB), never the multi-MB original.
+      try {
+        const meta = await sharp(tmpPath).metadata();
+        const longEdge = Math.max(meta.width ?? 0, meta.height ?? 0);
+        if (raw.length > IMG_ATTACH_MAX_BYTES || longEdge > IMG_ATTACH_MAX_DIM) {
+          const resized = await sharp(tmpPath)
+            .resize({
+              width: IMG_ATTACH_MAX_DIM,
+              height: IMG_ATTACH_MAX_DIM,
+              fit: 'inside',
+              withoutEnlargement: true,
+            })
+            .webp({ quality: 80 })
+            .toBuffer();
+          console.log(
+            `[claude] ${asset.fileName}: attached downscaled copy (${raw.length} -> ${resized.length} bytes)`,
+          );
+          return {
+            block: {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/webp',
+                data: resized.toString('base64'),
+              },
+            },
+            note:
+              'a downscaled preview was attached for design reference — the ' +
+              'URL above serves the full-resolution original; use the URL in the site.',
+          };
+        }
+      } catch (resizeErr) {
+        console.warn(
+          `[claude] ${asset.fileName}: resize skipped (${(resizeErr as Error).message})`,
+        );
+        // Fall through to raw attach if the original is API-safe (<5MB).
+        if (raw.length > 5 * 1024 * 1024) {
+          return { error: 'image too large to attach and resize failed' };
+        }
+      }
       return {
         block: {
           type: 'image',
-          source: { type: 'base64', media_type: media.imageMime!, data },
+          source: {
+            type: 'base64',
+            media_type: media.imageMime!,
+            data: raw.toString('base64'),
+          },
         },
       };
     }
     if (media.kind === 'pdf') {
+      const size = fs.statSync(tmpPath).size;
+      if (size > PDF_ATTACH_MAX_BYTES) {
+        // Too big to ship as base64 — attach the extracted TEXT instead so
+        // the model still gets the document's content.
+        try {
+          const text = (await parseOfficeAsync(tmpPath)).trim();
+          if (text) {
+            return {
+              block: {
+                type: 'document',
+                source: {
+                  type: 'text',
+                  media_type: 'text/plain',
+                  data: clipDocText(text),
+                },
+                title: asset.fileName,
+              },
+              note: 'large PDF — extracted text attached instead of the file.',
+            };
+          }
+        } catch (extractErr) {
+          console.warn(
+            `[claude] ${asset.fileName}: pdf text extraction failed: ${(extractErr as Error).message}`,
+          );
+        }
+        return { error: 'pdf too large to attach (text extraction failed)' };
+      }
       const data = fs.readFileSync(tmpPath).toString('base64');
       return {
         block: {
@@ -285,7 +390,11 @@ async function attachAsset(
       return {
         block: {
           type: 'document',
-          source: { type: 'text', media_type: 'text/plain', data: text },
+          source: {
+            type: 'text',
+            media_type: 'text/plain',
+            data: clipDocText(text),
+          },
           title: asset.fileName,
         },
       };
@@ -298,7 +407,11 @@ async function attachAsset(
       return {
         block: {
           type: 'document',
-          source: { type: 'text', media_type: 'text/plain', data: text },
+          source: {
+            type: 'text',
+            media_type: 'text/plain',
+            data: clipDocText(text),
+          },
           title: asset.fileName,
         },
       };
@@ -308,7 +421,11 @@ async function attachAsset(
       return {
         block: {
           type: 'document',
-          source: { type: 'text', media_type: 'text/plain', data: text },
+          source: {
+            type: 'text',
+            media_type: 'text/plain',
+            data: clipDocText(text),
+          },
           title: asset.fileName,
         },
       };
@@ -542,12 +659,29 @@ export async function generateWebsite(
       } catch {
         /* ignore — already exists */
       }
+      let attachedBytes = 0;
       for (const asset of assets) {
         if (signal?.aborted) {
           attached.push({ asset, result: { error: 'job aborted' } });
           continue;
         }
-        const result = await attachAsset(asset, tmpDir, signal);
+        let result = await attachAsset(asset, tmpDir, signal);
+        if (result.block) {
+          const size = blockWireBytes(result.block);
+          if (attachedBytes + size > MAX_TOTAL_ATTACH_BYTES) {
+            // Keep the request under the API's 32MB cap: reference-only.
+            result = {
+              note:
+                'not attached inline (attachment budget reached) — use the ' +
+                'URL above to place it in the site',
+            };
+            console.warn(
+              `[claude] asset ${asset.fileName} over attach budget (${attachedBytes + size} > ${MAX_TOTAL_ATTACH_BYTES}) — URL-only`,
+            );
+          } else {
+            attachedBytes += size;
+          }
+        }
         attached.push({ asset, result });
         if (result.error) {
           console.warn(`[claude] asset ${asset.fileName} not attached: ${result.error}`);
@@ -569,6 +703,9 @@ export async function generateWebsite(
       }
       if (result.block) {
         userMessage += `\n  (also attached as a ${result.block.type} block titled "${asset.fileName}")`;
+        if (result.note) {
+          userMessage += `\n  (${result.note})`;
+        }
       } else if (result.note) {
         userMessage += `\n  (${result.note})`;
       } else if (result.error) {

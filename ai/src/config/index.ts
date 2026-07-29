@@ -24,11 +24,23 @@ const configSchema = z.object({
 
   // Claude API
   claudeApiKey: z.string().min(1, 'CLAUDE_API_KEY is required'),
-  claudeModel: z.string().default('claude-opus-4-6'),
+  // claude-opus-5: drop-in successor to claude-opus-4-6 at the same price,
+  // substantially stronger on design/coding. The multipass pipeline requires
+  // a 4.6+ model (adaptive thinking); override via CLAUDE_MODEL.
+  claudeModel: z.string().default('claude-opus-5'),
   claudeDesignSkillEnabled: z
     .enum(['true', 'false'])
     .default('true')
     .transform((value) => value === 'true'),
+  // Multi-pass website generation (brief → build → polish). Kill-switch:
+  // CLAUDE_MULTIPASS_ENABLED=false reverts every request to single-pass.
+  claudeMultipassEnabled: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
+  claudeBriefMaxTokens: z.coerce.number().int().positive().default(4000),
+  claudeBuildMaxTokens: z.coerce.number().int().positive().default(96000),
+  claudePolishMaxTokens: z.coerce.number().int().positive().default(64000),
 
   // Generation
   generationCostFula: z.coerce.number().int().nonnegative().default(1000),
@@ -39,7 +51,9 @@ const configSchema = z.object({
   generationCostFulaWithTracking: z.coerce.number().int().nonnegative().default(1500),
   freeGenerationsPerUser: z.coerce.number().default(1),
   maxConcurrentJobs: z.coerce.number().default(3),
-  jobTimeoutMs: z.coerce.number().default(300000),
+  // Multi-pass generation (thinking + 3 passes) can legitimately run well
+  // past the old 5-minute ceiling; new clients poll for up to 20 minutes.
+  jobTimeoutMs: z.coerce.number().default(900000),
   maxJobsPerUserPerHour: z.coerce.number().default(10),
 
   // IPFS
@@ -83,6 +97,10 @@ function loadConfig(): Config {
     claudeApiKey: process.env.CLAUDE_API_KEY,
     claudeModel: process.env.CLAUDE_MODEL,
     claudeDesignSkillEnabled: process.env.CLAUDE_DESIGN_SKILL_ENABLED,
+    claudeMultipassEnabled: process.env.CLAUDE_MULTIPASS_ENABLED,
+    claudeBriefMaxTokens: process.env.CLAUDE_BRIEF_MAX_TOKENS,
+    claudeBuildMaxTokens: process.env.CLAUDE_BUILD_MAX_TOKENS,
+    claudePolishMaxTokens: process.env.CLAUDE_POLISH_MAX_TOKENS,
     generationCostFula: process.env.GENERATION_COST_FULA,
     generationCostFulaWithTracking: process.env.GENERATION_COST_FULA_WITH_TRACKING,
     freeGenerationsPerUser: process.env.FREE_GENERATIONS_PER_USER,
@@ -129,6 +147,10 @@ export function logConfig(): void {
   console.log(`  claudeApiKey: ${config.claudeApiKey ? '****' : '(not set)'}`);
   console.log(`  claudeModel: ${config.claudeModel}`);
   console.log(`  claudeDesignSkillEnabled: ${config.claudeDesignSkillEnabled}`);
+  console.log(`  claudeMultipassEnabled: ${config.claudeMultipassEnabled}`);
+  console.log(`  claudeBriefMaxTokens: ${config.claudeBriefMaxTokens}`);
+  console.log(`  claudeBuildMaxTokens: ${config.claudeBuildMaxTokens}`);
+  console.log(`  claudePolishMaxTokens: ${config.claudePolishMaxTokens}`);
   console.log(`  generationCostFula: ${config.generationCostFula}`);
   console.log(`  generationCostFulaWithTracking: ${config.generationCostFulaWithTracking}`);
   console.log(`  freeGenerationsPerUser: ${config.freeGenerationsPerUser}`);

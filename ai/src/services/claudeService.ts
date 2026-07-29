@@ -25,10 +25,20 @@ import mammoth from 'mammoth';
 import { parseOfficeAsync } from 'officeparser';
 import { config } from '../config/index.js';
 import {
-  composeWebsiteSystemPrompt,
   DESIGN_SKILL_SHA256,
   DESIGN_SKILL_UPSTREAM_COMMIT,
 } from '../prompts/designSkill.js';
+import {
+  BRIEF_PASS_INSTRUCTION,
+  BUILD_PASS_INSTRUCTION,
+  POLISH_PASS_INSTRUCTION,
+  TRUNCATION_RETRY_INSTRUCTION,
+  composeSharedSystemBlocks,
+} from '../prompts/passPrompts.js';
+import {
+  hasLegacyConstraintsBlock,
+  stripLegacyConstraintsBlock,
+} from '../prompts/promptCompat.js';
 
 export interface WebsiteFile {
   path: string;
@@ -101,7 +111,9 @@ Output:
 // Compose once at process startup. When enabled, a missing or modified skill
 // fails startup rather than silently producing websites without the requested
 // design guidance. CLAUDE_DESIGN_SKILL_ENABLED=false is the explicit rollback.
-const SYSTEM_PROMPT = composeWebsiteSystemPrompt(
+// One shared system prefix serves every pass (and every concurrent job) with
+// a cache_control breakpoint at its end, so passes B/C read it from cache.
+const SYSTEM_BLOCKS = composeSharedSystemBlocks(
   BASE_SYSTEM_PROMPT,
   config.claudeDesignSkillEnabled,
 );
@@ -313,19 +325,206 @@ async function attachAsset(
 // Main entry
 // =============================================================================
 
+export interface GenerateWebsiteOptions {
+  signal?: AbortSignal;
+  /** Per-job temp directory (created by executeJob, removed in its finally
+   *  block). Used to stage downloaded assets. */
+  tmpDir?: string;
+  anthropicClient?: Anthropic;
+  /** Pass-progress reporter — becomes the job's statusMessage. */
+  onProgress?: (message: string) => void | Promise<void>;
+  /** Client capability: >=2 runs the rich multi-pass pipeline; absent runs
+   *  legacy single-pass UNLESS the prompt is clearly from a new client. */
+  pipelineVersion?: number;
+}
+
+interface PassResult {
+  text: string;
+  stopReason: string | null;
+}
+
+/** JSON extraction + structural validation, shared by every parse site. */
+function parseFilesJson(rawText: string): WebsiteFile[] {
+  let jsonText = rawText.trim();
+  if (jsonText.startsWith('```')) {
+    jsonText = jsonText.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+  }
+  const parsed = JSON.parse(jsonText) as ClaudeResponse;
+  if (!parsed.files || !Array.isArray(parsed.files) || parsed.files.length === 0) {
+    throw new Error('Claude response missing files array');
+  }
+  for (const file of parsed.files) {
+    if (!file.path || typeof file.content !== 'string') {
+      throw new Error(`Invalid file entry: ${JSON.stringify(file).slice(0, 100)}`);
+    }
+  }
+  return parsed.files;
+}
+
+/** Patch-merge polish output over the build output (replace/add by path).
+ *  Empty-content patch entries are ignored (a polish must never blank a
+ *  file); the merged set must still contain index.html. */
+function mergeFiles(base: WebsiteFile[], patch: WebsiteFile[]): WebsiteFile[] {
+  const byPath = new Map<string, WebsiteFile>();
+  for (const f of base) {
+    byPath.set(f.path, f);
+  }
+  for (const f of patch) {
+    if (f.content.trim().length === 0) {
+      console.warn(`[claude] Polish returned empty ${f.path} — keeping build version`);
+      continue;
+    }
+    byPath.set(f.path, f);
+  }
+  const merged = [...byPath.values()];
+  if (!merged.some((f) => f.path === 'index.html')) {
+    throw new Error('Merged output missing index.html');
+  }
+  return merged;
+}
+
 /**
- * Generate website files using Claude API.
+ * Generate website files using the Claude API.
  *
- * @param tmpDir Per-job temp directory (created by executeJob, removed in
- *               its finally block). Used to stage downloaded assets.
+ * Rich pipeline (new clients / curl): art-direction brief → full build →
+ * art-director polish, as one growing conversation over a shared cached
+ * system prefix. Legacy pipeline (old FxFiles clients, detected by their
+ * embedded "=== SYSTEM CONSTRAINTS ===" block): a single improved build
+ * pass sized to finish inside their 5-minute poll deadline.
  */
 export async function generateWebsite(
   prompt: string,
   assets: Asset[],
-  signal?: AbortSignal,
-  tmpDir?: string,
-  anthropicClient: Anthropic = client,
+  opts: GenerateWebsiteOptions = {},
 ): Promise<WebsiteFile[]> {
+  const { signal, tmpDir, onProgress } = opts;
+  const anthropicClient = opts.anthropicClient ?? client;
+
+  const isLegacyPrompt = hasLegacyConstraintsBlock(prompt);
+  const cleanPrompt = stripLegacyConstraintsBlock(prompt);
+  const richPipeline =
+    config.claudeMultipassEnabled &&
+    (opts.pipelineVersion ?? (isLegacyPrompt ? 1 : 2)) >= 2;
+  if (isLegacyPrompt) {
+    console.log('[claude] Legacy client constraints block stripped from prompt');
+  }
+
+  const progress = async (message: string) => {
+    try {
+      await onProgress?.(message);
+    } catch (err) {
+      console.warn(`[claude] progress update failed: ${(err as Error).message}`);
+    }
+  };
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw new Error('Generation was cancelled');
+    }
+  };
+
+  const runPass = async (
+    messages: Anthropic.MessageParam[],
+    maxTokens: number,
+    effort: 'low' | 'medium' | 'high',
+    label: string,
+  ): Promise<PassResult> => {
+    console.log(
+      `[claude] Pass ${label}: model ${config.claudeModel}, max_tokens ${maxTokens}, effort ${effort}`,
+    );
+    let response: Anthropic.Message;
+    try {
+      const stream = anthropicClient.messages.stream(
+        {
+          model: config.claudeModel,
+          max_tokens: maxTokens,
+          system: SYSTEM_BLOCKS,
+          thinking: { type: 'adaptive' },
+          output_config: { effort },
+          messages,
+        } as Anthropic.MessageStreamParams,
+        { signal },
+      );
+      response = await stream.finalMessage();
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error('Generation was cancelled');
+      }
+      throw error;
+    }
+    const textBlock = response.content.find((block) => block.type === 'text');
+    if (!textBlock || textBlock.type !== 'text') {
+      throw new Error('Claude returned no text response');
+    }
+    if (response.usage) {
+      console.log(
+        `[claude] Pass ${label}: out=${response.usage.output_tokens} cacheRead=${(response.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens ?? 0}`,
+      );
+    }
+    return { text: textBlock.text.trim(), stopReason: response.stop_reason };
+  };
+
+  /** Build pass with truncation retry + JSON repair retry. */
+  const runFilesPass = async (
+    messages: Anthropic.MessageParam[],
+    maxTokens: number,
+    effort: 'low' | 'medium' | 'high',
+    label: string,
+  ): Promise<{ files: WebsiteFile[]; rawText: string }> => {
+    // The conversation that produced the LATEST output — the repair retry
+    // must build on it (including any truncation-retry turn) so the model
+    // keeps every constraint it was last given.
+    let attemptMessages = messages;
+    let result = await runPass(attemptMessages, maxTokens, effort, label);
+    if (result.stopReason === 'max_tokens') {
+      console.warn(
+        `[claude] Pass ${label} truncated at ${result.text.length} chars — retrying at reduced scope`,
+      );
+      throwIfAborted();
+      attemptMessages = [
+        ...attemptMessages,
+        { role: 'assistant', content: result.text },
+        { role: 'user', content: TRUNCATION_RETRY_INSTRUCTION },
+      ];
+      result = await runPass(
+        attemptMessages,
+        maxTokens,
+        effort,
+        `${label}-truncation-retry`,
+      );
+      if (result.stopReason === 'max_tokens') {
+        throw new Error('Generation output exceeded the size limit twice');
+      }
+    }
+    try {
+      return { files: parseFilesJson(result.text), rawText: result.text };
+    } catch (parseError) {
+      console.warn(
+        `[claude] Pass ${label} JSON parse failed (${result.text.length} chars), last 200: ...${result.text.slice(-200)}`,
+      );
+      throwIfAborted();
+      const repair = await runPass(
+        [
+          ...attemptMessages,
+          { role: 'assistant', content: result.text },
+          {
+            role: 'user',
+            content:
+              'Your previous response was not valid JSON. Please return ONLY a valid JSON object with the structure: { "files": [ { "path": "...", "content": "..." } ] }. No markdown, no explanation — just the JSON.',
+          },
+        ],
+        maxTokens,
+        effort,
+        `${label}-json-repair`,
+      );
+      try {
+        return { files: parseFilesJson(repair.text), rawText: repair.text };
+      } catch {
+        throw new Error(
+          `Failed to parse Claude response as JSON: ${(parseError as Error).message}`,
+        );
+      }
+    }
+  };
   // Try to download + attach every asset. Errors are captured per-asset so
   // a single bad file doesn't fail the whole generation — Claude still has
   // the URL+description line as a fallback.
@@ -360,7 +559,7 @@ export async function generateWebsite(
   // Build the user-message text. URL+description lines are kept for ALL
   // assets (including successfully attached ones) as a backup reference, per
   // the project's preference.
-  let userMessage = `Create a website with the following requirements:\n\n${prompt}`;
+  let userMessage = `Create a website with the following requirements:\n\n${cleanPrompt}`;
   if (attached.length > 0) {
     userMessage += '\n\nAvailable assets (use these URLs directly in the HTML):';
     for (const { asset, result } of attached) {
@@ -389,112 +588,124 @@ export async function generateWebsite(
 
   const attachedCount = attached.filter((a) => a.result.block).length;
   console.log(
-    `[claude] Generating: ${assets.length} assets (${attachedCount} attached as blocks), model: ${config.claudeModel}`,
+    `[claude] Generating: ${assets.length} assets (${attachedCount} attached as blocks), model: ${config.claudeModel}, pipeline: ${richPipeline ? 'multi-pass' : 'single-pass'}`,
   );
 
-  let response: Anthropic.Message;
-  try {
-    const stream = anthropicClient.messages.stream(
-      {
-        model: config.claudeModel,
-        max_tokens: 64000,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: messageContent }],
-      },
-      { signal },
-    );
-    response = await stream.finalMessage();
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('Generation was cancelled');
-    }
-    throw error;
-  }
-
-  // Extract text content from response
-  const textBlock = response.content.find((block) => block.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('Claude returned no text response');
-  }
-
-  const rawText = textBlock.text.trim();
-
-  // Check if response was truncated (hit max_tokens)
-  if (response.stop_reason === 'max_tokens') {
-    console.warn(`[claude] Response truncated at ${rawText.length} chars (hit max_tokens). stop_reason: ${response.stop_reason}`);
-  }
-
-  // Parse JSON response (handle possible markdown code blocks)
-  let jsonText = rawText;
-  if (jsonText.startsWith('```')) {
-    // Strip markdown code fences
-    jsonText = jsonText.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
-  }
-
-  let parsed: ClaudeResponse;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch (parseError) {
-    // Retry once — ask Claude to fix its output. Reuse the same multi-block
-    // user content so it still has the attached files.
-    console.warn(`[claude] Failed to parse response (${rawText.length} chars), last 200 chars: ...${rawText.slice(-200)}`);
-    console.warn('[claude] Retrying with correction prompt');
-    try {
-      const retryStream = anthropicClient.messages.stream(
+  // ---------------------------------------------------------------- legacy
+  if (!richPipeline) {
+    await progress('Generating website...');
+    const { files } = await runFilesPass(
+      [
         {
-          model: config.claudeModel,
-          max_tokens: 64000,
-          system: SYSTEM_PROMPT,
-          messages: [
-            { role: 'user', content: messageContent },
-            { role: 'assistant', content: rawText },
-            {
-              role: 'user',
-              content:
-                'Your previous response was not valid JSON. Please return ONLY a valid JSON object with the structure: { "files": [ { "path": "...", "content": "..." } ] }. No markdown, no explanation — just the JSON.',
-            },
+          role: 'user',
+          content: [
+            ...messageContent,
+            { type: 'text', text: BUILD_PASS_INSTRUCTION },
           ],
         },
-        { signal },
-      );
-      const retryResponse = await retryStream.finalMessage();
-
-      const retryBlock = retryResponse.content.find((b) => b.type === 'text');
-      if (!retryBlock || retryBlock.type !== 'text') {
-        throw new Error('Claude retry returned no text');
-      }
-
-      let retryText = retryBlock.text.trim();
-      if (retryText.startsWith('```')) {
-        retryText = retryText.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
-      }
-
-      parsed = JSON.parse(retryText);
-    } catch {
-      throw new Error(`Failed to parse Claude response as JSON: ${(parseError as Error).message}`);
+      ],
+      64000,
+      'medium',
+      'legacy-build',
+    );
+    if (!files.some((f) => f.path === 'index.html')) {
+      throw new Error('Claude response missing index.html');
     }
+    console.log(
+      `[claude] Generated ${files.length} files: ${files.map((f) => f.path).join(', ')}`,
+    );
+    return files;
   }
 
-  // Validate response structure
-  if (!parsed.files || !Array.isArray(parsed.files) || parsed.files.length === 0) {
-    throw new Error('Claude response missing files array');
+  // ------------------------------------------------------------ multi-pass
+  // Pass A — art-direction brief (plain text). Degrades to no-brief on any
+  // failure: the build pass carries the full design system either way.
+  await progress('Designing art direction...');
+  const briefRequestContent: Array<TextBlockParam | AssetContentBlock> = [
+    ...messageContent,
+    { type: 'text', text: BRIEF_PASS_INSTRUCTION },
+  ];
+  let brief: string | null = null;
+  try {
+    const a = await runPass(
+      [{ role: 'user', content: briefRequestContent }],
+      config.claudeBriefMaxTokens,
+      'high',
+      'brief',
+    );
+    brief = a.text.length > 0 ? a.text : null;
+  } catch (err) {
+    throwIfAborted();
+    console.warn(
+      `[claude] Brief pass failed — continuing without a brief: ${(err as Error).message}`,
+    );
   }
+  throwIfAborted();
 
-  const hasIndex = parsed.files.some((f) => f.path === 'index.html');
-  if (!hasIndex) {
+  // Pass B — full build, implementing the brief.
+  await progress('Building your website...');
+  const buildMessages: Anthropic.MessageParam[] = brief
+    ? [
+        { role: 'user', content: briefRequestContent },
+        { role: 'assistant', content: brief },
+        { role: 'user', content: BUILD_PASS_INSTRUCTION },
+      ]
+    : [
+        {
+          role: 'user',
+          content: [
+            ...messageContent,
+            { type: 'text', text: BUILD_PASS_INSTRUCTION },
+          ],
+        },
+      ];
+  const build = await runFilesPass(
+    buildMessages,
+    config.claudeBuildMaxTokens,
+    'high',
+    'build',
+  );
+  if (!build.files.some((f) => f.path === 'index.html')) {
     throw new Error('Claude response missing index.html');
   }
+  throwIfAborted();
 
-  // Validate each file has path and content
-  for (const file of parsed.files) {
-    if (!file.path || typeof file.content !== 'string') {
-      throw new Error(`Invalid file entry: ${JSON.stringify(file).slice(0, 100)}`);
+  // Pass C — art-director critique & polish. STRICTLY improve-or-keep: any
+  // failure here returns the build output untouched.
+  await progress('Polishing design and motion...');
+  try {
+    const polish = await runPass(
+      [
+        ...buildMessages,
+        { role: 'assistant', content: build.rawText },
+        { role: 'user', content: POLISH_PASS_INSTRUCTION },
+      ],
+      config.claudePolishMaxTokens,
+      'medium',
+      'polish',
+    );
+    if (polish.stopReason === 'max_tokens') {
+      console.warn('[claude] Polish pass truncated — keeping build output');
+      return build.files;
     }
+    const polishFiles = parseFilesJson(polish.text);
+    const merged = mergeFiles(build.files, polishFiles);
+    console.log(
+      `[claude] Generated ${merged.length} files (polished): ${merged.map((f) => f.path).join(', ')}`,
+    );
+    return merged;
+  } catch (err) {
+    if (signal?.aborted) {
+      throw new Error('Generation was cancelled');
+    }
+    console.warn(
+      `[claude] Polish pass failed — keeping build output: ${(err as Error).message}`,
+    );
+    console.log(
+      `[claude] Generated ${build.files.length} files: ${build.files.map((f) => f.path).join(', ')}`,
+    );
+    return build.files;
   }
-
-  console.log(`[claude] Generated ${parsed.files.length} files: ${parsed.files.map((f) => f.path).join(', ')}`);
-
-  return parsed.files;
 }
 
 export async function askAi(
@@ -565,15 +776,15 @@ export async function askAi(
         max_tokens: 4096,
         system: "You are a helpful AI assistant. Analyze the provided files and answer the user's question clearly and concisely. If the user asks about a URL, use your web_fetch tool to read it.",
         messages: [{ role: 'user', content: messageContent }],
+        // _20260209 variants (dynamic filtering, no beta header) — the
+        // basic _20250305/_20250910 variants are for pre-4.6 models and the
+        // default model is now claude-opus-5.
         tools: [
-          { type: 'web_search_20250305', name: 'web_search' } as any,
-          { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 5 } as any,
+          { type: 'web_search_20260209', name: 'web_search' } as any,
+          { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 5 } as any,
         ],
       },
-      { 
-        signal,
-        headers: { 'anthropic-beta': 'web-fetch-2025-09-10, web-search-2025-03-05' }
-      },
+      { signal },
     );
     response = await stream.finalMessage();
   } catch (error) {

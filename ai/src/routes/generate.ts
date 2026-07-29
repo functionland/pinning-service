@@ -40,7 +40,11 @@ generateRoutes.use('*', jwtValidatorMiddleware);
 // ============================================
 
 const generateRequestSchema = z.object({
-  prompt: z.string().min(1, 'Prompt is required').max(10000, 'Prompt too long'),
+  // 80K chars ≈ 20-27K tokens — a small fraction of the model's 1M-token
+  // context. The cap exists to bound abuse, not the API. Note the client
+  // sends the ENRICHED prompt (user text + hidden style/language/contact
+  // blocks), so this must stay comfortably above the app's input cap.
+  prompt: z.string().min(1, 'Prompt is required').max(80000, 'Prompt too long'),
   assets: z
     .array(
       z.object({
@@ -56,6 +60,10 @@ const generateRequestSchema = z.object({
   // <script> into the generated index.html before pinning. Default off so a
   // missing field from older clients behaves as if tracking is disabled.
   enable_tracking: z.boolean().default(false),
+  // Client capability declaration: >=2 opts into the multi-pass pipeline
+  // (the client polls for up to 20 minutes). Absent = legacy client → the
+  // faster single-pass pipeline that fits the old 5-minute deadline.
+  pipeline_version: z.number().int().min(1).max(10).optional(),
 });
 
 // ============================================
@@ -146,7 +154,8 @@ generateRoutes.post('/generate', async (c) => {
       body.prompt,
       body.assets,
       creditsCharged,
-      body.enable_tracking
+      body.enable_tracking,
+      body.pipeline_version ?? null
     );
 
     // Queue the job (pass user token for S3 uploads)

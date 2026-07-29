@@ -183,6 +183,61 @@ function rewriteHtml(html: string, cidMap: Record<string, string>): string {
   return result;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Inline generated .css/.js files into an HTML page, replacing their
+ * <link rel=stylesheet>/<script src> tags with <style>/<script> blocks.
+ *
+ * WHY: assets are served by BARE CID, so the gateway cannot know their MIME
+ * type — it responds `text/plain` with `X-Content-Type-Options: nosniff`,
+ * and browsers hard-refuse non-`text/css` stylesheets and non-JS scripts
+ * (site renders unstyled with dead JS). Inlining makes the shipped page
+ * self-contained and immune to gateway MIME behavior.
+ * Returns the rewritten page and which file paths were inlined.
+ */
+function inlineLocalCssJs(
+  html: string,
+  files: Array<{ path: string; content: string }>,
+): { html: string; inlined: Set<string> } {
+  let result = html;
+  const inlined = new Set<string>();
+  for (const file of files) {
+    const p = escapeRegExp(file.path);
+    // href/src may be "./path" or "path", any attribute order/quotes.
+    const ref = `(?:\\./)?${p}`;
+    if (file.path.toLowerCase().endsWith('.css')) {
+      const linkRe = new RegExp(`<link\\b[^>]*href=["']${ref}["'][^>]*>`, 'gi');
+      if (linkRe.test(result)) {
+        // "</style" cannot appear in valid CSS; defuse it defensively.
+        const css = file.content.replace(/<\/style/gi, '<\\/style');
+        result = result.replace(linkRe, `<style>\n${css}\n</style>`);
+        inlined.add(file.path);
+      }
+    } else if (file.path.toLowerCase().endsWith('.js')) {
+      const scriptRe = new RegExp(
+        `<script\\b[^>]*src=["']${ref}["'][^>]*>\\s*</script>`,
+        'gi',
+      );
+      if (scriptRe.test(result)) {
+        // Standard inline-script escape: "</script" inside strings/regexes.
+        const js = file.content.replace(/<\/script/gi, '<\\/script');
+        result = result.replace(scriptRe, `<script>\n${js}\n</script>`);
+        inlined.add(file.path);
+      }
+    }
+  }
+  return { html: result, inlined };
+}
+
+/** data: URI for a generated SVG — <img> requires image/svg+xml, which a
+ *  bare-CID gateway response can never carry. */
+function svgDataUri(content: string): string {
+  return `data:image/svg+xml;base64,${Buffer.from(content, 'utf-8').toString('base64')}`;
+}
+
 /**
  * Build the fxfiles-analytics injection snippet. The injected script
  * self-discovers the IPFS CID from `window.location` (handles
@@ -289,12 +344,46 @@ export async function publishWebsite(
       throw new Error('No index.html found in generated files');
     }
 
-    // Step 1: Upload non-HTML assets, collect path → gateway URL map
-    const cidMap: Record<string, string> = {};
+    // Step 0: Inline generated CSS/JS into every HTML page (bare-CID
+    // gateway responses are text/plain + nosniff, so external stylesheet/
+    // script tags would be MIME-refused by browsers — the "unstyled page,
+    // dead JS" failure). Generated SVGs become data: URIs for the same
+    // reason. Inlined files are not uploaded separately.
+    const inlineable = otherFiles.filter((f) => {
+      const p = f.path.toLowerCase();
+      return p.endsWith('.css') || p.endsWith('.js');
+    });
+    const inlinedEverywhere = new Set<string>();
+    const inlinePage = (html: string): string => {
+      const r = inlineLocalCssJs(html, inlineable);
+      for (const p of r.inlined) {
+        inlinedEverywhere.add(p);
+      }
+      return r.html;
+    };
+    const indexHtmlInlined = inlinePage(indexFile.content);
+    const subPagesInlined = subPages.map((page) => ({
+      path: page.path,
+      content: inlinePage(page.content),
+    }));
 
-    if (otherFiles.length > 0) {
-      console.log(`[ipfs] Uploading ${otherFiles.length} asset files to S3...`);
-      const uploadTasks = otherFiles.map((file) => () =>
+    // Step 1: Upload remaining non-HTML assets, collect path → URL map.
+    // SVGs ride along as data: URIs instead of uploads.
+    const cidMap: Record<string, string> = {};
+    const uploadable: typeof otherFiles = [];
+    for (const file of otherFiles) {
+      const lower = file.path.toLowerCase();
+      if (inlinedEverywhere.has(file.path)) continue; // now inline
+      if (lower.endsWith('.svg')) {
+        cidMap[file.path] = svgDataUri(file.content);
+        continue;
+      }
+      uploadable.push(file);
+    }
+
+    if (uploadable.length > 0) {
+      console.log(`[ipfs] Uploading ${uploadable.length} asset files to S3...`);
+      const uploadTasks = uploadable.map((file) => () =>
         uploadFileToS3(file, jobId, userToken, controller.signal).then((result) => {
           uploadedKeys.push(result.s3Key);
           cidMap[file.path] = `${gatewayBase}/${result.cid}`;
@@ -304,10 +393,15 @@ export async function publishWebsite(
       await parallelLimit(uploadTasks, UPLOAD_CONCURRENCY);
       console.log(`[ipfs] Asset uploads complete`);
     }
+    if (inlinedEverywhere.size > 0) {
+      console.log(
+        `[ipfs] Inlined into HTML: ${[...inlinedEverywhere].join(', ')}`,
+      );
+    }
 
     // Step 1.5: Rewrite + upload each subpage (its asset refs now resolve),
     // then add its CID to the map so index→subpage links resolve too.
-    for (const page of subPages) {
+    for (const page of subPagesInlined) {
       const rewrittenPage = rewriteHtml(page.content, cidMap);
       const uploaded = await uploadFileToS3(
         { path: page.path, content: rewrittenPage },
@@ -321,7 +415,7 @@ export async function publishWebsite(
     }
 
     // Step 2: Rewrite index.html with absolute gateway URLs
-    let rewrittenHtml = rewriteHtml(indexFile.content, cidMap);
+    let rewrittenHtml = rewriteHtml(indexHtmlInlined, cidMap);
 
     // Step 2.5 (optional): Inject the fxfiles-analytics ping script. The
     // user opted in via `enableTracking` at generate time; the script

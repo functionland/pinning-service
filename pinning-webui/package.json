@@ -19,7 +19,8 @@
   "overrides": {
     "ws": "^8.21.0",
     "uuid": "$uuid",
-    "@walletconnect/ethereum-provider": "2.23.10"
+    "@walletconnect/ethereum-provider": "2.23.10",
+    "axios": "^1.19.0"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.962.0",
@@ -36,7 +37,7 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.2.1",
     "express-session": "^1.18.2",
-    "google-auth-library": "^10.5.0",
+    "google-auth-library": "^10.9.1",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.16.3",
@@ -58,12 +59,12 @@
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^5.1.2",
     "@vitest/coverage-v8": "^4.0.16",
-    "concurrently": "^10.0.3",
+    "concurrently": "^10.0.4",
     "esbuild": "^0.27.1",
-    "postcss": "^8.5.6",
+    "postcss": "^8.5.25",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "react-router-dom": "^7.10.1",
+    "react-router-dom": "^7.18.2",
     "supertest": "^7.1.4",
     "tailwindcss": "^4.1.18",
     "tsx": "^4.21.0",

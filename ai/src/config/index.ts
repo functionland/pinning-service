@@ -59,6 +59,29 @@ const configSchema = z.object({
   jobTimeoutMs: z.coerce.number().default(900000),
   maxJobsPerUserPerHour: z.coerce.number().default(10),
 
+  // Social posts (captions via Claude + 4:5 image via Gemini).
+  // GEMINI_API_KEY is deliberately OPTIONAL — empty disables the feature
+  // (503 SOCIAL_DISABLED) instead of bricking existing deployments on boot.
+  geminiApiKey: z.string().default(''),
+  geminiImageModel: z.string().default('gemini-3.1-flash-image'),
+  geminiImageSize: z.enum(['1K', '2K']).default('1K'),
+  // Cost lever: captions don't need the flagship model — point this at a
+  // cheaper Claude model; empty falls back to CLAUDE_MODEL.
+  claudeSocialModel: z.string().default(''),
+  socialPostPriceFula: z.coerce.number().int().nonnegative().default(300),
+  maxConcurrentSocialJobs: z.coerce.number().default(2),
+  socialJobTimeoutMs: z.coerce.number().default(300000),
+  maxSocialJobsPerUserPerHour: z.coerce.number().default(10),
+  socialMaxReferenceImages: z.coerce.number().int().positive().max(14).default(8),
+  // Bucket the finished social JPEG lands in — the client-owned public
+  // website-assets bucket, mirroring how imported website assets are hosted.
+  socialAssetsBucket: z.string().default('website-assets'),
+  // When set (e.g. https://ai.cloud.fx.land), status/buffer responses use
+  // the MIME passthrough URL {base}/api/v1/social/image/{cid} instead of the
+  // raw gateway URL (bare-CID gateway responses are text/plain + nosniff).
+  socialPublicBaseUrl: z.string().default(''),
+  bufferApiUrl: z.string().default('https://api.buffer.com'),
+
   // IPFS
   ipfsApiUrl: z.string().default('http://127.0.0.1:5001'),
   ipfsGatewayUrl: z.string().min(1, 'IPFS_GATEWAY_URL is required'),
@@ -110,6 +133,18 @@ function loadConfig(): Config {
     maxConcurrentJobs: process.env.MAX_CONCURRENT_JOBS,
     jobTimeoutMs: process.env.JOB_TIMEOUT_MS,
     maxJobsPerUserPerHour: process.env.MAX_JOBS_PER_USER_PER_HOUR,
+    geminiApiKey: process.env.GEMINI_API_KEY,
+    geminiImageModel: process.env.GEMINI_IMAGE_MODEL,
+    geminiImageSize: process.env.GEMINI_IMAGE_SIZE,
+    claudeSocialModel: process.env.CLAUDE_SOCIAL_MODEL,
+    socialPostPriceFula: process.env.SOCIAL_POST_PRICE_FULA,
+    maxConcurrentSocialJobs: process.env.MAX_CONCURRENT_SOCIAL_JOBS,
+    socialJobTimeoutMs: process.env.SOCIAL_JOB_TIMEOUT_MS,
+    maxSocialJobsPerUserPerHour: process.env.MAX_SOCIAL_JOBS_PER_USER_PER_HOUR,
+    socialMaxReferenceImages: process.env.SOCIAL_MAX_REFERENCE_IMAGES,
+    socialAssetsBucket: process.env.SOCIAL_ASSETS_BUCKET,
+    socialPublicBaseUrl: process.env.SOCIAL_PUBLIC_BASE_URL,
+    bufferApiUrl: process.env.BUFFER_API_URL,
     ipfsApiUrl: process.env.IPFS_API_URL,
     ipfsGatewayUrl: process.env.IPFS_GATEWAY_URL,
     s3GatewayUrl: process.env.S3_GATEWAY_URL,
@@ -160,6 +195,18 @@ export function logConfig(): void {
   console.log(`  maxConcurrentJobs: ${config.maxConcurrentJobs}`);
   console.log(`  jobTimeoutMs: ${config.jobTimeoutMs}`);
   console.log(`  maxJobsPerUserPerHour: ${config.maxJobsPerUserPerHour}`);
+  console.log(`  geminiApiKey: ${config.geminiApiKey ? '****' : '(not set — social posts disabled)'}`);
+  console.log(`  geminiImageModel: ${config.geminiImageModel}`);
+  console.log(`  geminiImageSize: ${config.geminiImageSize}`);
+  console.log(`  claudeSocialModel: ${config.claudeSocialModel || '(falls back to claudeModel)'}`);
+  console.log(`  socialPostPriceFula: ${config.socialPostPriceFula}`);
+  console.log(`  maxConcurrentSocialJobs: ${config.maxConcurrentSocialJobs}`);
+  console.log(`  socialJobTimeoutMs: ${config.socialJobTimeoutMs}`);
+  console.log(`  maxSocialJobsPerUserPerHour: ${config.maxSocialJobsPerUserPerHour}`);
+  console.log(`  socialMaxReferenceImages: ${config.socialMaxReferenceImages}`);
+  console.log(`  socialAssetsBucket: ${config.socialAssetsBucket}`);
+  console.log(`  socialPublicBaseUrl: ${config.socialPublicBaseUrl || '(raw gateway URLs)'}`);
+  console.log(`  bufferApiUrl: ${config.bufferApiUrl}`);
   console.log(`  ipfsApiUrl: ${config.ipfsApiUrl}`);
   console.log(`  ipfsGatewayUrl: ${config.ipfsGatewayUrl}`);
   console.log(`  s3GatewayUrl: ${config.s3GatewayUrl}`);

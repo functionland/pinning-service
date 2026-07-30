@@ -9,6 +9,10 @@ import { app } from './app.js';
 import { config, logConfig } from './config/index.js';
 import { initializeDatabase, closeDatabase } from './database/index.js';
 import { stopAllJobs } from './services/generationService.js';
+import {
+  stopAllSocialJobs,
+  reapStaleSocialJobsOnBoot,
+} from './services/socialService.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -34,7 +38,7 @@ async function main() {
     let deletedCount = 0;
     
     for (const file of files) {
-      if (file.startsWith('ask-')) {
+      if (file.startsWith('ask-') || file.startsWith('ai-social-')) {
         const fullPath = path.join(tmpDir, file);
         if (fs.statSync(fullPath).isDirectory()) {
           fs.rmSync(fullPath, { recursive: true, force: true });
@@ -52,6 +56,10 @@ async function main() {
   // Initialize database
   console.log('\n[startup] Initializing database...');
   await initializeDatabase();
+
+  // Social jobs live in an in-memory queue — any non-terminal row at boot is
+  // orphaned by definition. Flip to error + refund before accepting work.
+  await reapStaleSocialJobsOnBoot();
 
   // Start HTTP server
   console.log('[startup] Starting HTTP server...');
@@ -85,6 +93,7 @@ async function main() {
     console.log('\n[shutdown] Shutting down...');
 
     stopAllJobs();
+    stopAllSocialJobs();
 
     await new Promise<void>((resolve) => {
       server.close(() => {

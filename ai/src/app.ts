@@ -15,6 +15,7 @@ import { healthRoutes } from './routes/health.js';
 import { generateRoutes } from './routes/generate.js';
 import { pricingRoutes } from './routes/pricing.js';
 import { askRoutes } from './routes/ask.js';
+import { socialRoutes, socialPublicRoutes } from './routes/social.js';
 import { cleanupExpiredAskCache } from './database/ask_postgres.js';
 
 // Run cleanup every 15 minutes
@@ -159,6 +160,13 @@ app.route('/api/v1', generateRoutes);
 
 // Ask AI API routes
 app.route('/api/v1/ask', askRoutes);
+
+// Social post routes. The public image passthrough mounts FIRST so
+// GET /image/:cid never hits the JWT middleware; the authed router's paths
+// (/generate, /status/:id, /buffer/*) don't overlap it — same coexistence
+// pattern as pricing + generate above.
+app.route('/api/v1/social', socialPublicRoutes);
+app.route('/api/v1/social', socialRoutes);
 
 // ============================================
 // 404 Handler

@@ -22,7 +22,7 @@
 
 import { generateMnemonic, validateMnemonic } from 'bip39';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router';
 import { useAuth } from '../context/AuthContext';
 
 /**

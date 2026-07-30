@@ -822,6 +822,11 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           // Relay for WalletConnect
           "wss://relay.walletconnect.com",
           "wss://relay.walletconnect.org",
+          // MetaMask SDK relay (mobile browser -> MetaMask app handshake, socket.io
+          // over https polling + wss upgrade) + SDK analytics. RainbowKit >=2.2 routes
+          // its MetaMask entry through this, so blocking it hangs mobile connects.
+          "https://*.api.cx.metamask.io",
+          "wss://*.api.cx.metamask.io",
           // RainbowKit
           "https://api.rainbow.me",
           "https://*.rainbow.me",

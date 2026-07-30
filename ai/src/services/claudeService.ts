@@ -40,6 +40,7 @@ import {
   hasLegacyConstraintsBlock,
   stripLegacyConstraintsBlock,
 } from '../prompts/promptCompat.js';
+import { fetchToFile } from '../utils/fetchFile.js';
 
 export interface WebsiteFile {
   path: string;
@@ -73,10 +74,8 @@ interface AssetAttach {
   note?: string;
 }
 
-const FETCH_TIMEOUT_MS = 45_000;
-/** Anthropic per-file ceiling (PDF cap; images cap at 5MB but the app has
- *  already enforced both, so this is just defence in depth on the network). */
-const MAX_FETCH_BYTES = 32 * 1024 * 1024;
+// Download timeout/byte-cap semantics live in utils/fetchFile.ts (shared
+// with the social-post pipeline); defaults there are 45s / 32MB.
 /** Cumulative budget for asset content attached to the request as blocks
  *  (base64/text characters ≈ wire bytes). The Messages API caps requests
  *  at 32MB; with up to 30 assets allowed, attachments must be bounded —
@@ -238,46 +237,6 @@ function safeBasename(fileName: string): string {
   return fileName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200) || 'asset';
 }
 
-/** Fetch a URL into [destPath], 45s timeout, one retry, cap MAX_FETCH_BYTES. */
-async function fetchToFile(
-  url: string,
-  destPath: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  let lastErr: Error | undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const ac = new AbortController();
-    const onParentAbort = () => ac.abort();
-    signal?.addEventListener('abort', onParentAbort);
-    const timeoutId = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
-
-    try {
-      const res = await fetch(url, { signal: ac.signal });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length > MAX_FETCH_BYTES) {
-        throw new Error(`file too large: ${buf.length} bytes (cap ${MAX_FETCH_BYTES})`);
-      }
-      fs.writeFileSync(destPath, buf);
-      return;
-    } catch (err) {
-      lastErr = err instanceof Error ? err : new Error(String(err));
-      if (signal?.aborted) {
-        throw lastErr;
-      }
-      if (attempt === 0) {
-        console.warn(`[claude] fetch retry for ${url}: ${lastErr.message}`);
-      }
-    } finally {
-      clearTimeout(timeoutId);
-      signal?.removeEventListener('abort', onParentAbort);
-    }
-  }
-  throw lastErr ?? new Error('fetch failed');
-}
-
 /** Download an asset to tmpDir and build the appropriate Claude content block. */
 async function attachAsset(
   asset: Asset,
@@ -305,7 +264,7 @@ async function attachAsset(
 
   const tmpPath = path.join(tmpDir, `${Date.now()}-${safeBasename(asset.fileName)}`);
   try {
-    await fetchToFile(asset.url, tmpPath, signal);
+    await fetchToFile(asset.url, tmpPath, signal, { logTag: '[claude]' });
   } catch (err) {
     return { error: `download failed: ${(err as Error).message}` };
   }

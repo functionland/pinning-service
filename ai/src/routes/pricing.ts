@@ -18,6 +18,9 @@ pricingRoutes.get('/pricing', (c) => {
   return c.json({
     generationCostFula: config.generationCostFula,
     generationCostFulaWithTracking: config.generationCostFulaWithTracking,
+    // Social post price; null when the feature is disabled (no Gemini key)
+    // so the client can hide the button instead of offering a 503.
+    socialPostPriceFula: config.geminiApiKey ? config.socialPostPriceFula : null,
   });
 });
 

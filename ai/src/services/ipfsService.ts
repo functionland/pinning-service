@@ -474,3 +474,89 @@ export async function publishWebsite(
     clearTimeout(timeout);
   }
 }
+
+// =============================================================================
+// Social post image upload
+// =============================================================================
+
+export interface SocialImageUpload {
+  cid: string;
+  /** Raw gateway URL ({IPFS_GATEWAY_URL}/{cid}) — the status endpoint may
+   *  rewrite to the MIME passthrough when SOCIAL_PUBLIC_BASE_URL is set. */
+  url: string;
+  s3Key: string;
+}
+
+/**
+ * Upload a finished social JPEG to the client-owned public assets bucket
+ * (same bucket + ETag→CID mechanics the FxFiles client uses for imported
+ * website assets, per the user's hosting decision). Key shape:
+ * {assetPrefix}/social/{jobId}.jpg
+ */
+export async function uploadSocialImage(
+  jpeg: Buffer,
+  assetPrefix: string,
+  jobId: string,
+  userToken: string,
+  signal: AbortSignal
+): Promise<SocialImageUpload> {
+  const bucket = config.socialAssetsBucket;
+  const gatewayBase = config.ipfsGatewayUrl.endsWith('/')
+    ? config.ipfsGatewayUrl.slice(0, -1)
+    : config.ipfsGatewayUrl;
+
+  // Ensure bucket (200 created / 409 exists are both fine)
+  const bucketRes = await fetch(`${config.s3GatewayUrl}/${bucket}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${userToken}` },
+    signal,
+  });
+  if (!bucketRes.ok && bucketRes.status !== 409) {
+    const body = await bucketRes.text().catch(() => '');
+    throw new Error(`Failed to ensure S3 bucket "${bucket}": ${bucketRes.status} ${body}`);
+  }
+
+  const s3Key = `${assetPrefix}/social/${jobId}.jpg`;
+  const url = `${config.s3GatewayUrl}/${bucket}/${s3Key}`;
+
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      console.log(`[ipfs] Retrying social image upload (attempt ${attempt + 1})...`);
+    }
+    try {
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${userToken}`,
+          'Content-Type': 'image/jpeg',
+        },
+        body: new Uint8Array(jpeg),
+        signal,
+      });
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '');
+        throw new Error(`S3 PUT ${s3Key} failed: ${res.status} ${errBody}`);
+      }
+      const etag = res.headers.get('etag') || '';
+      const cid = etag.replace(/"/g, '');
+      // Multipart-style composite ETags ({hash}-{n}) are not CIDs — a single
+      // PUT should never produce one, so treat it as a hard error.
+      if (!cid || /-\d+$/.test(cid)) {
+        throw new Error(`S3 PUT ${s3Key}: no usable CID in ETag header ("${etag}")`);
+      }
+      return { cid, url: `${gatewayBase}/${cid}`, s3Key };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const isNetworkError =
+        lastError.message.includes('ECONNREFUSED') ||
+        lastError.message.includes('ECONNRESET') ||
+        lastError.message.includes('ETIMEDOUT') ||
+        lastError.message.includes('fetch failed');
+      if (signal.aborted || !isNetworkError || attempt >= MAX_RETRIES) {
+        break;
+      }
+    }
+  }
+  throw lastError!;
+}

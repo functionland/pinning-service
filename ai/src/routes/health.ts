@@ -5,6 +5,10 @@
 import { Hono } from 'hono';
 import { query } from '../database/index.js';
 import { getActiveJobCount, getQueuedJobCount } from '../services/generationService.js';
+import {
+  getActiveSocialJobCount,
+  getQueuedSocialJobCount,
+} from '../services/socialService.js';
 
 const startTime = Date.now();
 
@@ -32,6 +36,8 @@ healthRoutes.get('/', async (c) => {
       database: dbStatus,
       activeJobs: getActiveJobCount(),
       queuedJobs: getQueuedJobCount(),
+      activeSocialJobs: getActiveSocialJobCount(),
+      queuedSocialJobs: getQueuedSocialJobCount(),
       timestamp: new Date().toISOString(),
     },
     dbStatus === 'connected' ? 200 : 503

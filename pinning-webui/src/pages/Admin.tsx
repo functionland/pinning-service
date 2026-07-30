@@ -1,4 +1,4 @@
-import { Outlet, NavLink } from 'react-router-dom';
+import { Outlet, NavLink } from 'react-router';
 import { useLanguage } from '../context/LanguageContext';
 
 export default function Admin() {

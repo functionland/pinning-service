@@ -27,6 +27,7 @@ import { generateSocialCaptions } from './socialCaptions.js';
 import { generateSocialImage, type ReferenceImage } from './geminiService.js';
 import { uploadSocialImage } from './ipfsService.js';
 import { fetchToFile } from '../utils/fetchFile.js';
+import { isValidCid } from '../utils/cid.js';
 import { buildImagePrompt } from '../prompts/socialPrompts.js';
 
 /** Per-reference-image download cap. Website display assets are ≤25MB by the
@@ -44,28 +45,62 @@ export interface SocialAsset {
   fileName: string;
   type: string;
   url: string;
+  /** Content address of the asset. Preferred over `url` — see [refFetchUrl]. */
+  cid?: string;
 }
 
-/** Hosts reference images may be fetched from: our own gateways. */
-function allowedRefHosts(): Set<string> {
-  const hosts = new Set<string>();
+/**
+ * Hosts a reference image may be fetched from when we have to fall back to
+ * the client's URL: our own gateways plus anything in
+ * SOCIAL_REF_ALLOWED_HOSTS. An entry beginning with '.' matches subdomains
+ * (".dweb.link" covers "<cid>.ipfs.dweb.link"), which is how subdomain-style
+ * IPFS gateways address content.
+ */
+function allowedRefHostRules(): string[] {
+  const rules: string[] = [];
   for (const raw of [config.ipfsGatewayUrl, config.s3GatewayUrl]) {
     try {
-      hosts.add(new URL(raw).host);
+      rules.push(new URL(raw).host.toLowerCase());
     } catch {
       /* unset/invalid config entry — skip */
     }
   }
-  return hosts;
+  for (const entry of config.socialRefAllowedHosts.split(',')) {
+    const trimmed = entry.trim().toLowerCase();
+    if (trimmed) rules.push(trimmed);
+  }
+  return rules;
 }
 
 export function isAllowedRefUrl(url: string): boolean {
   try {
     const u = new URL(url);
-    return u.protocol === 'https:' && allowedRefHosts().has(u.host);
+    if (u.protocol !== 'https:') return false;
+    const host = u.host.toLowerCase();
+    return allowedRefHostRules().some((rule) =>
+      rule.startsWith('.') ? host.endsWith(rule) : host === rule,
+    );
   } catch {
     return false;
   }
+}
+
+/**
+ * Where to actually fetch a reference image from.
+ *
+ * Prefer a URL WE build from the asset's CID against our own configured
+ * gateway: content addressing guarantees identical bytes, and it means the
+ * fetch target is never client-controlled. The client's own gateway setting
+ * is user-configurable (it defaults to a `<cid>.ipfs.dweb.link` subdomain
+ * gateway), so matching on its host is both fragile and a needless SSRF
+ * surface. The URL path is only a fallback for assets recorded before CIDs
+ * were sent.
+ */
+export function refFetchUrl(asset: SocialAsset): string | null {
+  if (isValidCid(asset.cid)) {
+    return `${config.ipfsGatewayUrl.replace(/\/+$/, '')}/${asset.cid}`;
+  }
+  return isAllowedRefUrl(asset.url) ? asset.url : null;
 }
 
 /** Download + downscale reference images. Per-image failures are tolerated —
@@ -75,17 +110,30 @@ async function prepareReferenceImages(
   tmpDir: string,
   signal: AbortSignal,
 ): Promise<ReferenceImage[]> {
-  const candidates = assets
-    .filter((a) => IMAGE_EXT.has(path.extname(a.fileName || '').toLowerCase()))
-    .filter((a) => isAllowedRefUrl(a.url))
+  const images = assets.filter((a) =>
+    IMAGE_EXT.has(path.extname(a.fileName || '').toLowerCase()),
+  );
+  const candidates = images
+    .map((a) => ({ asset: a, fetchUrl: refFetchUrl(a) }))
+    .filter((c): c is { asset: SocialAsset; fetchUrl: string } =>
+      c.fetchUrl !== null,
+    )
     .slice(0, config.socialMaxReferenceImages);
 
+  // Logged per-stage: silently generating from zero brand imagery is a
+  // quality failure that looks like success, so make the drop-off visible.
+  if (candidates.length < images.length || images.length < assets.length) {
+    console.warn(
+      `[social] Reference images: ${assets.length} sent -> ${images.length} raster -> ${candidates.length} fetchable`,
+    );
+  }
+
   const refs: ReferenceImage[] = [];
-  for (const [i, asset] of candidates.entries()) {
+  for (const [i, { asset, fetchUrl }] of candidates.entries()) {
     if (signal.aborted) break;
     const tmpPath = path.join(tmpDir, `ref-${i}`);
     try {
-      await fetchToFile(asset.url, tmpPath, signal, {
+      await fetchToFile(fetchUrl, tmpPath, signal, {
         maxBytes: REF_FETCH_MAX_BYTES,
         logTag: '[social]',
         // The host allowlist above is only meaningful if a redirect can't
@@ -142,6 +190,7 @@ async function executeSocialJob(
       fileName: a.fileName || '',
       type: a.type || '',
       url: a.url || '',
+      cid: typeof a.cid === 'string' ? a.cid : undefined,
     }));
 
     const captionsPromise = generateSocialCaptions(job.prompt, job.website_url, {

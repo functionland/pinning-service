@@ -25,6 +25,7 @@ import {
   socialPostExistsByImageCid,
 } from '../database/social_postgres.js';
 import { deductCredits, refundCredits } from '../services/creditService.js';
+import { CID_PATTERN } from '../utils/cid.js';
 import { startSocialJob } from '../services/socialService.js';
 import { fetchBufferChannels, createBufferPosts } from '../services/bufferService.js';
 
@@ -43,7 +44,6 @@ interface Env {
 
 export const socialPublicRoutes = new Hono();
 
-const CID_PATTERN = /^(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[a-z0-9]{40,90})$/;
 const PASSTHROUGH_MAX_BYTES = 15 * 1024 * 1024;
 const PASSTHROUGH_TIMEOUT_MS = 30_000;
 /** JPEG magic bytes — the social pipeline only ever uploads sharp-encoded
@@ -143,7 +143,14 @@ socialPublicRoutes.get('/image/:cid', async (c) => {
 
 export const socialRoutes = new Hono<Env>();
 
-socialRoutes.use('*', jwtValidatorMiddleware);
+// Scoped per-path ON PURPOSE. A blanket use('*') here also matches
+// /api/v1/social/image/:cid — the two routers share a mount prefix, and
+// registering the public one first does NOT exempt it — which 401s the
+// unauthenticated image passthrough that Buffer and <img> tags depend on.
+socialRoutes.use('/generate', jwtValidatorMiddleware);
+socialRoutes.use('/status/:id', jwtValidatorMiddleware);
+socialRoutes.use('/buffer/channels', jwtValidatorMiddleware);
+socialRoutes.use('/buffer/post', jwtValidatorMiddleware);
 
 // --------------------------------------------
 // In-memory per-user rate limiter for the Buffer proxy (30/min channels,
@@ -196,6 +203,9 @@ const socialGenerateSchema = z.object({
         fileName: z.string().max(500),
         type: z.string().max(50),
         url: httpUrl(2000),
+        // Preferred fetch key: the service resolves it against its OWN
+        // gateway rather than trusting the client's gateway host.
+        cid: z.string().max(200).optional(),
       })
     )
     .max(14)

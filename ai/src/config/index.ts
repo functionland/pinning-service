@@ -73,6 +73,10 @@ const configSchema = z.object({
   socialJobTimeoutMs: z.coerce.number().default(300000),
   maxSocialJobsPerUserPerHour: z.coerce.number().default(10),
   socialMaxReferenceImages: z.coerce.number().int().positive().max(14).default(8),
+  // Extra hosts a reference image may be fetched from when an asset has no
+  // CID (comma-separated). A leading '.' matches subdomains — the FxFiles
+  // client defaults to the subdomain gateway `<cid>.ipfs.dweb.link`.
+  socialRefAllowedHosts: z.string().default('.dweb.link,.w3s.link,.ipfs.io'),
   // Bucket the finished social JPEG lands in — the client-owned public
   // website-assets bucket, mirroring how imported website assets are hosted.
   socialAssetsBucket: z.string().default('website-assets'),
@@ -142,6 +146,7 @@ function loadConfig(): Config {
     socialJobTimeoutMs: process.env.SOCIAL_JOB_TIMEOUT_MS,
     maxSocialJobsPerUserPerHour: process.env.MAX_SOCIAL_JOBS_PER_USER_PER_HOUR,
     socialMaxReferenceImages: process.env.SOCIAL_MAX_REFERENCE_IMAGES,
+    socialRefAllowedHosts: process.env.SOCIAL_REF_ALLOWED_HOSTS,
     socialAssetsBucket: process.env.SOCIAL_ASSETS_BUCKET,
     socialPublicBaseUrl: process.env.SOCIAL_PUBLIC_BASE_URL,
     bufferApiUrl: process.env.BUFFER_API_URL,
@@ -204,6 +209,7 @@ export function logConfig(): void {
   console.log(`  socialJobTimeoutMs: ${config.socialJobTimeoutMs}`);
   console.log(`  maxSocialJobsPerUserPerHour: ${config.maxSocialJobsPerUserPerHour}`);
   console.log(`  socialMaxReferenceImages: ${config.socialMaxReferenceImages}`);
+  console.log(`  socialRefAllowedHosts: ${config.socialRefAllowedHosts}`);
   console.log(`  socialAssetsBucket: ${config.socialAssetsBucket}`);
   console.log(`  socialPublicBaseUrl: ${config.socialPublicBaseUrl || '(raw gateway URLs)'}`);
   console.log(`  bufferApiUrl: ${config.bufferApiUrl}`);

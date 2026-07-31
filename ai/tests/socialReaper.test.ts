@@ -26,6 +26,7 @@ vi.mock('../src/config/index.js', () => ({
     maxConcurrentSocialJobs: 2,
     socialJobTimeoutMs: 300000,
     socialMaxReferenceImages: 8,
+    socialRefAllowedHosts: '.dweb.link,.w3s.link,.ipfs.io',
     socialAssetsBucket: 'website-assets',
     ipfsGatewayUrl: 'https://ipfs.cloud.fx.land/gateway',
     s3GatewayUrl: 'https://s3.cloud.fx.land',
@@ -34,7 +35,11 @@ vi.mock('../src/config/index.js', () => ({
 vi.mock('../src/database/social_postgres.js', () => db);
 vi.mock('../src/services/creditService.js', () => credits);
 
-import { reapStaleSocialJobsOnBoot, isAllowedRefUrl } from '../src/services/socialService.js';
+import {
+  reapStaleSocialJobsOnBoot,
+  isAllowedRefUrl,
+  refFetchUrl,
+} from '../src/services/socialService.js';
 
 describe('reapStaleSocialJobsOnBoot', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -70,15 +75,63 @@ describe('reapStaleSocialJobsOnBoot', () => {
   });
 });
 
+const VALID_CID =
+  'bafkr4ihc6u2d55kyv6wyy6v2ehdttid7ewjm52tcbtjb7xehinbnj55hxe';
+
 describe('isAllowedRefUrl', () => {
-  it('accepts https URLs on our gateway hosts only', () => {
+  it('accepts https URLs on our gateway hosts', () => {
     expect(isAllowedRefUrl('https://ipfs.cloud.fx.land/gateway/bafyabc')).toBe(true);
     expect(isAllowedRefUrl('https://s3.cloud.fx.land/website-assets/g/x.jpg')).toBe(true);
+  });
+  it('accepts subdomain gateways via the configured suffix rules', () => {
+    // The FxFiles client's DEFAULT gateway shape — rejecting it is what
+    // silently dropped every reference image in the first live run.
+    expect(isAllowedRefUrl(`https://${VALID_CID}.ipfs.dweb.link/`)).toBe(true);
+    expect(isAllowedRefUrl(`https://${VALID_CID}.ipfs.w3s.link/`)).toBe(true);
   });
   it('rejects other hosts, http, and garbage', () => {
     expect(isAllowedRefUrl('https://evil.example/x.jpg')).toBe(false);
     expect(isAllowedRefUrl('http://ipfs.cloud.fx.land/gateway/bafyabc')).toBe(false);
+    // Suffix rules must not match a lookalike host.
+    expect(isAllowedRefUrl('https://notdweb.link.evil.example/x')).toBe(false);
     expect(isAllowedRefUrl('not a url')).toBe(false);
     expect(isAllowedRefUrl('file:///etc/passwd')).toBe(false);
+  });
+});
+
+describe('refFetchUrl', () => {
+  it('resolves a CID against OUR gateway, ignoring the client URL', () => {
+    expect(
+      refFetchUrl({
+        fileName: 'a.jpg',
+        type: 'image',
+        url: `https://${VALID_CID}.ipfs.dweb.link/`,
+        cid: VALID_CID,
+      })
+    ).toBe(`https://ipfs.cloud.fx.land/gateway/${VALID_CID}`);
+  });
+
+  it('works for a cid-only asset with no url at all', () => {
+    expect(
+      refFetchUrl({ fileName: 'a.jpg', type: 'image', url: '', cid: VALID_CID })
+    ).toBe(`https://ipfs.cloud.fx.land/gateway/${VALID_CID}`);
+  });
+
+  it('falls back to an allow-listed url when the cid is absent or bogus', () => {
+    const url = `https://${VALID_CID}.ipfs.dweb.link/`;
+    expect(refFetchUrl({ fileName: 'a.jpg', type: 'image', url })).toBe(url);
+    expect(
+      refFetchUrl({ fileName: 'a.jpg', type: 'image', url, cid: 'not-a-cid' })
+    ).toBe(url);
+  });
+
+  it('returns null when neither a cid nor an allowed url is usable', () => {
+    expect(
+      refFetchUrl({
+        fileName: 'a.jpg',
+        type: 'image',
+        url: 'https://evil.example/x.jpg',
+      })
+    ).toBeNull();
   });
 });

@@ -519,7 +519,9 @@ server {
     listen 80;
     server_name $DOMAIN;
 
-    client_max_body_size 10M;
+    # Must exceed the Ask AI route's own cap (bodyLimit 35MB / 30MB of files
+    # in src/routes/ask.ts) so nginx doesn't 413 before the app can respond.
+    client_max_body_size 40M;
 
     location / {
         proxy_pass http://127.0.0.1:$PORT;

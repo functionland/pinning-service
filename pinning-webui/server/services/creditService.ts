@@ -314,7 +314,31 @@ export async function creditUser(
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    await creditUserTx(client, userId, amount, referenceId, txType);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
+/**
+ * Transaction-body variant of creditUser: runs all credit operations on a
+ * CALLER-OWNED client inside the CALLER's transaction (no BEGIN/COMMIT here).
+ * Lets blockScanner make deposit-recording + crediting atomic (FM-2): a crash
+ * between the token_transactions insert and the credit can no longer strand a
+ * recorded-but-uncredited deposit.
+ */
+export async function creditUserTx(
+  client: PoolClient,
+  userId: string,
+  amount: number,
+  referenceId: string,
+  txType: 'deposit' | 'adjustment' = 'deposit'
+): Promise<void> {
+  {
     // 1. Walk the referral chain BEFORE acquiring any row locks (read-only).
     //    Only positive credits trigger bonuses; negative / zero amounts skip
     //    the walk. The kill switch lets ops disable bonuses without redeploy.
@@ -399,13 +423,6 @@ export async function creditUser(
         );
       }
     }
-
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
   }
 }
 

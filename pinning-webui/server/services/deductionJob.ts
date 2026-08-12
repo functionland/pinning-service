@@ -10,11 +10,24 @@
  */
 
 import { query, getClient } from '../database/postgres.js';
+import { leaseGate } from './leaderLease.js';
 
 // Configuration (from env or defaults)
 const FREE_TIER_BYTES = parseInt(process.env.FREE_TIER_BYTES || '524288000'); // 500MB
 const FULA_PER_GB_MONTH = parseFloat(process.env.FULA_PER_GB_MONTH || '3');
 const HOURS_PER_MONTH = 720;
+
+// FM-2 (federated masters): when true, the deduction uses a deterministic
+// per-hour reference_id and the credit_history INSERT becomes the dedup gate
+// (ON CONFLICT on migration 018's partial UNIQUE index) — N masters running
+// this cron concurrently deduct exactly once per (user, hour). Default OFF:
+// legacy single-master behavior is byte-identical when dark.
+const BILLING_IDEMPOTENCY = process.env.BILLING_IDEMPOTENCY === 'true';
+
+/** Deterministic UTC hour bucket, e.g. 'hour:2026-06-12T14'. */
+export function currentHourBucket(d: Date = new Date()): string {
+  return `hour:${d.toISOString().slice(0, 13)}`;
+}
 
 // User storage info
 interface UserStorage {
@@ -50,8 +63,10 @@ function calculateHourlyDeduction(totalBytes: number): number {
   return billableGB * FULA_PER_GB_MONTH / HOURS_PER_MONTH;
 }
 
-// Process deduction for a single user
-async function processUserDeduction(userId: string, storageBytes: number): Promise<{
+// Process deduction for a single user.
+// Exported as a test seam: the FM-2 e2e/integration suites race two calls to
+// prove the (user, hour) idempotency gate under real Postgres.
+export async function processUserDeduction(userId: string, storageBytes: number): Promise<{
   deducted: boolean;
   amount: number;
   suspended: boolean;
@@ -83,6 +98,26 @@ async function processUserDeduction(userId: string, storageBytes: number): Promi
     const newBalance = currentBalance - deductionAmount;
     const shouldSuspend = newBalance < 0;
 
+    if (BILLING_IDEMPOTENCY) {
+      // FM-2: insert the history row FIRST as the idempotency gate. The partial
+      // UNIQUE index (migration 018) on (user_id, reference_id) WHERE
+      // tx_type='hourly_deduction' arbitrates: if another master already
+      // deducted this (user, hour), this no-ops and we leave the balance alone.
+      // The FOR UPDATE row lock above serializes concurrent attempts so the
+      // loser observes the conflict, not a race.
+      const gate = await client.query(
+        `INSERT INTO credit_history (user_id, tx_type, amount_fula, balance_after, reference_id)
+         VALUES ($1, 'hourly_deduction', $2, $3, $4)
+         ON CONFLICT (user_id, reference_id) WHERE tx_type = 'hourly_deduction' DO NOTHING
+         RETURNING id`,
+        [userId, -deductionAmount, newBalance, currentHourBucket()]
+      );
+      if ((gate.rowCount || 0) === 0) {
+        await client.query('COMMIT');
+        return { deducted: false, amount: 0, suspended: false };
+      }
+    }
+
     if (credits) {
       // Atomic deduction on existing record
       await client.query(
@@ -105,12 +140,15 @@ async function processUserDeduction(userId: string, storageBytes: number): Promi
       );
     }
 
-    // Log the deduction
-    await client.query(
-      `INSERT INTO credit_history (user_id, tx_type, amount_fula, balance_after, reference_id)
-       VALUES ($1, 'hourly_deduction', $2, $3, $4)`,
-      [userId, -deductionAmount, newBalance, new Date().toISOString()]
-    );
+    if (!BILLING_IDEMPOTENCY) {
+      // Legacy path: history row appended after the balance update, with a
+      // timestamp reference_id (not idempotent — single-master only).
+      await client.query(
+        `INSERT INTO credit_history (user_id, tx_type, amount_fula, balance_after, reference_id)
+         VALUES ($1, 'hourly_deduction', $2, $3, $4)`,
+        [userId, -deductionAmount, newBalance, new Date().toISOString()]
+      );
+    }
 
     await client.query('COMMIT');
     return { deducted: true, amount: deductionAmount, suspended: shouldSuspend };
@@ -240,7 +278,11 @@ export function startDeductionJob(intervalMs: number = 60 * 60 * 1000): void {
     }
     isProcessing = true;
     try {
-      await runDeductionJob();
+      // Federated masters: only the lease holder runs the tick (no-op when
+      // CRON_LEADER_LEASE is off — legacy behavior).
+      if (await leaseGate('deductionJob')) {
+        await runDeductionJob();
+      }
     } catch (err) {
       console.error('[deductionJob] Error:', err);
     } finally {

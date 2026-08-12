@@ -1,0 +1,19 @@
+# Fula federated master — IPFS Pinning Service API (PostgreSQL backend).
+# Build context: repo root (docker/master/docker-compose.master.yml sets it).
+# The repo builds entrypoints by FILE selection (three package-main files), so
+# we compile main_postgres.go explicitly — mirrors the header comment in that
+# file and the prod systemd service (fula-pinning-service).
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+ENV CGO_ENABLED=0
+COPY go.mod go.sum ./
+COPY openapi/go ./openapi/go
+RUN go mod download
+COPY main_postgres.go ./
+RUN go build -o /pinning-server-postgres main_postgres.go
+
+FROM alpine:3.20 AS runtime
+RUN apk add --no-cache ca-certificates
+COPY --from=build /pinning-server-postgres /usr/local/bin/pinning-server-postgres
+# nc ships in busybox — used by the compose healthcheck (TCP liveness on $PORT).
+ENTRYPOINT ["/usr/local/bin/pinning-server-postgres"]

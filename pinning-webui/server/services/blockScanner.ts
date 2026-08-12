@@ -7,9 +7,15 @@
  * Uses PostgreSQL for database operations.
  */
 
-import { query } from '../database/postgres.js';
+import { query, getClient } from '../database/postgres.js';
 import { hashWalletAddress } from '../utils/hash.js';
-import { creditUser } from './creditService.js';
+import { creditUser, creditUserTx } from './creditService.js';
+import { leaseGate } from './leaderLease.js';
+
+// FM-2 (federated masters): when true, recording the deposit and crediting the
+// user happen in ONE transaction (closes the crash window that strands a
+// recorded-but-uncredited tx). Default OFF: legacy behavior unchanged.
+const BILLING_IDEMPOTENCY = process.env.BILLING_IDEMPOTENCY === 'true';
 
 // Chain configuration
 export interface ChainConfig {
@@ -176,6 +182,10 @@ export async function processTransfer(chainId: number, transfer: TokenTransfer):
     return false;
   }
 
+  if (BILLING_IDEMPOTENCY) {
+    return processTransferAtomic(chainId, transfer, amountFula);
+  }
+
   try {
     // Insert transaction (ON CONFLICT DO NOTHING to handle duplicates)
     const result = await query(
@@ -230,6 +240,78 @@ export async function processTransfer(chainId: number, transfer: TokenTransfer):
   } catch (error) {
     console.error(`[blockScanner] Error processing transfer ${transfer.hash}:`, error);
     return false;
+  }
+}
+
+/**
+ * FM-2 atomic variant: the token_transactions insert (idempotency gate via
+ * UNIQUE (tx_hash, chain_id)), the user credit (+ referral bonuses), and the
+ * claimed_at marking commit or roll back TOGETHER. Multi-master safe: when two
+ * masters scan the same chain, exactly one wins the insert and credits; the
+ * other sees rowCount=0 and skips. Crash-safe: a death before COMMIT leaves no
+ * trace, so the next scan retries the whole unit.
+ */
+async function processTransferAtomic(
+  chainId: number,
+  transfer: TokenTransfer,
+  amountFula: number
+): Promise<boolean> {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    const result = await client.query(
+      `INSERT INTO token_transactions
+         (tx_hash, chain_id, from_address, to_address, amount_raw, amount_fula, block_number, block_timestamp, ingestion_source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'cron')
+       ON CONFLICT (tx_hash, chain_id) DO NOTHING`,
+      [
+        transfer.hash,
+        chainId,
+        transfer.from.toLowerCase(),
+        transfer.to.toLowerCase(),
+        transfer.value,
+        amountFula,
+        parseInt(transfer.blockNumber),
+        parseInt(transfer.timeStamp)
+      ]
+    );
+
+    if ((result.rowCount || 0) === 0) {
+      // Already recorded (by us or another master) — nothing to do.
+      await client.query('COMMIT');
+      return false;
+    }
+
+    const fromHash = hashWalletAddress(transfer.from);
+    const walletResult = await client.query<{ user_id: string }>(
+      `SELECT user_id FROM user_wallets
+       WHERE wallet_address_hash = $1 AND is_verified = 1`,
+      [fromHash]
+    );
+    const wallet = walletResult.rows[0];
+
+    if (wallet) {
+      await creditUserTx(client, wallet.user_id, amountFula, `${chainId}:${transfer.hash}`, 'deposit');
+      await client.query(
+        `UPDATE token_transactions
+         SET user_id = $1, claimed_at = NOW()
+         WHERE tx_hash = $2 AND chain_id = $3`,
+        [wallet.user_id, transfer.hash, chainId]
+      );
+    }
+
+    await client.query('COMMIT');
+    if (wallet) {
+      console.log(`[blockScanner] Auto-credited ${amountFula} FULA to user ${wallet.user_id} from tx ${transfer.hash} (atomic)`);
+    }
+    return true;
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* connection gone */ }
+    console.error(`[blockScanner] Error processing transfer ${transfer.hash} (atomic):`, error);
+    return false;
+  } finally {
+    client.release();
   }
 }
 
@@ -352,9 +434,10 @@ export function startBlockScanner(intervalMs: number = 10 * 60 * 1000): void {
     return;
   }
 
-  // Run immediately on start
+  // Run immediately on start (lease-gated: a standby master skips quietly)
   isScanning = true;
-  runBlockScanner()
+  leaseGate('blockScanner')
+    .then(leader => (leader ? runBlockScanner() : undefined))
     .catch(err => console.error('[blockScanner] Error:', err))
     .finally(() => { isScanning = false; });
 
@@ -366,7 +449,11 @@ export function startBlockScanner(intervalMs: number = 10 * 60 * 1000): void {
     }
     isScanning = true;
     try {
-      await runBlockScanner();
+      // Federated masters: only the lease holder runs the tick (no-op when
+      // CRON_LEADER_LEASE is off — legacy behavior).
+      if (await leaseGate('blockScanner')) {
+        await runBlockScanner();
+      }
     } catch (err) {
       console.error('[blockScanner] Error:', err);
     } finally {

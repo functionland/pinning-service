@@ -7,15 +7,16 @@
 -- --------------------------------------------
 -- `ai_generations` already holds, in plaintext, everything a directory
 -- entry needs: result_cid, gateway_url, owner (user_id) and timestamps.
--- The client never calls POST /pins for a generated website, and the
--- `pins.name` for an AI-generated CID is written by the out-of-repo S3
--- gateway, so `pins` is not a reliable source for this. No client-side
--- encryption is involved either way.
+-- The client never calls POST /pins for a generated website, so `pins`
+-- is not a usable source for this. No client-side encryption is involved
+-- either way.
 --
--- The column default is FALSE on purpose. "Listed by default" is a
--- CLIENT decision expressed by sending listed=true on new generations —
--- so every row that already exists stays unlisted, and no user is
--- retroactively published by shipping this migration.
+-- FALSE on purpose, and the client defaults to false too: listing is
+-- OPT-IN end to end. A pre-ticked consent box does not constitute
+-- consent (GDPR Recital 32), so the app's checkbox starts unticked and a
+-- row becomes listed only when a user deliberately asked for it. Every
+-- row that already exists therefore stays unlisted, and shipping this
+-- migration publishes nobody.
 
 ALTER TABLE ai_generations
     ADD COLUMN IF NOT EXISTS listed BOOLEAN NOT NULL DEFAULT FALSE;

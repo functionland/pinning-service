@@ -115,9 +115,10 @@ export interface AiGeneration {
 
 // Create a new generation record (stores userId hash, not plain-text email)
 //
-// `listed` / `listingName` drive the public directory. The COLUMN default
-// is false; "listed by default" is a client decision expressed by sending
-// listed=true, which is what keeps every pre-existing row unlisted.
+// `listed` / `listingName` drive the public directory. Listing is OPT-IN:
+// the column defaults to false, the client defaults to false, and the
+// app's consent checkbox starts unticked (a pre-ticked box is not
+// consent — GDPR Recital 32). A row is listed only when a user asked.
 export async function createGeneration(
   id: string,
   userId: string,

@@ -69,9 +69,10 @@ const generateRequestSchema = z.object({
   // (the client polls for up to 20 minutes). Absent = legacy client → the
   // faster single-pass pipeline that fits the old 5-minute deadline.
   pipeline_version: z.number().int().min(1).max(10).optional(),
-  // Public directory ("yellow pages") opt-in. Defaults FALSE here so an
-  // older client that never heard of the directory can never publish a
-  // user into it by omission — the newer client sends true explicitly.
+  // Public directory ("yellow pages") opt-in, false unless the user
+  // deliberately asked for it. Defaulting FALSE here also means an older
+  // client that never heard of the directory cannot publish a user into
+  // it by omission.
   listed: z.boolean().default(false),
   // The website group's display name, sent explicitly rather than
   // scraped out of `prompt` (which is free text the user wrote and may

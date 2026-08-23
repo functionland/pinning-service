@@ -252,6 +252,17 @@ export async function ensureListingSummary(
   try {
     if (!(await needsListingSummary(jobId))) return null;
 
+    // Re-read the row RIGHT NOW rather than trusting a `listed` value
+    // the caller read earlier. A generation runs for up to 20 minutes
+    // and the owner can toggle listing off from the website screen while
+    // it runs; without this, a site the user just opted OUT of would
+    // still be summarised and published.
+    const job = await getGeneration(jobId);
+    if (!job) return null;
+    if (job.listed !== true || job.delisted_by_admin === true) {
+      return null;
+    }
+
     const categories = await getActiveCategories();
     if (categories.length === 0) {
       console.warn('[directory] No active categories; skipping summary');
@@ -260,8 +271,7 @@ export async function ensureListingSummary(
 
     let html = opts.html;
     if (!html) {
-      const job = await getGeneration(jobId);
-      if (!job?.gateway_url) {
+      if (!job.gateway_url) {
         console.warn(`[directory] Job ${jobId} has no gateway_url yet`);
         return null;
       }

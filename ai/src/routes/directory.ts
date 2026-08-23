@@ -46,6 +46,11 @@ const MAX_REPORTS_PER_IP_PER_DAY = 20;
 const LISTING_CACHE_MS = 60_000;
 const listingCache = new Map<string, { at: number; body: unknown }>();
 
+/** Drop the cached listing pages (admin delist, and test isolation). */
+export function clearDirectoryCache(): void {
+  listingCache.clear();
+}
+
 function clientIpHash(ipHeader: string | undefined): string | null {
   const ip = ipHeader?.split(',')[0]?.trim();
   if (!ip) return null;
@@ -187,7 +192,15 @@ directoryPublicRoutes.post('/directory/:id/report', async (c) => {
 
 export const directoryAdminRoutes = new Hono();
 
-directoryAdminRoutes.use('*', async (c, next) => {
+// Scoped to the admin subtree, NOT '*'.
+//
+// This router is mounted at `/api/v1` alongside the authed generate
+// routes. A `use('*', ...)` here runs for every request that reaches the
+// router at that MOUNT PREFIX — which is every `/api/v1/*` path — so the
+// guard would 403 the entire API (generate, status, ask, social) rather
+// than just the admin endpoints. `tsc` cannot see that; the route test
+// in `tests/directoryRoutes.test.ts` exists because of it.
+directoryAdminRoutes.use('/directory/admin/*', async (c, next) => {
   const key = c.req.header('x-system-key');
   if (!key || key !== config.pinningSystemKey) {
     return c.json({ error: 'Forbidden', code: 'FORBIDDEN' }, 403);

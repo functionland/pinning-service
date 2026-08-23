@@ -22,10 +22,62 @@ vi.mock('../src/database/postgres.js', () => ({
 import {
   clipDescription,
   coerceCategory,
+  containsLikelyContactDetails,
   extractSiteText,
   FALLBACK_CATEGORY,
   LISTING_DESCRIPTION_MAX_CHARS,
 } from '../src/services/directoryListing.js';
+
+describe('containsLikelyContactDetails', () => {
+  // The description is content WE generate and publish into a searchable
+  // index. Telling the model not to include contact details is not a
+  // control; this is the backstop on the text that actually ships.
+  it('catches plain emails', () => {
+    expect(
+      containsLikelyContactDetails('Bakery run by jane@example.com')
+    ).toBe(true);
+  });
+
+  it('catches obfuscated emails', () => {
+    expect(
+      containsLikelyContactDetails('Reach jane [at] example [dot] com')
+    ).toBe(true);
+  });
+
+  it('catches phone numbers, separators and all', () => {
+    expect(containsLikelyContactDetails('Call +1 (555) 123-4567')).toBe(true);
+    expect(containsLikelyContactDetails('Tel: 020 7946 0018')).toBe(true);
+  });
+
+  it('catches URLs and bare domains', () => {
+    expect(containsLikelyContactDetails('See https://elsewhere.test')).toBe(
+      true
+    );
+    expect(containsLikelyContactDetails('Visit example.com for more')).toBe(
+      true
+    );
+  });
+
+  it('leaves an ordinary blurb alone', () => {
+    expect(
+      containsLikelyContactDetails(
+        'A neighbourhood bakery selling sourdough and pastries.'
+      )
+    ).toBe(false);
+    expect(
+      containsLikelyContactDetails('Portfolio of a landscape photographer.')
+    ).toBe(false);
+  });
+
+  it('tolerates a year or a small number', () => {
+    expect(
+      containsLikelyContactDetails('A community choir founded in 1998.')
+    ).toBe(false);
+    expect(containsLikelyContactDetails('Serving 20 kinds of tea.')).toBe(
+      false
+    );
+  });
+});
 
 describe('extractSiteText', () => {
   it('drops script and style bodies', () => {

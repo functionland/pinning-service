@@ -66,10 +66,16 @@ function Disclaimer() {
       <p className="mt-2">
         Every website listed here was created by an independent user of
         FxFiles. These sites are <strong>not affiliated with, endorsed by,
-        verified by, reviewed by, or guaranteed by</strong> FxFiles,
-        Functionland, Fula, or any related entity. This page is an
-        unmoderated directory provided &ldquo;as is&rdquo;, without warranty
-        of any kind.
+        verified by, or guaranteed by</strong> FxFiles, Functionland, Fula,
+        or any related entity. Listings are published by their owners and
+        are not reviewed before they appear; they are provided
+        &ldquo;as is&rdquo;, without warranty of any kind.
+      </p>
+      <p className="mt-2">
+        Listings are community-reported and human-reviewed. Descriptions
+        and categories are <strong>generated automatically</strong> and may
+        be inaccurate or incomplete &mdash; use <em>Report</em> below a
+        listing to flag an error or a problem, and it will be reviewed.
       </p>
       <p className="mt-2">
         <strong>All responsibility for a site&rsquo;s content, claims,

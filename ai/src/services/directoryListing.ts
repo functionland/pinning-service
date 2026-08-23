@@ -125,6 +125,53 @@ export function extractSiteText(html: string): string {
     : combined;
 }
 
+/**
+ * Deterministic check for contact-detail-shaped text in a description.
+ *
+ * WHY THIS EXISTS, AND WHY THE INSTRUCTION ALONE IS NOT ENOUGH
+ * ------------------------------------------------------------
+ * The summariser reads the published site, which is already public — but
+ * the DESCRIPTION is new content WE generate and publish into an
+ * aggregated, searchable index. "Already public by link" is not the same
+ * as "indexed and discoverable", and a generated site's About page,
+ * team list, testimonials or footer routinely carry a real name, email
+ * or phone number.
+ *
+ * The system prompt tells the model not to include those. Model
+ * instructions are not a control: they are missed, obeyed inconsistently,
+ * and defeated by obfuscated forms. This is the deterministic backstop
+ * on the only text that actually gets published.
+ *
+ * Deliberately conservative — a 140-character blurb saying what a site is
+ * for has no legitimate need for an address, a phone number or an email,
+ * so a false positive costs nothing but a missing blurb.
+ */
+export function containsLikelyContactDetails(text: string): boolean {
+  const t = text.toLowerCase();
+
+  // Email, including the common obfuscations.
+  if (/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/.test(t)) return true;
+  if (/\[\s*at\s*\]|\(\s*at\s*\)|\s+at\s+\S+\s*(\[|\()?\s*dot\s*(\]|\))?\s+/.test(t)) {
+    return true;
+  }
+
+  // A run of digits long enough to be a phone number or an account,
+  // ignoring separators. Years and small numbers stay fine.
+  const digits = t.replace(/[^0-9]/g, '');
+  if (digits.length >= 9) return true;
+
+  // Explicit phone markers.
+  if (/(^|\s)(tel|phone|call us|whatsapp)[:\s]/.test(t)) return true;
+
+  // A URL or bare domain: the entry already carries the site's link, so a
+  // description containing another one is either noise or an injection.
+  if (/https?:\/\/|www\.|\b[a-z0-9-]+\.(com|net|org|io|co|xyz|app|dev)\b/.test(t)) {
+    return true;
+  }
+
+  return false;
+}
+
 /** Clip to the column's contract; never mid-word if avoidable. */
 export function clipDescription(raw: string): string {
   const flat = raw.replace(/\s+/g, ' ').trim();
@@ -208,10 +255,21 @@ export async function generateListingSummary(
     throw new Error('Claude returned unparseable listing summary');
   }
 
-  return {
-    description: clipDescription(parsed.description ?? ''),
-    category: coerceCategory(parsed.category ?? '', allowed),
-  };
+  const description = clipDescription(parsed.description ?? '');
+  const category = coerceCategory(parsed.category ?? '', allowed);
+
+  // Deterministic backstop. The entry still lists (name + link +
+  // category) with no blurb, which is strictly better than publishing
+  // someone's phone number into a searchable index because the model
+  // ignored an instruction.
+  if (containsLikelyContactDetails(description)) {
+    console.warn(
+      '[directory] Dropped a description containing contact-shaped text'
+    );
+    return { description: '', category };
+  }
+
+  return { description, category };
 }
 
 /** Fetch a published site's index for the lazy (toggle-on) path. */

@@ -16,6 +16,10 @@ import { generateRoutes } from './routes/generate.js';
 import { pricingRoutes } from './routes/pricing.js';
 import { askRoutes } from './routes/ask.js';
 import { socialRoutes, socialPublicRoutes } from './routes/social.js';
+import {
+  directoryPublicRoutes,
+  directoryAdminRoutes,
+} from './routes/directory.js';
 import { cleanupExpiredAskCache } from './database/ask_postgres.js';
 
 // Run cleanup every 15 minutes
@@ -102,7 +106,10 @@ app.use(
   '*',
   cors({
     origin: '*',
-    allowMethods: ['GET', 'POST', 'OPTIONS'],
+    // DELETE is used by the directory's admin category endpoint. Routes
+    // enforce their own auth (JWT / SYSTEM_KEY), so widening the CORS
+    // method list does not widen access.
+    allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
     exposeHeaders: ['Content-Type'],
     maxAge: 86400,
@@ -154,6 +161,12 @@ app.get('/', (c) => {
 // router and the paths don't overlap (/pricing vs /generate, /status/:id,
 // /generations).
 app.route('/api/v1', pricingRoutes);
+
+// Public website directory. Mounted BEFORE generateRoutes for the same
+// reason pricing is: generateRoutes' JWT middleware is scoped to that
+// router, and these paths (/directory*) don't overlap its own.
+app.route('/api/v1', directoryPublicRoutes);
+app.route('/api/v1', directoryAdminRoutes);
 
 // Generation API routes
 app.route('/api/v1', generateRoutes);

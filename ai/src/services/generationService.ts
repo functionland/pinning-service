@@ -16,6 +16,7 @@ import {
   failGeneration,
 } from '../database/postgres.js';
 import { generateWebsite } from './claudeService.js';
+import { ensureListingSummary } from './directoryListing.js';
 import { publishWebsite } from './ipfsService.js';
 import { refundCredits } from './creditService.js';
 
@@ -175,6 +176,17 @@ async function executeJob(jobId: string, userToken: string, signal: AbortSignal)
     // Phase 3: Complete
     await completeGeneration(jobId, cid, gatewayUrl);
     console.log(`[generation] Job ${jobId}: completed — CID: ${cid}`);
+
+    // Public directory: describe + categorise, but ONLY for a site the
+    // user chose to list. Done here because the generated index.html is
+    // still in memory, so the common path costs no gateway fetch. Awaited
+    // (not fire-and-forget) so the entry has its blurb by the time the
+    // client sees 'completed', but it can never fail the generation —
+    // ensureListingSummary swallows its own errors.
+    if (job.listed === true) {
+      const indexHtml = files.find((f) => f.path === 'index.html')?.content;
+      await ensureListingSummary(jobId, { html: indexHtml, signal });
+    }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     console.error(`[generation] Job ${jobId} failed:`, errorMessage);

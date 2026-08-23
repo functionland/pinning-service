@@ -21,6 +21,7 @@ import View from './pages/View';
 import Collab from './pages/Collab';
 import GetFxFiles from './pages/GetFxFiles';
 import Stats from './pages/Stats';
+import YellowPage from './pages/YellowPage';
 import Layout from './components/Layout';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -85,6 +86,11 @@ function App() {
           <Route path="/collab/:groupId" element={<Collab />} />
           <Route path="/download" element={<GetFxFiles />} />
           <Route path="/stats" element={<Stats />} />
+          {/* Public directory of user-generated websites. Top-level and
+              OUTSIDE PrivateRoute, same as /stats — visitors are not
+              signed in. /directory is an alias for discoverability. */}
+          <Route path="/yellowpage" element={<YellowPage />} />
+          <Route path="/directory" element={<YellowPage />} />
           <Route path="/" element={
             <PrivateRoute>
               <Layout />

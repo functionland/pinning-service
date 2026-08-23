@@ -103,9 +103,20 @@ export interface AiGeneration {
   completed_at: string | null;
   enable_tracking: boolean;
   pipeline_version: number | null;
+  // Public directory ("yellow pages") — migration 007.
+  listed: boolean;
+  listing_name: string | null;
+  listing_description: string | null;
+  listing_category: string | null;
+  listing_generated_at: string | null;
+  delisted_by_admin: boolean;
 }
 
 // Create a new generation record (stores userId hash, not plain-text email)
+//
+// `listed` / `listingName` drive the public directory. The COLUMN default
+// is false; "listed by default" is a client decision expressed by sending
+// listed=true, which is what keeps every pre-existing row unlisted.
 export async function createGeneration(
   id: string,
   userId: string,
@@ -113,13 +124,25 @@ export async function createGeneration(
   assets: any[],
   creditsCharged: number,
   enableTracking: boolean,
-  pipelineVersion: number | null = null
+  pipelineVersion: number | null = null,
+  listed: boolean = false,
+  listingName: string | null = null
 ): Promise<string> {
   const result = await query(
-    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message, enable_tracking, pipeline_version)
-     VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation', $6, $7)
+    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message, enable_tracking, pipeline_version, listed, listing_name)
+     VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation', $6, $7, $8, $9)
      RETURNING id`,
-    [id, userId, prompt, JSON.stringify(assets), creditsCharged, enableTracking, pipelineVersion]
+    [
+      id,
+      userId,
+      prompt,
+      JSON.stringify(assets),
+      creditsCharged,
+      enableTracking,
+      pipelineVersion,
+      listed,
+      listingName,
+    ]
   );
   return result.rows[0].id;
 }

@@ -11,7 +11,7 @@
  * an unauthenticated endpoint.
  */
 
-import { query } from './postgres.js';
+import { isGenerationId, query } from './postgres.js';
 
 export interface DirectoryCategory {
   slug: string;
@@ -103,8 +103,14 @@ export async function listDirectory(opts: {
   return { entries: result.rows, total };
 }
 
-/** True when the entry is currently visible in the public directory. */
+/// True when the entry is currently visible in the public directory.
+///
+/// `id` comes straight from an UNAUTHENTICATED path parameter, so a
+/// malformed value must answer "no" rather than reaching a UUID column
+/// and raising `invalid input syntax for type uuid` (a 500 where 404 is
+/// the honest answer).
 export async function isPubliclyListed(id: string): Promise<boolean> {
+  if (!isGenerationId(id)) return false;
   const result = await query<{ ok: boolean }>(
     `SELECT (listed AND NOT delisted_by_admin AND status = 'completed') AS ok
        FROM ai_generations WHERE id = $1`,
@@ -125,6 +131,7 @@ export async function setListed(
   userId: string,
   listed: boolean
 ): Promise<boolean> {
+  if (!isGenerationId(id)) return false;
   const result = await query(
     `UPDATE ai_generations
         SET listed = $1, updated_at = CURRENT_TIMESTAMP
@@ -258,6 +265,7 @@ export async function setAdminDelisted(
   id: string,
   delisted: boolean
 ): Promise<boolean> {
+  if (!isGenerationId(id)) return false;
   const result = await query(
     `UPDATE ai_generations
         SET delisted_by_admin = $1, updated_at = CURRENT_TIMESTAMP

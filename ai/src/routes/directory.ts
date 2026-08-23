@@ -22,6 +22,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { createHash, randomUUID } from 'crypto';
 import { config } from '../config/index.js';
+import { isGenerationId } from '../database/postgres.js';
 import {
   countRecentReportsByIp,
   createReport,
@@ -143,6 +144,12 @@ const reportSchema = z.object({
 
 directoryPublicRoutes.post('/directory/:id/report', async (c) => {
   const id = c.req.param('id');
+  // Untrusted path parameter against a UUID column. Rejected here as
+  // well as in the DB layer so the guard is visible at the boundary the
+  // input actually crosses, and so a route test can prove it.
+  if (!isGenerationId(id)) {
+    return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
+  }
 
   let body: z.infer<typeof reportSchema>;
   try {
@@ -220,6 +227,9 @@ directoryAdminRoutes.get('/directory/admin/reports', async (c) => {
 
 directoryAdminRoutes.post('/directory/admin/:id/delist', async (c) => {
   const id = c.req.param('id');
+  if (!isGenerationId(id)) {
+    return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
+  }
   const restore = c.req.query('restore') === 'true';
   const ok = await setAdminDelisted(id, !restore);
   if (!ok) return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);

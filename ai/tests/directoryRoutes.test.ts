@@ -45,6 +45,13 @@ const { mockConfig, dirDb, genDb, credits, generation, listing } = vi.hoisted(
       setListingName: vi.fn(async () => undefined),
     },
     genDb: {
+      // Real implementation, not a stub: the routes' malformed-id guard
+      // depends on it, and a permissive stub would hide the very bug it
+      // exists to prevent.
+      isGenerationId: (id: string) =>
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          id
+        ),
       createGeneration: vi.fn(async () => 'job-1'),
       getGeneration: vi.fn(async (): Promise<any> => null),
       getGenerationsByUser: vi.fn(async () => ({ generations: [], total: 0 })),
@@ -96,6 +103,8 @@ app.route('/api/v1', directoryAdminRoutes);
 app.route('/api/v1', generateRoutes);
 
 const OWNER = 'user-1';
+/** A well-formed generation id — `ai_generations.id` is a UUID column. */
+const GEN_ID = '11111111-2222-4333-8444-555555555555';
 
 function get(path: string, headers: Record<string, string> = {}) {
   return app.request(path, { method: 'GET', headers });
@@ -144,9 +153,33 @@ describe('public directory routes are NOT behind the JWT middleware', () => {
   it('POST /report reaches the handler without auth (404, not 401)', async () => {
     // An unlisted id must answer "not found", proving the request got
     // past routing rather than being rejected by the authed router.
+    const res = await post(`/api/v1/directory/${GEN_ID}/report`, {
+      reason: 'spam',
+    });
+    expect(res.status).toBe(404);
+    expect(dirDb.isPubliclyListed).toHaveBeenCalledWith(GEN_ID);
+  });
+});
+
+describe('a malformed id answers 404, never a 500', () => {
+  // `ai_generations.id` is a UUID column, so handing it `abc` raises
+  // `invalid input syntax for type uuid` — a 500 for what is really a
+  // "no such thing" question, on an UNAUTHENTICATED endpoint anyone can
+  // hit in a loop.
+  it('report', async () => {
     const res = await post('/api/v1/directory/abc/report', { reason: 'spam' });
     expect(res.status).toBe(404);
-    expect(dirDb.isPubliclyListed).toHaveBeenCalledWith('abc');
+    expect(dirDb.isPubliclyListed).not.toHaveBeenCalled();
+  });
+
+  it('admin delist', async () => {
+    const res = await post(
+      '/api/v1/directory/admin/not-a-uuid/delist',
+      {},
+      { 'x-system-key': 'system-key-for-tests' }
+    );
+    expect(res.status).toBe(404);
+    expect(dirDb.setAdminDelisted).not.toHaveBeenCalled();
   });
 });
 
@@ -175,13 +208,13 @@ describe('the public listing query cannot be widened from outside', () => {
 describe('reporting', () => {
   it('stores a report for a listed entry and never auto-delists', async () => {
     dirDb.isPubliclyListed.mockResolvedValue(true as any);
-    const res = await post('/api/v1/directory/gen-1/report', {
+    const res = await post(`/api/v1/directory/${GEN_ID}/report`, {
       reason: 'scam',
       details: 'asks for seed phrases',
     });
     expect(res.status).toBe(202);
     expect(dirDb.createReport).toHaveBeenCalledWith(
-      expect.objectContaining({ generationId: 'gen-1', reason: 'scam' })
+      expect.objectContaining({ generationId: GEN_ID, reason: 'scam' })
     );
     // A visitor must not be able to remove a listing.
     expect(dirDb.setAdminDelisted).not.toHaveBeenCalled();
@@ -189,7 +222,7 @@ describe('reporting', () => {
 
   it('rejects an unknown reason', async () => {
     dirDb.isPubliclyListed.mockResolvedValue(true as any);
-    const res = await post('/api/v1/directory/gen-1/report', {
+    const res = await post(`/api/v1/directory/${GEN_ID}/report`, {
       reason: 'i-just-dislike-it',
     });
     expect(res.status).toBe(400);
@@ -200,7 +233,7 @@ describe('reporting', () => {
     dirDb.isPubliclyListed.mockResolvedValue(true as any);
     dirDb.countRecentReportsByIp.mockResolvedValue(20 as any);
     const res = await post(
-      '/api/v1/directory/gen-1/report',
+      `/api/v1/directory/${GEN_ID}/report`,
       { reason: 'spam' },
       { 'x-forwarded-for': '203.0.113.5' }
     );
@@ -211,7 +244,7 @@ describe('reporting', () => {
   it('never stores a raw IP', async () => {
     dirDb.isPubliclyListed.mockResolvedValue(true as any);
     await post(
-      '/api/v1/directory/gen-1/report',
+      `/api/v1/directory/${GEN_ID}/report`,
       { reason: 'spam' },
       { 'x-forwarded-for': '203.0.113.5' }
     );
@@ -242,13 +275,13 @@ describe('admin routes require the system key', () => {
 
   it('delisting is admin-only and resolves the entry reports', async () => {
     const res = await post(
-      '/api/v1/directory/admin/gen-1/delist',
+      `/api/v1/directory/admin/${GEN_ID}/delist`,
       {},
       { 'x-system-key': 'system-key-for-tests' }
     );
     expect(res.status).toBe(200);
-    expect(dirDb.setAdminDelisted).toHaveBeenCalledWith('gen-1', true);
-    expect(dirDb.resolveReports).toHaveBeenCalledWith('gen-1');
+    expect(dirDb.setAdminDelisted).toHaveBeenCalledWith(GEN_ID, true);
+    expect(dirDb.resolveReports).toHaveBeenCalledWith(GEN_ID);
   });
 });
 
@@ -256,7 +289,7 @@ describe('the owner listing toggle stays INSIDE the authed router', () => {
   it('401s without a bearer token', async () => {
     // If the public mount had shadowed this, it would be an
     // unauthenticated write.
-    const res = await post('/api/v1/generations/gen-1/listing', {
+    const res = await post(`/api/v1/generations/${GEN_ID}/listing`, {
       listed: true,
     });
     expect(res.status).toBe(401);
@@ -265,14 +298,14 @@ describe('the owner listing toggle stays INSIDE the authed router', () => {
 
   it('404s for a generation the caller does not own', async () => {
     genDb.getGeneration.mockResolvedValue({
-      id: 'gen-1',
+      id: GEN_ID,
       user_id: 'someone-else',
       user_email: 'someone-else',
       status: 'completed',
       delisted_by_admin: false,
     } as any);
     const res = await post(
-      '/api/v1/generations/gen-1/listing',
+      `/api/v1/generations/${GEN_ID}/listing`,
       { listed: true },
       { authorization: `Bearer ${OWNER}` }
     );
@@ -282,31 +315,31 @@ describe('the owner listing toggle stays INSIDE the authed router', () => {
 
   it('lets the owner turn listing on, and summarises once', async () => {
     genDb.getGeneration.mockResolvedValue({
-      id: 'gen-1',
+      id: GEN_ID,
       user_id: OWNER,
       status: 'completed',
       delisted_by_admin: false,
     } as any);
     const res = await post(
-      '/api/v1/generations/gen-1/listing',
+      `/api/v1/generations/${GEN_ID}/listing`,
       { listed: true, name: 'My Bakery' },
       { authorization: `Bearer ${OWNER}` }
     );
     expect(res.status).toBe(200);
-    expect(dirDb.setListed).toHaveBeenCalledWith('gen-1', OWNER, true);
-    expect(dirDb.setListingName).toHaveBeenCalledWith('gen-1', 'My Bakery');
-    expect(listing.ensureListingSummary).toHaveBeenCalledWith('gen-1');
+    expect(dirDb.setListed).toHaveBeenCalledWith(GEN_ID, OWNER, true);
+    expect(dirDb.setListingName).toHaveBeenCalledWith(GEN_ID, 'My Bakery');
+    expect(listing.ensureListingSummary).toHaveBeenCalledWith(GEN_ID);
   });
 
   it('turning listing OFF never triggers an AI call', async () => {
     genDb.getGeneration.mockResolvedValue({
-      id: 'gen-1',
+      id: GEN_ID,
       user_id: OWNER,
       status: 'completed',
       delisted_by_admin: false,
     } as any);
     const res = await post(
-      '/api/v1/generations/gen-1/listing',
+      `/api/v1/generations/${GEN_ID}/listing`,
       { listed: false },
       { authorization: `Bearer ${OWNER}` }
     );
@@ -316,13 +349,13 @@ describe('the owner listing toggle stays INSIDE the authed router', () => {
 
   it('an admin delisting cannot be undone by the owner', async () => {
     genDb.getGeneration.mockResolvedValue({
-      id: 'gen-1',
+      id: GEN_ID,
       user_id: OWNER,
       status: 'completed',
       delisted_by_admin: true,
     } as any);
     const res = await post(
-      '/api/v1/generations/gen-1/listing',
+      `/api/v1/generations/${GEN_ID}/listing`,
       { listed: true },
       { authorization: `Bearer ${OWNER}` }
     );

@@ -197,8 +197,23 @@ export async function failGeneration(
   );
 }
 
+/** `ai_generations.id` is a Postgres UUID column. */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isGenerationId(id: string): boolean {
+  return UUID_RE.test(id);
+}
+
 // Get a single generation by ID
+//
+// A malformed id is treated as "not found" rather than being handed to
+// Postgres. `id` is a UUID column, so `WHERE id = 'abc'` raises
+// `invalid input syntax for type uuid` — which surfaces as a 500 through
+// the app error handler, when the honest answer to "is there a
+// generation called abc" is 404. Every caller already handles null.
 export async function getGeneration(id: string): Promise<AiGeneration | null> {
+  if (!isGenerationId(id)) return null;
   const result = await query<AiGeneration>(
     `SELECT * FROM ai_generations WHERE id = $1`,
     [id]

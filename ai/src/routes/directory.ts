@@ -45,15 +45,57 @@ const MAX_REPORTS_PER_IP_PER_DAY = 20;
  *  endpoint's shape: a directory page is not worth a DB round-trip per
  *  visitor, and the data changes at human speed. */
 const LISTING_CACHE_MS = 60_000;
+
+/**
+ * Hard cap on cached pages.
+ *
+ * The cache key includes `page`, which is caller-controlled and has no
+ * natural upper bound, so an unbounded Map is a free memory-growth lever
+ * for anyone willing to walk `?page=1..1000000`. Insertion evicts the
+ * oldest entry once the cap is reached — the working set for a real
+ * directory is a handful of pages per category.
+ */
+const LISTING_CACHE_MAX_ENTRIES = 500;
+
+/** Deepest page anyone can request. */
+const MAX_PAGE = 1000;
+
 const listingCache = new Map<string, { at: number; body: unknown }>();
+
+function cacheListing(key: string, body: unknown): void {
+  if (listingCache.size >= LISTING_CACHE_MAX_ENTRIES) {
+    // Map preserves insertion order, so the first key is the oldest.
+    const oldest = listingCache.keys().next();
+    if (!oldest.done) listingCache.delete(oldest.value);
+  }
+  listingCache.set(key, { at: Date.now(), body });
+}
 
 /** Drop the cached listing pages (admin delist, and test isolation). */
 export function clearDirectoryCache(): void {
   listingCache.clear();
 }
 
-function clientIpHash(ipHeader: string | undefined): string | null {
-  const ip = ipHeader?.split(',')[0]?.trim();
+/**
+ * Rate-limit identity for an anonymous caller.
+ *
+ * X-Forwarded-For is CLIENT-CONTROLLED. nginx is configured with
+ * `$proxy_add_x_forwarded_for`, which APPENDS the real peer to whatever
+ * the client sent — so the FIRST entry is whatever the caller claimed and
+ * the LAST is the only one our own proxy wrote. Taking `[0]` would let an
+ * attacker send a fresh fake address per request and never reach the
+ * limit. Prefer `X-Real-IP` (nginx sets it to the true peer), and fall
+ * back to the last XFF hop, never the first.
+ */
+function clientIpHash(
+  realIp: string | undefined,
+  forwardedFor: string | undefined
+): string | null {
+  const hops = forwardedFor
+    ?.split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const ip = realIp?.trim() || (hops?.length ? hops[hops.length - 1] : null);
   if (!ip) return null;
   // Salted with the service's own secret so the stored value cannot be
   // reversed to an IP by anyone who reads the table.
@@ -82,7 +124,11 @@ directoryPublicRoutes.get('/directory/categories', async (c) => {
 // ============================================
 
 directoryPublicRoutes.get('/directory', async (c) => {
-  const page = Math.max(parseInt(c.req.query('page') || '1', 10) || 1, 1);
+  // Clamped at both ends: a deep OFFSET is a scan nobody is browsing for.
+  const page = Math.min(
+    Math.max(parseInt(c.req.query('page') || '1', 10) || 1, 1),
+    MAX_PAGE
+  );
   const limit = Math.min(
     Math.max(parseInt(c.req.query('limit') || '24', 10) || 24, 1),
     60
@@ -121,7 +167,7 @@ directoryPublicRoutes.get('/directory', async (c) => {
     total,
     totalPages: Math.ceil(total / limit),
   };
-  listingCache.set(cacheKey, { at: Date.now(), body });
+  cacheListing(cacheKey, body);
   return c.json(body);
 });
 
@@ -168,7 +214,8 @@ directoryPublicRoutes.post('/directory/:id/report', async (c) => {
   }
 
   const ipHash = clientIpHash(
-    c.req.header('x-forwarded-for') || c.req.header('x-real-ip')
+    c.req.header('x-real-ip'),
+    c.req.header('x-forwarded-for')
   );
   if (ipHash) {
     const recent = await countRecentReportsByIp(ipHash, 24);

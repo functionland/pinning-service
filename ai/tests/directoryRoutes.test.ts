@@ -203,6 +203,80 @@ describe('the public listing query cannot be widened from outside', () => {
       expect.objectContaining({ page: 1 })
     );
   });
+
+  it('clamps a very deep page, so OFFSET cannot be driven arbitrarily', async () => {
+    await get('/api/v1/directory?page=999999999');
+    expect(dirDb.listDirectory).toHaveBeenCalledWith(
+      expect.objectContaining({ page: 1000 })
+    );
+  });
+
+  it('the response cache cannot be grown without bound', async () => {
+    // `page` is caller-controlled and unbounded above, so an unbounded
+    // Map would be a free memory-growth lever.
+    for (let p = 1; p <= 600; p++) {
+      await get(`/api/v1/directory?page=${p}`);
+    }
+    // Distinct pages requested: 600. Cache must have evicted down to the
+    // cap rather than retaining all of them.
+    expect(dirDb.listDirectory.mock.calls.length).toBe(600);
+    const res = await get('/api/v1/directory?page=1');
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('rate-limit identity cannot be spoofed by the caller', () => {
+  // nginx uses $proxy_add_x_forwarded_for, which APPENDS the real peer to
+  // whatever the client sent. Taking XFF[0] would let an attacker send a
+  // fresh fake address per request and never reach the limit.
+  it('prefers X-Real-IP over a client-supplied X-Forwarded-For', async () => {
+    dirDb.isPubliclyListed.mockResolvedValue(true as any);
+    await post(
+      `/api/v1/directory/${GEN_ID}/report`,
+      { reason: 'spam' },
+      { 'x-real-ip': '198.51.100.7', 'x-forwarded-for': '1.1.1.1' }
+    );
+    const withRealIp = (dirDb.createReport.mock.calls[0][0] as any)
+      .reporterIpHash;
+
+    vi.clearAllMocks();
+    dirDb.isPubliclyListed.mockResolvedValue(true as any);
+    dirDb.countRecentReportsByIp.mockResolvedValue(0 as any);
+    await post(
+      `/api/v1/directory/${GEN_ID}/report`,
+      { reason: 'spam' },
+      { 'x-real-ip': '198.51.100.7', 'x-forwarded-for': '2.2.2.2' }
+    );
+    const withDifferentSpoof = (dirDb.createReport.mock.calls[0][0] as any)
+      .reporterIpHash;
+
+    // Same real peer, different spoofed XFF -> SAME bucket.
+    expect(withDifferentSpoof).toBe(withRealIp);
+  });
+
+  it('falls back to the LAST forwarded hop, never the first', async () => {
+    dirDb.isPubliclyListed.mockResolvedValue(true as any);
+    await post(
+      `/api/v1/directory/${GEN_ID}/report`,
+      { reason: 'spam' },
+      { 'x-forwarded-for': '1.1.1.1, 203.0.113.9' }
+    );
+    const viaChain = (dirDb.createReport.mock.calls[0][0] as any)
+      .reporterIpHash;
+
+    vi.clearAllMocks();
+    dirDb.isPubliclyListed.mockResolvedValue(true as any);
+    dirDb.countRecentReportsByIp.mockResolvedValue(0 as any);
+    await post(
+      `/api/v1/directory/${GEN_ID}/report`,
+      { reason: 'spam' },
+      { 'x-real-ip': '203.0.113.9' }
+    );
+    const viaRealIp = (dirDb.createReport.mock.calls[0][0] as any)
+      .reporterIpHash;
+
+    expect(viaChain).toBe(viaRealIp);
+  });
 });
 
 describe('reporting', () => {

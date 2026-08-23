@@ -343,7 +343,7 @@ describe('generate accepts the directory fields', () => {
     expect(args[7]).toBe(false);
   });
 
-  it('passes listed + listing_name through when the client sends them', async () => {
+  it('passes listed + listing_name + group through when sent', async () => {
     await post(
       '/api/v1/generate',
       {
@@ -351,11 +351,15 @@ describe('generate accepts the directory fields', () => {
         assets: [],
         listed: true,
         listing_name: 'My Bakery',
+        listing_group: 'tag-42',
       },
       { authorization: `Bearer ${OWNER}` }
     );
     const args = genDb.createGeneration.mock.calls[0];
     expect(args[7]).toBe(true);
     expect(args[8]).toBe('My Bakery');
+    // Without a group key the directory shows one entry per
+    // regeneration instead of one per website.
+    expect(args[9]).toBe('tag-42');
   });
 });

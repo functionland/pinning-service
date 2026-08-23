@@ -77,6 +77,9 @@ const generateRequestSchema = z.object({
   // scraped out of `prompt` (which is free text the user wrote and may
   // contain personal detail).
   listing_name: z.string().max(200).optional(),
+  // Opaque per-website key (the client's tag id) so the directory shows
+  // ONE entry per website rather than one per regeneration.
+  listing_group: z.string().max(200).optional(),
 });
 
 // ============================================
@@ -170,7 +173,8 @@ generateRoutes.post('/generate', async (c) => {
       body.enable_tracking,
       body.pipeline_version ?? null,
       body.listed,
-      body.listing_name ?? null
+      body.listing_name ?? null,
+      body.listing_group ?? null
     );
 
     // Queue the job (pass user token for S3 uploads)

@@ -44,10 +44,25 @@ ALTER TABLE ai_generations
 ALTER TABLE ai_generations
     ADD COLUMN IF NOT EXISTS delisted_by_admin BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Opaque per-website-group id from the client (its tag id).
+--
+-- WHY: every REGENERATION of a site is its own `ai_generations` row. Without
+-- a group key the directory would show one entry per version — five
+-- near-identical rows for one website, oldest links included. The listing
+-- query keeps only the newest listed row per group. Nullable, and rows
+-- without one fall back to their own id, i.e. they behave as their own
+-- group.
+ALTER TABLE ai_generations
+    ADD COLUMN IF NOT EXISTS listing_group TEXT;
+
 -- The directory's only read pattern: newest listed+completed first,
--- optionally filtered by category.
+-- deduplicated per group, optionally filtered by category.
 CREATE INDEX IF NOT EXISTS idx_ai_generations_directory
     ON ai_generations(completed_at DESC)
+    WHERE listed = TRUE AND delisted_by_admin = FALSE AND status = 'completed';
+
+CREATE INDEX IF NOT EXISTS idx_ai_generations_directory_group
+    ON ai_generations(listing_group, completed_at DESC)
     WHERE listed = TRUE AND delisted_by_admin = FALSE AND status = 'completed';
 
 -- ------------------------------------------------------------------

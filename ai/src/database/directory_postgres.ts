@@ -64,8 +64,18 @@ export async function listDirectory(opts: {
   }
   const whereSql = where.join(' AND ');
 
+  // One entry per WEBSITE, not per generation. Every regeneration is its
+  // own `ai_generations` row, so without this the directory would show
+  // five near-identical entries for a site generated five times — with
+  // the older, superseded links among them. Rows with no group behave as
+  // their own group.
+  const groupKey = "COALESCE(listing_group, id::text)";
+
   const countResult = await query<{ count: string }>(
-    `SELECT COUNT(*) AS count FROM ai_generations WHERE ${whereSql}`,
+    `SELECT COUNT(*) AS count
+       FROM (SELECT DISTINCT ${groupKey} AS g
+               FROM ai_generations
+              WHERE ${whereSql}) t`,
     params
   );
   const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
@@ -73,17 +83,21 @@ export async function listDirectory(opts: {
   const offset = (opts.page - 1) * opts.limit;
   params.push(opts.limit, offset);
   const result = await query<DirectoryEntry>(
-    `SELECT id,
-            listing_name        AS name,
-            listing_description AS description,
-            listing_category    AS category,
-            gateway_url,
-            result_cid,
-            completed_at
-       FROM ai_generations
-      WHERE ${whereSql}
-      ORDER BY completed_at DESC NULLS LAST
-      LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    `SELECT * FROM (
+       SELECT DISTINCT ON (${groupKey})
+              id,
+              listing_name        AS name,
+              listing_description AS description,
+              listing_category    AS category,
+              gateway_url,
+              result_cid,
+              completed_at
+         FROM ai_generations
+        WHERE ${whereSql}
+        ORDER BY ${groupKey}, completed_at DESC NULLS LAST
+     ) t
+     ORDER BY completed_at DESC NULLS LAST
+     LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
   return { entries: result.rows, total };

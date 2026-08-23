@@ -110,6 +110,7 @@ export interface AiGeneration {
   listing_category: string | null;
   listing_generated_at: string | null;
   delisted_by_admin: boolean;
+  listing_group: string | null;
 }
 
 // Create a new generation record (stores userId hash, not plain-text email)
@@ -126,11 +127,14 @@ export async function createGeneration(
   enableTracking: boolean,
   pipelineVersion: number | null = null,
   listed: boolean = false,
-  listingName: string | null = null
+  listingName: string | null = null,
+  // Per-WEBSITE key (the client's tag id). Every regeneration is its own
+  // row; without this the directory would list one entry per version.
+  listingGroup: string | null = null
 ): Promise<string> {
   const result = await query(
-    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message, enable_tracking, pipeline_version, listed, listing_name)
-     VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation', $6, $7, $8, $9)
+    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message, enable_tracking, pipeline_version, listed, listing_name, listing_group)
+     VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation', $6, $7, $8, $9, $10)
      RETURNING id`,
     [
       id,
@@ -142,6 +146,7 @@ export async function createGeneration(
       pipelineVersion,
       listed,
       listingName,
+      listingGroup,
     ]
   );
   return result.rows[0].id;

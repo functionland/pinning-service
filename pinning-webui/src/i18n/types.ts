@@ -289,6 +289,11 @@ export interface Translations {
     save?: string;
     saving?: string;
     clear?: string;
+    // Generic pagination labels. Optional so a locale that has not
+    // translated them yet falls back to English at the call site rather
+    // than failing to compile — the same pattern the keys above use.
+    previous?: string;
+    next?: string;
   };
   referrals?: {
     title: string;

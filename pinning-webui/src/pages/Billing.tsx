@@ -44,6 +44,9 @@ interface CreditHistoryItem {
   createdAt: string;
 }
 
+/// Rows per page of credit history. The server caps `limit` at 100.
+const HISTORY_PAGE_SIZE = 20;
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 Bytes';
   const k = 1024;
@@ -71,6 +74,12 @@ export default function Billing() {
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [supportedChains, setSupportedChains] = useState<ChainInfo[]>([]);
   const [history, setHistory] = useState<CreditHistoryItem[]>([]);
+  // Credit-history paging. Kept separate from the main `loading` flag so
+  // paging swaps only the table rows instead of blanking the whole page.
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyTotalPages, setHistoryTotalPages] = useState(1);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [pricing, setPricing] = useState<PricingInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -87,13 +96,41 @@ export default function Billing() {
     fetchData();
   }, []);
 
+  /// Load one page of credit history.
+  ///
+  /// Only the table is put in a loading state — the balance cards and
+  /// wallet list above it are unrelated, and blanking them to turn a page
+  /// would make the whole screen jump.
+  const loadHistoryPage = async (page: number) => {
+    setHistoryLoading(true);
+    try {
+      const res = await fetch(
+        `/api/credits/history?limit=${HISTORY_PAGE_SIZE}&page=${page}`,
+        { credentials: 'include' }
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      setHistory(data.history || []);
+      setHistoryPage(data.page || page);
+      setHistoryTotalPages(data.totalPages || 1);
+      setHistoryTotal(data.total ?? (data.history?.length || 0));
+    } catch {
+      // Leave the current page on screen; a failed page turn should not
+      // wipe what the user was already looking at.
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   const fetchData = async () => {
     try {
       setLoading(true);
       const [creditsRes, walletsRes, historyRes, pricingRes] = await Promise.all([
         fetch('/api/credits', { credentials: 'include' }),
         fetch('/api/wallets', { credentials: 'include' }),
-        fetch('/api/credits/history?limit=20', { credentials: 'include' }),
+        fetch(`/api/credits/history?limit=${HISTORY_PAGE_SIZE}&page=1`, {
+          credentials: 'include',
+        }),
         fetch('/api/credits/pricing'),
       ]);
 
@@ -110,6 +147,11 @@ export default function Billing() {
       setWallets(walletsData.wallets || []);
       setSupportedChains(walletsData.supportedChains || []);
       setHistory(historyData.history || []);
+      setHistoryPage(historyData.page || 1);
+      // Older server without pagination: fall back to a single page so
+      // the controls simply don't appear rather than showing "1 of NaN".
+      setHistoryTotalPages(historyData.totalPages || 1);
+      setHistoryTotal(historyData.total ?? (historyData.history?.length || 0));
       if (pricingData) {
         setPricing(pricingData);
       }
@@ -543,6 +585,38 @@ export default function Billing() {
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* Pager. Hidden entirely on a single page so a short history
+            gains no chrome; also hidden against an older server that
+            reports no totalPages. */}
+        {historyTotalPages > 1 && (
+          <div className="mt-4 flex items-center justify-between border-t pt-3">
+            <p className="text-xs text-gray-500">
+              {`Showing ${(historyPage - 1) * HISTORY_PAGE_SIZE + 1}`}
+              {`–${Math.min(historyPage * HISTORY_PAGE_SIZE, historyTotal)}`}
+              {` of ${historyTotal}`}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => loadHistoryPage(historyPage - 1)}
+                disabled={historyPage <= 1 || historyLoading}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {t.common?.previous || 'Previous'}
+              </button>
+              <span className="text-sm text-gray-600 tabular-nums">
+                {historyLoading ? '…' : `${historyPage} / ${historyTotalPages}`}
+              </span>
+              <button
+                onClick={() => loadHistoryPage(historyPage + 1)}
+                disabled={historyPage >= historyTotalPages || historyLoading}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {t.common?.next || 'Next'}
+              </button>
+            </div>
           </div>
         )}
       </div>

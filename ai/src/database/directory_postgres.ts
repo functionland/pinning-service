@@ -145,6 +145,44 @@ export async function setListed(
   return (result.rowCount ?? 0) > 0;
 }
 
+/**
+ * The row a website GROUP's directory entry refers to: its newest
+ * completed generation, owner-scoped.
+ *
+ * Why group-keyed and not id-keyed: `ai_generations.id` is the server's
+ * jobId, which the CLIENT only holds while a generation is in flight —
+ * it is thrown away once the job completes. The client's own generation
+ * id is a different UUID entirely, so an id-keyed lookup 404s for every
+ * finished site. The group (the website's tag id) is stable, is what the
+ * client always has, and is already what the directory de-duplicates on.
+ */
+export async function getGroupListingRow(
+  group: string,
+  userId: string
+): Promise<{
+  id: string;
+  listed: boolean;
+  delisted_by_admin: boolean;
+  listing_url: string | null;
+} | null> {
+  const result = await query<{
+    id: string;
+    listed: boolean;
+    delisted_by_admin: boolean;
+    listing_url: string | null;
+  }>(
+    `SELECT id, listed, delisted_by_admin, listing_url
+       FROM ai_generations
+      WHERE listing_group = $1
+        AND (user_id = $2 OR user_email = $2)
+        AND status = 'completed'
+      ORDER BY completed_at DESC NULLS LAST
+      LIMIT 1`,
+    [group, userId]
+  );
+  return result.rows[0] || null;
+}
+
 /** Client-supplied display name for the listing. */
 export async function setListingName(
   id: string,

@@ -4792,15 +4792,53 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   /** Everything currently listed, newest first, with its report count. */
   app.get('/api/admin/directory/listings', requireAdmin, async (_req: Request, res: Response) => {
     try {
+      // One row per WEBSITE, not per generation.
+      //
+      // Every regeneration is another `ai_generations` row sharing the
+      // site's `listing_group`, and the public page shows one entry per
+      // group. Listing them per row showed one site several times and —
+      // worse — let an admin "Restore" a build that was never the one
+      // removed, leaving the site hidden while this page claimed it was
+      // back. Both flags are folded across the group exactly as the
+      // public query folds them, so what an admin sees here is what
+      // visitors see.
       const result = await query(`
-        SELECT g.id, g.listing_name, g.listing_category, g.listing_description,
-               COALESCE(g.listing_url, g.gateway_url) AS url,
-               g.listed, g.delisted_by_admin, g.completed_at,
-               (SELECT COUNT(*) FROM directory_reports r
-                 WHERE r.generation_id = g.id AND r.resolved = FALSE)::int AS open_reports
-          FROM ai_generations g
-         WHERE g.status = 'completed' AND (g.listed = TRUE OR g.delisted_by_admin = TRUE)
-         ORDER BY g.completed_at DESC NULLS LAST
+        WITH base AS (
+          SELECT *,
+                 COALESCE(user_id, user_email, '') || ':' ||
+                 COALESCE(listing_group, id::text) AS grp
+            FROM ai_generations
+           WHERE status = 'completed'
+             AND (listed = TRUE OR delisted_by_admin = TRUE)
+        ),
+        state AS (
+          SELECT grp,
+                 bool_or(listed)            AS grp_listed,
+                 bool_or(delisted_by_admin) AS grp_delisted
+            FROM base
+           GROUP BY grp
+        ),
+        rep AS (
+          -- The newest still-listed build; fall back to a removed one so
+          -- a fully removed site stays visible here to be restored.
+          SELECT DISTINCT ON (grp) *
+            FROM base
+           ORDER BY grp, listed DESC, completed_at DESC NULLS LAST
+        )
+        SELECT rep.id, rep.listing_name, rep.listing_category, rep.listing_description,
+               COALESCE(rep.listing_url, rep.gateway_url) AS url,
+               state.grp_listed   AS listed,
+               state.grp_delisted AS delisted_by_admin,
+               rep.completed_at,
+               (SELECT COUNT(*)::int
+                  FROM directory_reports r
+                  JOIN ai_generations g2 ON g2.id = r.generation_id
+                 WHERE COALESCE(g2.user_id, g2.user_email, '') || ':' ||
+                       COALESCE(g2.listing_group, g2.id::text) = rep.grp
+                   AND r.resolved = FALSE) AS open_reports
+          FROM rep
+          JOIN state ON state.grp = rep.grp
+         ORDER BY rep.completed_at DESC NULLS LAST, rep.id DESC
          LIMIT 200
       `);
       res.json({ listings: result.rows });
@@ -4841,20 +4879,53 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         return res.status(404).json({ error: 'Not found' });
       }
       const restore = req.body?.restore === true;
+
+      // Act on the whole WEBSITE, not the one build this id names.
+      //
+      // Marking a single row left the site in the directory through its
+      // other builds: the public query simply fell through to the
+      // next-newest listed one and the site REAPPEARED, with the report
+      // that prompted the removal already closed. A takedown that can be
+      // undone by regenerating is not a takedown.
+      //
+      // The group key is prefixed with the OWNER because `listing_group`
+      // is arbitrary client-supplied text: without that, a caller could
+      // claim someone else's group and an admin acting on one site would
+      // silently act on another user's too. It must stay byte-identical
+      // to OWNER_SCOPED_GROUP_KEY in ai/src/database/directory_postgres.ts,
+      // or this page and the public one would disagree on what a website
+      // is.
       const result = await query(
         `UPDATE ai_generations
             SET delisted_by_admin = $1, updated_at = CURRENT_TIMESTAMP
-          WHERE id = $2`,
+          WHERE status = 'completed'
+            AND COALESCE(user_id, user_email, '') || ':' ||
+                COALESCE(listing_group, id::text) = (
+                  SELECT COALESCE(user_id, user_email, '') || ':' ||
+                         COALESCE(listing_group, id::text)
+                    FROM ai_generations WHERE id = $2
+                )`,
         [!restore, id]
       );
       if ((result.rowCount || 0) === 0) {
         return res.status(404).json({ error: 'Not found' });
       }
       // Delisting closes the reports that prompted it; restoring does not
-      // reopen them — a human already looked.
+      // reopen them — a human already looked. Reports filed against any
+      // build of the site all refer to the same site.
       if (!restore) {
         await query(
-          `UPDATE directory_reports SET resolved = TRUE WHERE generation_id = $1`,
+          `UPDATE directory_reports
+              SET resolved = TRUE
+            WHERE generation_id IN (
+                    SELECT id FROM ai_generations
+                     WHERE COALESCE(user_id, user_email, '') || ':' ||
+                           COALESCE(listing_group, id::text) = (
+                             SELECT COALESCE(user_id, user_email, '') || ':' ||
+                                    COALESCE(listing_group, id::text)
+                               FROM ai_generations WHERE id = $1
+                           )
+                  )`,
           [id]
         );
       }

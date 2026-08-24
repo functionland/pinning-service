@@ -1,0 +1,33 @@
+-- Group-level directory visibility needs to see EVERY build of a site.
+--
+-- NOTE: every migration re-runs on every service boot (database/index.ts),
+-- so every statement here MUST be IF NOT EXISTS-guarded / idempotent.
+--
+-- WHY
+-- ---
+-- Migration 007's directory indexes are PARTIAL:
+--
+--   WHERE listed = TRUE AND delisted_by_admin = FALSE AND status = 'completed'
+--
+-- which is precisely the set the new queries must NOT restrict themselves
+-- to. Visibility is decided per website, by folding both flags across all
+-- of its builds (`bool_or`), because:
+--
+--   * an admin-removed build must veto its whole group — otherwise the
+--     public query falls through to the next-newest listed build and a
+--     removed site REAPPEARS, and
+--   * switching listing off must clear every build — otherwise an older
+--     one keeps the site listed and the owner cannot withdraw it.
+--
+-- A build that is unlisted, or removed, is exactly the row the partial
+-- indexes exclude, so those scans now need a non-partial group index.
+--
+-- The group key itself is owner-prefixed (see OWNER_SCOPED_GROUP_KEY),
+-- because `listing_group` is arbitrary client-supplied text and would
+-- otherwise let one user claim another's group. This index covers the
+-- owner-scoped WRITE path, which filters on `listing_group` plus the
+-- owner directly; the public read folds over an expression and is a
+-- scan, which is correct at this table's size.
+CREATE INDEX IF NOT EXISTS idx_ai_generations_group_all
+    ON ai_generations(listing_group, completed_at DESC)
+ WHERE status = 'completed';

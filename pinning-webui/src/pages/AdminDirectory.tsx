@@ -104,9 +104,22 @@ export default function AdminDirectory() {
             Public Directory
           </h2>
           <p className="mt-1 text-sm text-gray-600">
-            Entries shown on <code>/yellowpage</code>. Removing one takes it
-            off the directory only — the site stays reachable on IPFS to
-            anyone who already has its link.
+            Entries shown on <code>/yellowpage</code>. One row per website,
+            covering all of its regenerations. Removing one takes it off the
+            directory only — the site stays reachable on IPFS to anyone who
+            already has its link.
+          </p>
+          {/*
+            The public page is served by the AI service, which caches
+            listing pages for 60s in its own process. This page writes the
+            shared database directly and cannot reach that cache, so a
+            removal is authoritative immediately but visible to visitors
+            within a minute. Say so, rather than let an admin refresh
+            /yellowpage, still see the site, and conclude the button is
+            broken.
+          */}
+          <p className="mt-1 text-xs text-gray-500">
+            Changes here take effect on the public page within a minute.
           </p>
         </div>
         <button

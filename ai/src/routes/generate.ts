@@ -26,7 +26,7 @@ import {
   setListingName,
   setListingUrl,
 } from '../database/directory_postgres.js';
-import { isAllowedListingUrl } from './directory.js';
+import { clearDirectoryCache, isAllowedListingUrl } from './directory.js';
 import { deductCredits, refundCredits } from '../services/creditService.js';
 import { ensureListingSummary } from '../services/directoryListing.js';
 import { startGeneration } from '../services/generationService.js';
@@ -329,18 +329,15 @@ generateRoutes.post('/generations/:id/listing', async (c) => {
     );
   }
 
-  const ok = await setListed(id, userId, body.listed);
-  if (!ok) return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
-  if (body.name !== undefined) await setListingName(id, body.name);
-
   // The stable share link. Rejected silently rather than 400: the link
   // is a best-effort enrichment (the IPNS publish may not have landed
   // yet), and failing the whole toggle because of it would be worse
   // than listing with the raw gateway URL.
   let urlAccepted = false;
+  let url: string | undefined;
   if (body.url !== undefined) {
     if (isAllowedListingUrl(body.url)) {
-      await setListingUrl(id, body.url);
+      url = body.url;
       urlAccepted = true;
     } else {
       console.warn(
@@ -348,6 +345,30 @@ generateRoutes.post('/generations/:id/listing', async (c) => {
       );
     }
   }
+
+  // Delegate to the group-wide writers when this build belongs to a
+  // website group. Visibility is decided per website, so writing this
+  // row alone would leave the group's builds disagreeing — the exact
+  // split that let a switched-off site stay in the directory. A row with
+  // no group IS its own group, so the single-row writers are correct
+  // there and only there.
+  if (job.listing_group) {
+    const ok = await setListedForGroup(job.listing_group, userId, body.listed);
+    if (!ok) return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
+    await setListingDetailsForGroup(job.listing_group, userId, {
+      name: body.name,
+      url,
+    });
+  } else {
+    const ok = await setListed(id, userId, body.listed);
+    if (!ok) return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
+    if (body.name !== undefined) await setListingName(id, body.name);
+    if (url !== undefined) await setListingUrl(id, url);
+  }
+
+  // The public listing is cached in this process; a toggle the user just
+  // made must not sit behind a 60s TTL.
+  clearDirectoryCache();
 
   // First time it goes public, describe + categorise it. Guarded by
   // `listing_generated_at` inside, so off -> on -> off -> on never bills
@@ -433,6 +454,10 @@ generateRoutes.post('/websites/:group/listing', async (c) => {
   // stable across regenerations, so they go on every build — otherwise
   // the entry's link would depend on which build represents it.
   await setListingDetailsForGroup(group, userId, { name: body.name, url });
+
+  // The public listing is cached in this process; a toggle the user just
+  // made must not sit behind a 60s TTL.
+  clearDirectoryCache();
 
   if (body.listed) void ensureListingSummary(row.id);
 

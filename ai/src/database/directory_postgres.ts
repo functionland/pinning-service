@@ -167,7 +167,10 @@ export async function listDirectory(opts: {
             result_cid,
             completed_at
        FROM rep${categorySql}
-      ORDER BY completed_at DESC NULLS LAST
+      -- id breaks ties: OFFSET paging over a non-unique sort can repeat
+      -- or skip a row at a page boundary when two builds share a
+      -- completed_at.
+      ORDER BY completed_at DESC NULLS LAST, id DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );

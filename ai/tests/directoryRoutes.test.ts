@@ -410,6 +410,49 @@ describe('the owner listing toggle stays INSIDE the authed router', () => {
     expect(listing.ensureListingSummary).toHaveBeenCalledWith(GEN_ID);
   });
 
+  it('delegates to the whole group when the build belongs to one', async () => {
+    // This route predates the group-keyed one and writes by row id. A
+    // website's builds share a `listing_group` and its visibility is
+    // decided across all of them, so writing one row here would leave
+    // the group's builds disagreeing — the split that let a
+    // switched-off site stay in the directory.
+    genDb.getGeneration.mockResolvedValue({
+      id: GEN_ID,
+      user_id: OWNER,
+      status: 'completed',
+      delisted_by_admin: false,
+      listing_group: 'tag-42',
+    } as any);
+    const res = await post(
+      `/api/v1/generations/${GEN_ID}/listing`,
+      { listed: false },
+      { authorization: `Bearer ${OWNER}` }
+    );
+    expect(res.status).toBe(200);
+    expect(dirDb.setListedForGroup).toHaveBeenCalledWith('tag-42', OWNER, false);
+    expect(dirDb.setListed).not.toHaveBeenCalled();
+  });
+
+  it('writes the single row when the build has no group', async () => {
+    // A build with no group IS its own group, so the row-level writers
+    // are correct there — and only there.
+    genDb.getGeneration.mockResolvedValue({
+      id: GEN_ID,
+      user_id: OWNER,
+      status: 'completed',
+      delisted_by_admin: false,
+      listing_group: null,
+    } as any);
+    const res = await post(
+      `/api/v1/generations/${GEN_ID}/listing`,
+      { listed: false },
+      { authorization: `Bearer ${OWNER}` }
+    );
+    expect(res.status).toBe(200);
+    expect(dirDb.setListed).toHaveBeenCalledWith(GEN_ID, OWNER, false);
+    expect(dirDb.setListedForGroup).not.toHaveBeenCalled();
+  });
+
   it('turning listing OFF never triggers an AI call', async () => {
     genDb.getGeneration.mockResolvedValue({
       id: GEN_ID,

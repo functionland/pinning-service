@@ -4838,7 +4838,7 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
                    AND r.resolved = FALSE) AS open_reports
           FROM rep
           JOIN state ON state.grp = rep.grp
-         ORDER BY rep.completed_at DESC NULLS LAST
+         ORDER BY rep.completed_at DESC NULLS LAST, rep.id DESC
          LIMIT 200
       `);
       res.json({ listings: result.rows });

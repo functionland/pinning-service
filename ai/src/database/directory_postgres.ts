@@ -9,6 +9,26 @@
  * public route goes through it: listed AND not admin-delisted AND
  * completed. A row that fails any of those must never be reachable from
  * an unauthenticated endpoint.
+ *
+ * VISIBILITY IS A PROPERTY OF THE WEBSITE, NOT OF ONE GENERATION.
+ * ---------------------------------------------------------------
+ * Every regeneration writes a NEW `ai_generations` row sharing the
+ * website's `listing_group`, so a site that has been generated three
+ * times has three rows carrying three independent `listed` /
+ * `delisted_by_admin` flags. Evaluating those per row and only then
+ * collapsing to one entry per group is wrong in both directions:
+ *
+ *   - Withdrawal fails. Turning the switch off wrote one row; an older
+ *     row still said `listed = TRUE`, so the site stayed in the
+ *     directory and the user could not take it out.
+ *   - Takedown fails. Admin removal wrote one row; the query fell
+ *     through to the next-newest listed row and the site REAPPEARED,
+ *     while the report that prompted the removal was marked resolved.
+ *
+ * So both flags are folded across the group first (`bool_or`), and only
+ * a group that is listed and has no admin-removed build is visible. The
+ * entry then shows the newest LISTED build, because the AI summary and
+ * the stable link are written to rows that were listed.
  */
 
 import { isGenerationId, query } from './postgres.js';
@@ -51,31 +71,51 @@ export async function listDirectory(opts: {
   page: number;
   limit: number;
 }): Promise<{ entries: DirectoryEntry[]; total: number }> {
-  const where: string[] = [
-    'listed = TRUE',
-    'delisted_by_admin = FALSE',
-    "status = 'completed'",
-    'result_cid IS NOT NULL',
-  ];
+  // One entry per WEBSITE, not per generation. Rows with no group behave
+  // as their own group, so a pre-group generation is still one entry.
+  const groupKey = 'COALESCE(listing_group, id::text)';
+
+  // Every build of the site that could carry a visibility flag. Not
+  // filtered by `listed` — a row that is admin-removed but no longer
+  // listed must still veto the group, or a takedown could be undone by
+  // toggling the switch.
+  const base = `SELECT *, ${groupKey} AS grp
+                  FROM ai_generations
+                 WHERE status = 'completed' AND result_cid IS NOT NULL`;
+
+  // Group-level visibility: listed somewhere, admin-removed nowhere.
+  const visible = `SELECT grp
+                     FROM base
+                    GROUP BY grp
+                   HAVING bool_or(listed) AND NOT bool_or(delisted_by_admin)`;
+
+  // The build that represents the site: its newest LISTED one. The AI
+  // summary and the stable link are only written to listed rows, so
+  // taking the newest row unconditionally would show a blank entry for a
+  // site regenerated with the switch left off.
+  const representative = `SELECT DISTINCT ON (b.grp) b.*
+                            FROM base b
+                            JOIN visible v ON v.grp = b.grp
+                           WHERE b.listed = TRUE
+                           ORDER BY b.grp, b.completed_at DESC NULLS LAST`;
+
+  const cte = `WITH base AS (${base}),
+                    visible AS (${visible}),
+                    rep AS (${representative})`;
+
+  // The category filter applies to the representative build — the one
+  // whose category is actually displayed.
   const params: any[] = [];
+  let categorySql = '';
   if (opts.category) {
     params.push(opts.category);
-    where.push(`listing_category = $${params.length}`);
+    categorySql = ` WHERE listing_category = $${params.length}`;
   }
-  const whereSql = where.join(' AND ');
 
-  // One entry per WEBSITE, not per generation. Every regeneration is its
-  // own `ai_generations` row, so without this the directory would show
-  // five near-identical entries for a site generated five times — with
-  // the older, superseded links among them. Rows with no group behave as
-  // their own group.
-  const groupKey = "COALESCE(listing_group, id::text)";
-
+  // `rep` holds exactly one row per visible group, so counting its rows
+  // counts websites.
   const countResult = await query<{ count: string }>(
-    `SELECT COUNT(*) AS count
-       FROM (SELECT DISTINCT ${groupKey} AS g
-               FROM ai_generations
-              WHERE ${whereSql}) t`,
+    `${cte} SELECT COUNT(*) AS count FROM rep${categorySql}`,
     params
   );
   const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
@@ -83,25 +123,21 @@ export async function listDirectory(opts: {
   const offset = (opts.page - 1) * opts.limit;
   params.push(opts.limit, offset);
   const result = await query<DirectoryEntry>(
-    `SELECT * FROM (
-       SELECT DISTINCT ON (${groupKey})
-              id,
-              listing_name        AS name,
-              listing_description AS description,
-              listing_category    AS category,
-              -- The stable IPNS front door when the client supplied one,
-              -- else the raw per-generation gateway URL. The front door
-              -- survives regeneration; gateway_url points at ONE build
-              -- and goes stale as soon as the site is regenerated.
-              COALESCE(listing_url, gateway_url) AS gateway_url,
-              result_cid,
-              completed_at
-         FROM ai_generations
-        WHERE ${whereSql}
-        ORDER BY ${groupKey}, completed_at DESC NULLS LAST
-     ) t
-     ORDER BY completed_at DESC NULLS LAST
-     LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    `${cte}
+     SELECT id,
+            listing_name        AS name,
+            listing_description AS description,
+            listing_category    AS category,
+            -- The stable IPNS front door when the client supplied one,
+            -- else the raw per-generation gateway URL. The front door
+            -- survives regeneration; gateway_url points at ONE build
+            -- and goes stale as soon as the site is regenerated.
+            COALESCE(listing_url, gateway_url) AS gateway_url,
+            result_cid,
+            completed_at
+       FROM rep${categorySql}
+      ORDER BY completed_at DESC NULLS LAST
+      LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
   return { entries: result.rows, total };
@@ -115,9 +151,17 @@ export async function listDirectory(opts: {
 /// the honest answer).
 export async function isPubliclyListed(id: string): Promise<boolean> {
   if (!isGenerationId(id)) return false;
+  // Group-level, matching `listDirectory`: the caller is asking whether
+  // the thing this id represents is on the public page, and that is
+  // decided by the whole website, not by one build's flags.
   const result = await query<{ ok: boolean }>(
-    `SELECT (listed AND NOT delisted_by_admin AND status = 'completed') AS ok
-       FROM ai_generations WHERE id = $1`,
+    `SELECT bool_or(listed) AND NOT bool_or(delisted_by_admin) AS ok
+       FROM ai_generations
+      WHERE status = 'completed'
+        AND COALESCE(listing_group, id::text) = (
+              SELECT COALESCE(listing_group, id::text)
+                FROM ai_generations WHERE id = $1
+            )`,
     [id]
   );
   return result.rows[0]?.ok === true;
@@ -146,8 +190,7 @@ export async function setListed(
 }
 
 /**
- * The row a website GROUP's directory entry refers to: its newest
- * completed generation, owner-scoped.
+ * A website GROUP's directory state, owner-scoped.
  *
  * Why group-keyed and not id-keyed: `ai_generations.id` is the server's
  * jobId, which the CLIENT only holds while a generation is in flight —
@@ -155,6 +198,17 @@ export async function setListed(
  * id is a different UUID entirely, so an id-keyed lookup 404s for every
  * finished site. The group (the website's tag id) is stable, is what the
  * client always has, and is already what the directory de-duplicates on.
+ *
+ * `listed` / `delistedByAdmin` are folded across every build of the site
+ * (see the module comment) so the app's switch reports what the public
+ * page actually shows. Reading only the newest build made the switch say
+ * "off" for a site that was still listed through an earlier build.
+ *
+ * `id` is the newest build, and is where per-entry detail (name, link,
+ * AI summary) is written.
+ *
+ * Returns null when the group has no completed build owned by this user
+ * — the same answer for "not yours" as for "does not exist".
  */
 export async function getGroupListingRow(
   group: string,
@@ -166,21 +220,99 @@ export async function getGroupListingRow(
   listing_url: string | null;
 } | null> {
   const result = await query<{
-    id: string;
-    listed: boolean;
-    delisted_by_admin: boolean;
+    id: string | null;
+    listed: boolean | null;
+    delisted_by_admin: boolean | null;
     listing_url: string | null;
+    n: string;
   }>(
-    `SELECT id, listed, delisted_by_admin, listing_url
+    `SELECT (ARRAY_AGG(id ORDER BY completed_at DESC NULLS LAST))[1]          AS id,
+            bool_or(listed)                                                   AS listed,
+            bool_or(delisted_by_admin)                                        AS delisted_by_admin,
+            (ARRAY_AGG(listing_url ORDER BY (listing_url IS NULL) ASC,
+                                            completed_at DESC NULLS LAST))[1] AS listing_url,
+            COUNT(*)                                                          AS n
        FROM ai_generations
       WHERE listing_group = $1
         AND (user_id = $2 OR user_email = $2)
-        AND status = 'completed'
-      ORDER BY completed_at DESC NULLS LAST
-      LIMIT 1`,
+        AND status = 'completed'`,
     [group, userId]
   );
-  return result.rows[0] || null;
+  const row = result.rows[0];
+  // An aggregate over no rows still returns one row, of NULLs.
+  if (!row || parseInt(row.n ?? '0', 10) === 0 || !row.id) return null;
+  return {
+    id: row.id,
+    listed: row.listed === true,
+    delisted_by_admin: row.delisted_by_admin === true,
+    listing_url: row.listing_url,
+  };
+}
+
+/**
+ * Turn a whole website's listing on or off, owner-scoped.
+ *
+ * Group-wide on purpose. Writing one row let an older build keep the
+ * site in the directory after its owner switched listing off — a
+ * withdrawal the user could not complete. Consent is per website, so the
+ * write is too.
+ *
+ * Returns false when nothing matched (wrong owner, or unknown group).
+ */
+export async function setListedForGroup(
+  group: string,
+  userId: string,
+  listed: boolean
+): Promise<boolean> {
+  const result = await query(
+    `UPDATE ai_generations
+        SET listed = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE listing_group = $2
+        AND (user_id = $3 OR user_email = $3)
+        AND status = 'completed'`,
+    [listed, group, userId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Apply the display name and stable link to EVERY build of a website.
+ *
+ * The directory shows the newest listed build, and which build that is
+ * changes as the site is regenerated. Writing these to one row only
+ * would mean the entry's name and link depended on which build happened
+ * to be representative. The IPNS front door is stable across
+ * regenerations, so it is correct for all of them.
+ *
+ * `name` / `url` are skipped when undefined so a caller can set one
+ * without clearing the other. The URL must already have passed
+ * `isAllowedListingUrl`.
+ */
+export async function setListingDetailsForGroup(
+  group: string,
+  userId: string,
+  details: { name?: string | null; url?: string }
+): Promise<void> {
+  const sets: string[] = [];
+  const params: any[] = [];
+  if (details.name !== undefined) {
+    params.push(details.name);
+    sets.push(`listing_name = $${params.length}`);
+  }
+  if (details.url !== undefined) {
+    params.push(details.url);
+    sets.push(`listing_url = $${params.length}`);
+  }
+  if (sets.length === 0) return;
+  params.push(group, userId);
+  await query(
+    `UPDATE ai_generations
+        SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP
+      WHERE listing_group = $${params.length - 1}
+        AND (user_id = $${params.length} OR user_email = $${params.length})
+        AND status = 'completed'`,
+    params
+  );
 }
 
 /** Client-supplied display name for the listing. */

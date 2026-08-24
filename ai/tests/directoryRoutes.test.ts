@@ -45,6 +45,8 @@ const { mockConfig, dirDb, genDb, credits, generation, listing } = vi.hoisted(
       setListingName: vi.fn(async () => undefined),
       setListingUrl: vi.fn(async () => undefined),
       getGroupListingRow: vi.fn(async (): Promise<any> => null),
+      setListedForGroup: vi.fn(async () => true),
+      setListingDetailsForGroup: vi.fn(async () => undefined),
     },
     genDb: {
       // Real implementation, not a stub: the routes' malformed-id guard
@@ -558,7 +560,7 @@ describe('the toggle is keyed on the website GROUP', () => {
     expect((await get(`/api/v1/websites/${GROUP}/listing`)).status).toBe(401);
   });
 
-  it('POST toggles and stores the stable link on the group row', async () => {
+  it('POST writes the whole group, not one build', async () => {
     dirDb.getGroupListingRow.mockResolvedValue({
       id: GEN_ID,
       listed: false,
@@ -572,9 +574,57 @@ describe('the toggle is keyed on the website GROUP', () => {
     );
     expect(res.status).toBe(200);
     expect((await res.json()).urlAccepted).toBe(true);
-    // Writes target the ROW the group resolved to, not the group string.
-    expect(dirDb.setListed).toHaveBeenCalledWith(GEN_ID, OWNER, true);
-    expect(dirDb.setListingUrl).toHaveBeenCalledWith(GEN_ID, GOOD);
+    expect(dirDb.setListedForGroup).toHaveBeenCalledWith(GROUP, OWNER, true);
+    expect(dirDb.setListingDetailsForGroup).toHaveBeenCalledWith(GROUP, OWNER, {
+      name: 'V8testwebsite',
+      url: GOOD,
+    });
+    // The single-row writers are what let an older build keep the site
+    // listed after its owner switched listing off.
+    expect(dirDb.setListed).not.toHaveBeenCalled();
+    expect(dirDb.setListingUrl).not.toHaveBeenCalled();
+  });
+
+  it('switching OFF clears every build, so a withdrawal completes', async () => {
+    // The regression: a site generated twice had an older `listed = TRUE`
+    // row. Turning the switch off wrote only the newest one, the public
+    // query fell through to the older row, and the site stayed in the
+    // directory with no way for its owner to remove it.
+    dirDb.getGroupListingRow.mockResolvedValue({
+      id: GEN_ID,
+      listed: true,
+      delisted_by_admin: false,
+      listing_url: GOOD,
+    } as any);
+    const res = await post(
+      `/api/v1/websites/${GROUP}/listing`,
+      { listed: false },
+      { authorization: `Bearer ${OWNER}` }
+    );
+    expect(res.status).toBe(200);
+    expect(dirDb.setListedForGroup).toHaveBeenCalledWith(GROUP, OWNER, false);
+  });
+
+  it('a rejected URL does not block the listing change', async () => {
+    dirDb.getGroupListingRow.mockResolvedValue({
+      id: GEN_ID,
+      listed: false,
+      delisted_by_admin: false,
+      listing_url: null,
+    } as any);
+    const res = await post(
+      `/api/v1/websites/${GROUP}/listing`,
+      { listed: true, name: 'V8', url: 'https://evil.example/w/abc' },
+      { authorization: `Bearer ${OWNER}` }
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).urlAccepted).toBe(false);
+    expect(dirDb.setListedForGroup).toHaveBeenCalledWith(GROUP, OWNER, true);
+    // Name still applied; the bad URL is dropped rather than stored.
+    expect(dirDb.setListingDetailsForGroup).toHaveBeenCalledWith(GROUP, OWNER, {
+      name: 'V8',
+      url: undefined,
+    });
   });
 
   it('POST requires auth', async () => {
@@ -582,7 +632,7 @@ describe('the toggle is keyed on the website GROUP', () => {
       listed: true,
     });
     expect(res.status).toBe(401);
-    expect(dirDb.setListed).not.toHaveBeenCalled();
+    expect(dirDb.setListedForGroup).not.toHaveBeenCalled();
   });
 
   it('404s for a group the caller does not own', async () => {
@@ -595,7 +645,8 @@ describe('the toggle is keyed on the website GROUP', () => {
       { authorization: `Bearer ${OWNER}` }
     );
     expect(res.status).toBe(404);
-    expect(dirDb.setListed).not.toHaveBeenCalled();
+    expect(dirDb.setListedForGroup).not.toHaveBeenCalled();
+    expect(dirDb.setListingDetailsForGroup).not.toHaveBeenCalled();
   });
 
   it('an admin delisting still cannot be undone by the owner', async () => {

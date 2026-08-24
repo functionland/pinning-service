@@ -21,6 +21,8 @@ import {
 import {
   getGroupListingRow,
   setListed,
+  setListedForGroup,
+  setListingDetailsForGroup,
   setListingName,
   setListingUrl,
 } from '../database/directory_postgres.js';
@@ -407,14 +409,19 @@ generateRoutes.post('/websites/:group/listing', async (c) => {
     );
   }
 
-  const ok = await setListed(row.id, userId, body.listed);
+  // Group-wide. Writing only the newest build left older builds listed,
+  // so switching listing OFF did not take the site out of the directory
+  // — the public query fell through to an older row and the user could
+  // not complete the withdrawal. Listing consent is given per website,
+  // so it is withdrawn per website too.
+  const ok = await setListedForGroup(group, userId, body.listed);
   if (!ok) return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
-  if (body.name !== undefined) await setListingName(row.id, body.name);
 
   let urlAccepted = false;
+  let url: string | undefined;
   if (body.url !== undefined) {
     if (isAllowedListingUrl(body.url)) {
-      await setListingUrl(row.id, body.url);
+      url = body.url;
       urlAccepted = true;
     } else {
       console.warn(
@@ -422,6 +429,10 @@ generateRoutes.post('/websites/:group/listing', async (c) => {
       );
     }
   }
+  // The display name and the IPNS front door describe the SITE and are
+  // stable across regenerations, so they go on every build — otherwise
+  // the entry's link would depend on which build represents it.
+  await setListingDetailsForGroup(group, userId, { name: body.name, url });
 
   if (body.listed) void ensureListingSummary(row.id);
 

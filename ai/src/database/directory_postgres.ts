@@ -33,6 +33,28 @@
 
 import { isGenerationId, query } from './postgres.js';
 
+/**
+ * The key that identifies one WEBSITE across its generations.
+ *
+ * `listing_group` is the website's tag id — but it arrives from the
+ * CLIENT as arbitrary text, so it cannot identify a site on its own. A
+ * caller could send another user's generation id as their group and fold
+ * two unrelated sites into one: the victim's entry would disappear (one
+ * entry per group, newest listed build wins) and an admin removing the
+ * attacker's site would remove the victim's with it. Prefixing the owner
+ * makes the key unforgeable across users while leaving it stable across
+ * one user's regenerations.
+ *
+ * `user_email` is the fallback for any row predating `user_id`, and a
+ * row with neither falls back to its own id — its own group.
+ *
+ * MUST be identical everywhere a group is computed (this module and the
+ * webui's admin routes), or the admin page and the public page would
+ * disagree about what a website is.
+ */
+export const OWNER_SCOPED_GROUP_KEY =
+  "COALESCE(user_id, user_email, '') || ':' || COALESCE(listing_group, id::text)";
+
 export interface DirectoryCategory {
   slug: string;
   label: string;
@@ -73,7 +95,16 @@ export async function listDirectory(opts: {
 }): Promise<{ entries: DirectoryEntry[]; total: number }> {
   // One entry per WEBSITE, not per generation. Rows with no group behave
   // as their own group, so a pre-group generation is still one entry.
-  const groupKey = 'COALESCE(listing_group, id::text)';
+  //
+  // SCOPED BY OWNER, and that part is a security control, not tidiness.
+  // `listing_group` is arbitrary text the CLIENT chooses. Keyed on it
+  // alone, anyone could send another user's generation id as their own
+  // group and fold the two sites together: the victim's entry would
+  // vanish (one row per group, and the attacker's newer build wins), and
+  // an admin removing the attacker would take the victim's site down
+  // with it. Prefixing the owner makes a group unforgeable across users
+  // while leaving it stable within one.
+  const groupKey = OWNER_SCOPED_GROUP_KEY;
 
   // Every build of the site that could carry a visibility flag. Not
   // filtered by `listed` — a row that is admin-removed but no longer
@@ -158,8 +189,8 @@ export async function isPubliclyListed(id: string): Promise<boolean> {
     `SELECT bool_or(listed) AND NOT bool_or(delisted_by_admin) AS ok
        FROM ai_generations
       WHERE status = 'completed'
-        AND COALESCE(listing_group, id::text) = (
-              SELECT COALESCE(listing_group, id::text)
+        AND ${OWNER_SCOPED_GROUP_KEY} = (
+              SELECT ${OWNER_SCOPED_GROUP_KEY}
                 FROM ai_generations WHERE id = $1
             )`,
     [id]

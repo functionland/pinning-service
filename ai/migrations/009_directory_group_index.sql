@@ -21,6 +21,13 @@
 --
 -- A build that is unlisted, or removed, is exactly the row the partial
 -- indexes exclude, so those scans now need a non-partial group index.
+--
+-- The group key itself is owner-prefixed (see OWNER_SCOPED_GROUP_KEY),
+-- because `listing_group` is arbitrary client-supplied text and would
+-- otherwise let one user claim another's group. This index covers the
+-- owner-scoped WRITE path, which filters on `listing_group` plus the
+-- owner directly; the public read folds over an expression and is a
+-- scan, which is correct at this table's size.
 CREATE INDEX IF NOT EXISTS idx_ai_generations_group_all
     ON ai_generations(listing_group, completed_at DESC)
  WHERE status = 'completed';

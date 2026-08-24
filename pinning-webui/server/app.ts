@@ -4804,7 +4804,9 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // visitors see.
       const result = await query(`
         WITH base AS (
-          SELECT *, COALESCE(listing_group, id::text) AS grp
+          SELECT *,
+                 COALESCE(user_id, user_email, '') || ':' ||
+                 COALESCE(listing_group, id::text) AS grp
             FROM ai_generations
            WHERE status = 'completed'
              AND (listed = TRUE OR delisted_by_admin = TRUE)
@@ -4831,7 +4833,8 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
                (SELECT COUNT(*)::int
                   FROM directory_reports r
                   JOIN ai_generations g2 ON g2.id = r.generation_id
-                 WHERE COALESCE(g2.listing_group, g2.id::text) = rep.grp
+                 WHERE COALESCE(g2.user_id, g2.user_email, '') || ':' ||
+                       COALESCE(g2.listing_group, g2.id::text) = rep.grp
                    AND r.resolved = FALSE) AS open_reports
           FROM rep
           JOIN state ON state.grp = rep.grp
@@ -4884,12 +4887,22 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
       // next-newest listed one and the site REAPPEARED, with the report
       // that prompted the removal already closed. A takedown that can be
       // undone by regenerating is not a takedown.
+      //
+      // The group key is prefixed with the OWNER because `listing_group`
+      // is arbitrary client-supplied text: without that, a caller could
+      // claim someone else's group and an admin acting on one site would
+      // silently act on another user's too. It must stay byte-identical
+      // to OWNER_SCOPED_GROUP_KEY in ai/src/database/directory_postgres.ts,
+      // or this page and the public one would disagree on what a website
+      // is.
       const result = await query(
         `UPDATE ai_generations
             SET delisted_by_admin = $1, updated_at = CURRENT_TIMESTAMP
           WHERE status = 'completed'
-            AND COALESCE(listing_group, id::text) = (
-                  SELECT COALESCE(listing_group, id::text)
+            AND COALESCE(user_id, user_email, '') || ':' ||
+                COALESCE(listing_group, id::text) = (
+                  SELECT COALESCE(user_id, user_email, '') || ':' ||
+                         COALESCE(listing_group, id::text)
                     FROM ai_generations WHERE id = $2
                 )`,
         [!restore, id]
@@ -4906,8 +4919,10 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
               SET resolved = TRUE
             WHERE generation_id IN (
                     SELECT id FROM ai_generations
-                     WHERE COALESCE(listing_group, id::text) = (
-                             SELECT COALESCE(listing_group, id::text)
+                     WHERE COALESCE(user_id, user_email, '') || ':' ||
+                           COALESCE(listing_group, id::text) = (
+                             SELECT COALESCE(user_id, user_email, '') || ':' ||
+                                    COALESCE(listing_group, id::text)
                                FROM ai_generations WHERE id = $1
                            )
                   )`,

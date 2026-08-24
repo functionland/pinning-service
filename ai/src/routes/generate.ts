@@ -18,7 +18,12 @@ import {
   countRecentJobsByUser,
   countFreeCompletedGenerations,
 } from '../database/postgres.js';
+import {
+  setListed,
+  setListingName,
+} from '../database/directory_postgres.js';
 import { deductCredits, refundCredits } from '../services/creditService.js';
+import { ensureListingSummary } from '../services/directoryListing.js';
 import { startGeneration } from '../services/generationService.js';
 
 interface Env {
@@ -64,6 +69,18 @@ const generateRequestSchema = z.object({
   // (the client polls for up to 20 minutes). Absent = legacy client → the
   // faster single-pass pipeline that fits the old 5-minute deadline.
   pipeline_version: z.number().int().min(1).max(10).optional(),
+  // Public directory ("yellow pages") opt-in, false unless the user
+  // deliberately asked for it. Defaulting FALSE here also means an older
+  // client that never heard of the directory cannot publish a user into
+  // it by omission.
+  listed: z.boolean().default(false),
+  // The website group's display name, sent explicitly rather than
+  // scraped out of `prompt` (which is free text the user wrote and may
+  // contain personal detail).
+  listing_name: z.string().max(200).optional(),
+  // Opaque per-website key (the client's tag id) so the directory shows
+  // ONE entry per website rather than one per regeneration.
+  listing_group: z.string().max(200).optional(),
 });
 
 // ============================================
@@ -155,7 +172,10 @@ generateRoutes.post('/generate', async (c) => {
       body.assets,
       creditsCharged,
       body.enable_tracking,
-      body.pipeline_version ?? null
+      body.pipeline_version ?? null,
+      body.listed,
+      body.listing_name ?? null,
+      body.listing_group ?? null
     );
 
     // Queue the job (pass user token for S3 uploads)
@@ -207,6 +227,12 @@ generateRoutes.get('/status/:id', async (c) => {
     errorMessage: job.error_message,
     createdAt: job.created_at,
     updatedAt: job.updated_at,
+    // Public directory state, so the owner's toggle can render what is
+    // actually true rather than what this browser last sent.
+    listed: job.listed === true,
+    listingCategory: job.listing_category,
+    listingDescription: job.listing_description,
+    delistedByAdmin: job.delisted_by_admin === true,
   });
 });
 
@@ -240,6 +266,69 @@ generateRoutes.get('/generations', async (c) => {
     total,
     totalPages: Math.ceil(total / limit),
   });
+});
+
+// ============================================
+// POST /api/v1/generations/:id/listing
+// ============================================
+
+const listingToggleSchema = z.object({
+  listed: z.boolean(),
+  /** Optional rename of the directory entry (the group's display name). */
+  name: z.string().max(200).optional(),
+});
+
+/**
+ * Turn a finished website's public-directory listing on or off.
+ *
+ * Lives on THIS router because it already carries the JWT middleware and
+ * the same ownership rule as `GET /status/:id`. Being able to change it
+ * after the fact is the point: a user must not have to regenerate a site
+ * to take it out of the directory.
+ *
+ * POST rather than PATCH so the browser preflight stays inside the CORS
+ * method list the service already publishes.
+ */
+generateRoutes.post('/generations/:id/listing', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+
+  let body: z.infer<typeof listingToggleSchema>;
+  try {
+    body = listingToggleSchema.parse(await c.req.json());
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Validation error', details: error.errors }, 400);
+    }
+    return c.json({ error: 'Invalid request body' }, 400);
+  }
+
+  const job = await getGeneration(id);
+  if (!job || (job.user_id !== userId && job.user_email !== userId)) {
+    return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
+  }
+
+  // An admin delisting is not something the owner can undo by toggling.
+  if (job.delisted_by_admin && body.listed) {
+    return c.json(
+      { error: 'This site was removed from the directory', code: 'DELISTED' },
+      409
+    );
+  }
+
+  const ok = await setListed(id, userId, body.listed);
+  if (!ok) return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
+  if (body.name !== undefined) await setListingName(id, body.name);
+
+  // First time it goes public, describe + categorise it. Guarded by
+  // `listing_generated_at` inside, so off -> on -> off -> on never bills
+  // a second AI call. Fire-and-forget: the toggle must not wait on it,
+  // and a failure leaves the entry listed without a blurb.
+  if (body.listed && job.status === 'completed') {
+    void ensureListingSummary(id);
+  }
+
+  return c.json({ ok: true, listed: body.listed });
 });
 
 export default generateRoutes;

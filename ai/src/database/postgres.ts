@@ -103,9 +103,22 @@ export interface AiGeneration {
   completed_at: string | null;
   enable_tracking: boolean;
   pipeline_version: number | null;
+  // Public directory ("yellow pages") — migration 007.
+  listed: boolean;
+  listing_name: string | null;
+  listing_description: string | null;
+  listing_category: string | null;
+  listing_generated_at: string | null;
+  delisted_by_admin: boolean;
+  listing_group: string | null;
 }
 
 // Create a new generation record (stores userId hash, not plain-text email)
+//
+// `listed` / `listingName` drive the public directory. Listing is OPT-IN:
+// the column defaults to false, the client defaults to false, and the
+// app's consent checkbox starts unticked (a pre-ticked box is not
+// consent — GDPR Recital 32). A row is listed only when a user asked.
 export async function createGeneration(
   id: string,
   userId: string,
@@ -113,13 +126,29 @@ export async function createGeneration(
   assets: any[],
   creditsCharged: number,
   enableTracking: boolean,
-  pipelineVersion: number | null = null
+  pipelineVersion: number | null = null,
+  listed: boolean = false,
+  listingName: string | null = null,
+  // Per-WEBSITE key (the client's tag id). Every regeneration is its own
+  // row; without this the directory would list one entry per version.
+  listingGroup: string | null = null
 ): Promise<string> {
   const result = await query(
-    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message, enable_tracking, pipeline_version)
-     VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation', $6, $7)
+    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message, enable_tracking, pipeline_version, listed, listing_name, listing_group)
+     VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation', $6, $7, $8, $9, $10)
      RETURNING id`,
-    [id, userId, prompt, JSON.stringify(assets), creditsCharged, enableTracking, pipelineVersion]
+    [
+      id,
+      userId,
+      prompt,
+      JSON.stringify(assets),
+      creditsCharged,
+      enableTracking,
+      pipelineVersion,
+      listed,
+      listingName,
+      listingGroup,
+    ]
   );
   return result.rows[0].id;
 }
@@ -169,8 +198,23 @@ export async function failGeneration(
   );
 }
 
+/** `ai_generations.id` is a Postgres UUID column. */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isGenerationId(id: string): boolean {
+  return UUID_RE.test(id);
+}
+
 // Get a single generation by ID
+//
+// A malformed id is treated as "not found" rather than being handed to
+// Postgres. `id` is a UUID column, so `WHERE id = 'abc'` raises
+// `invalid input syntax for type uuid` — which surfaces as a 500 through
+// the app error handler, when the honest answer to "is there a
+// generation called abc" is 404. Every caller already handles null.
 export async function getGeneration(id: string): Promise<AiGeneration | null> {
+  if (!isGenerationId(id)) return null;
   const result = await query<AiGeneration>(
     `SELECT * FROM ai_generations WHERE id = $1`,
     [id]

@@ -44,6 +44,7 @@ const { mockConfig, dirDb, genDb, credits, generation, listing } = vi.hoisted(
       setListed: vi.fn(async () => true),
       setListingName: vi.fn(async () => undefined),
       setListingUrl: vi.fn(async () => undefined),
+      getGroupListingRow: vi.fn(async (): Promise<any> => null),
     },
     genDb: {
       // Real implementation, not a stub: the routes' malformed-id guard
@@ -523,6 +524,93 @@ describe('the listing URL is a link we publish, so it is pinned', () => {
     expect((await res.json()).urlAccepted).toBe(false);
     expect(dirDb.setListingUrl).not.toHaveBeenCalled();
     expect(dirDb.setListed).toHaveBeenCalled();
+  });
+});
+
+describe('the toggle is keyed on the website GROUP', () => {
+  // The app addresses these routes by group (tag id) because the
+  // client's generation id is NOT the server's row id — that is the
+  // jobId, which the client discards once a job completes. An id-keyed
+  // toggle 404s for every finished site, which silently hid the switch
+  // in the app. These tests pin the group contract.
+  const GROUP = 'c0cf1e5c-1237-4930-97c5-d04f81272c51';
+  const GOOD =
+    'https://fxfiles.top/w/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8';
+
+  it('GET reports the current state for a group', async () => {
+    dirDb.getGroupListingRow.mockResolvedValue({
+      id: GEN_ID,
+      listed: true,
+      delisted_by_admin: false,
+      listing_url: null,
+    } as any);
+    const res = await get(`/api/v1/websites/${GROUP}/listing`, {
+      authorization: `Bearer ${OWNER}`,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.listed).toBe(true);
+    expect(body.hasStableUrl).toBe(false);
+    expect(dirDb.getGroupListingRow).toHaveBeenCalledWith(GROUP, OWNER);
+  });
+
+  it('GET requires auth', async () => {
+    expect((await get(`/api/v1/websites/${GROUP}/listing`)).status).toBe(401);
+  });
+
+  it('POST toggles and stores the stable link on the group row', async () => {
+    dirDb.getGroupListingRow.mockResolvedValue({
+      id: GEN_ID,
+      listed: false,
+      delisted_by_admin: false,
+      listing_url: null,
+    } as any);
+    const res = await post(
+      `/api/v1/websites/${GROUP}/listing`,
+      { listed: true, name: 'V8testwebsite', url: GOOD },
+      { authorization: `Bearer ${OWNER}` }
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).urlAccepted).toBe(true);
+    // Writes target the ROW the group resolved to, not the group string.
+    expect(dirDb.setListed).toHaveBeenCalledWith(GEN_ID, OWNER, true);
+    expect(dirDb.setListingUrl).toHaveBeenCalledWith(GEN_ID, GOOD);
+  });
+
+  it('POST requires auth', async () => {
+    const res = await post(`/api/v1/websites/${GROUP}/listing`, {
+      listed: true,
+    });
+    expect(res.status).toBe(401);
+    expect(dirDb.setListed).not.toHaveBeenCalled();
+  });
+
+  it('404s for a group the caller does not own', async () => {
+    // getGroupListingRow is itself owner-scoped, so "not yours" and
+    // "does not exist" are the same answer.
+    dirDb.getGroupListingRow.mockResolvedValue(null as any);
+    const res = await post(
+      `/api/v1/websites/${GROUP}/listing`,
+      { listed: true },
+      { authorization: `Bearer ${OWNER}` }
+    );
+    expect(res.status).toBe(404);
+    expect(dirDb.setListed).not.toHaveBeenCalled();
+  });
+
+  it('an admin delisting still cannot be undone by the owner', async () => {
+    dirDb.getGroupListingRow.mockResolvedValue({
+      id: GEN_ID,
+      listed: false,
+      delisted_by_admin: true,
+      listing_url: null,
+    } as any);
+    const res = await post(
+      `/api/v1/websites/${GROUP}/listing`,
+      { listed: true },
+      { authorization: `Bearer ${OWNER}` }
+    );
+    expect(res.status).toBe(409);
   });
 });
 

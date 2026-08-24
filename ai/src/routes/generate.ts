@@ -19,6 +19,7 @@ import {
   countFreeCompletedGenerations,
 } from '../database/postgres.js';
 import {
+  getGroupListingRow,
   setListed,
   setListingName,
   setListingUrl,
@@ -353,6 +354,76 @@ generateRoutes.post('/generations/:id/listing', async (c) => {
   if (body.listed && job.status === 'completed') {
     void ensureListingSummary(id);
   }
+
+  return c.json({ ok: true, listed: body.listed, urlAccepted });
+});
+
+// ============================================
+// Website-GROUP listing (what the app actually uses)
+// ============================================
+//
+// GET  /api/v1/websites/:group/listing
+// POST /api/v1/websites/:group/listing
+//
+// Keyed on the website group (its tag id), not a generation id.
+// `ai_generations.id` is the server's jobId, which the client only holds
+// while a job is in flight and discards on completion — so an id-keyed
+// toggle 404s for every finished site, which is exactly what hid the
+// switch in the app. The group is stable, is always known to the client,
+// and is already what the directory de-duplicates on.
+
+generateRoutes.get('/websites/:group/listing', async (c) => {
+  const userId = c.get('userId');
+  const row = await getGroupListingRow(c.req.param('group'), userId);
+  if (!row) return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
+  return c.json({
+    listed: row.listed === true,
+    delistedByAdmin: row.delisted_by_admin === true,
+    hasStableUrl: !!row.listing_url,
+  });
+});
+
+generateRoutes.post('/websites/:group/listing', async (c) => {
+  const userId = c.get('userId');
+  const group = c.req.param('group');
+
+  let body: z.infer<typeof listingToggleSchema>;
+  try {
+    body = listingToggleSchema.parse(await c.req.json());
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Validation error', details: error.errors }, 400);
+    }
+    return c.json({ error: 'Invalid request body' }, 400);
+  }
+
+  const row = await getGroupListingRow(group, userId);
+  if (!row) return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
+
+  if (row.delisted_by_admin && body.listed) {
+    return c.json(
+      { error: 'This site was removed from the directory', code: 'DELISTED' },
+      409
+    );
+  }
+
+  const ok = await setListed(row.id, userId, body.listed);
+  if (!ok) return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
+  if (body.name !== undefined) await setListingName(row.id, body.name);
+
+  let urlAccepted = false;
+  if (body.url !== undefined) {
+    if (isAllowedListingUrl(body.url)) {
+      await setListingUrl(row.id, body.url);
+      urlAccepted = true;
+    } else {
+      console.warn(
+        `[directory] Rejected listing URL for group ${group}: not a front-door link`
+      );
+    }
+  }
+
+  if (body.listed) void ensureListingSummary(row.id);
 
   return c.json({ ok: true, listed: body.listed, urlAccepted });
 });

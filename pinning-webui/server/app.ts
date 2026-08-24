@@ -4776,6 +4776,95 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   }
 
   // Get suspended users (admin only)
+  // ============================================
+  // Public directory (yellow pages) moderation
+  // ============================================
+  //
+  // Queries the SAME Postgres the AI service owns, rather than proxying
+  // to its SYSTEM_KEY-guarded admin routes: the webui already reads that
+  // database directly (see /api/public/stats), and a proxy would mean
+  // shipping the system key into this process for no gain.
+  //
+  // Delisting removes the DIRECTORY ENTRY only — the site is
+  // content-addressed on IPFS and stays reachable to anyone holding its
+  // link. The page says so; do not let the wording here imply otherwise.
+
+  /** Everything currently listed, newest first, with its report count. */
+  app.get('/api/admin/directory/listings', requireAdmin, async (_req: Request, res: Response) => {
+    try {
+      const result = await query(`
+        SELECT g.id, g.listing_name, g.listing_category, g.listing_description,
+               COALESCE(g.listing_url, g.gateway_url) AS url,
+               g.listed, g.delisted_by_admin, g.completed_at,
+               (SELECT COUNT(*) FROM directory_reports r
+                 WHERE r.generation_id = g.id AND r.resolved = FALSE)::int AS open_reports
+          FROM ai_generations g
+         WHERE g.status = 'completed' AND (g.listed = TRUE OR g.delisted_by_admin = TRUE)
+         ORDER BY g.completed_at DESC NULLS LAST
+         LIMIT 200
+      `);
+      res.json({ listings: result.rows });
+    } catch (error) {
+      console.error('[webui] Error listing directory entries:', error);
+      res.status(500).json({ error: 'Failed to list directory entries' });
+    }
+  });
+
+  /** Open abuse reports, newest first. */
+  app.get('/api/admin/directory/reports', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const onlyOpen = req.query.all !== 'true';
+      const result = await query(`
+        SELECT r.id, r.generation_id, r.reason, r.details, r.resolved, r.created_at,
+               g.listing_name, COALESCE(g.listing_url, g.gateway_url) AS url,
+               g.delisted_by_admin
+          FROM directory_reports r
+          LEFT JOIN ai_generations g ON g.id = r.generation_id
+         ${onlyOpen ? 'WHERE r.resolved = FALSE' : ''}
+         ORDER BY r.created_at DESC
+         LIMIT 200
+      `);
+      res.json({ reports: result.rows });
+    } catch (error) {
+      console.error('[webui] Error getting directory reports:', error);
+      res.status(500).json({ error: 'Failed to get directory reports' });
+    }
+  });
+
+  /** Remove a listing from the directory, or restore one. */
+  app.post('/api/admin/directory/:id/delist', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      // ai_generations.id is a UUID column: a malformed id must answer
+      // 404 rather than raising invalid-input-syntax as a 500.
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+      const restore = req.body?.restore === true;
+      const result = await query(
+        `UPDATE ai_generations
+            SET delisted_by_admin = $1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = $2`,
+        [!restore, id]
+      );
+      if ((result.rowCount || 0) === 0) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+      // Delisting closes the reports that prompted it; restoring does not
+      // reopen them — a human already looked.
+      if (!restore) {
+        await query(
+          `UPDATE directory_reports SET resolved = TRUE WHERE generation_id = $1`,
+          [id]
+        );
+      }
+      res.json({ ok: true, delisted: !restore });
+    } catch (error) {
+      console.error('[webui] Error delisting directory entry:', error);
+      res.status(500).json({ error: 'Failed to update listing' });
+    }
+  });
+
   app.get('/api/admin/suspended', requireAdmin, async (_req: Request, res: Response) => {
     try {
       const users = await getSuspendedUsers();

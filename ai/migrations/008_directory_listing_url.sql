@@ -1,0 +1,25 @@
+-- Stable share link for a directory entry.
+--
+-- NOTE: every migration re-runs on every service boot (database/index.ts),
+-- so every statement here MUST be IF NOT EXISTS-guarded / idempotent.
+--
+-- WHY A SEPARATE COLUMN AND NOT gateway_url
+-- -----------------------------------------
+-- `gateway_url` is the raw per-generation IPFS URL
+-- (https://ipfs.cloud.fx.land/gateway/<cid>). It points at ONE build and
+-- goes stale the moment the site is regenerated.
+--
+-- The link the app shows users is the group's IPNS front door
+-- (https://fxfiles.top/w/<k51...>), which is stable across regenerations
+-- and always resolves to the newest build. The server cannot derive it:
+-- the IPNS pointer lives in the user's OWN encrypted manifest
+-- (.fula/website_pointers/<userId>.json) and is published client-side to
+-- w3name after a generation completes. So the client sends it, and the
+-- listing route validates the shape before storing it — see
+-- `isAllowedListingUrl`. Without that check a public directory would
+-- happily publish any link a client cared to name.
+--
+-- Nullable: entries created before this, and any client that never sends
+-- one, fall back to gateway_url so nothing loses its link.
+ALTER TABLE ai_generations
+    ADD COLUMN IF NOT EXISTS listing_url TEXT;

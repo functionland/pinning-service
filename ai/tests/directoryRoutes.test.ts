@@ -43,6 +43,7 @@ const { mockConfig, dirDb, genDb, credits, generation, listing } = vi.hoisted(
       deactivateCategory: vi.fn(async () => true),
       setListed: vi.fn(async () => true),
       setListingName: vi.fn(async () => undefined),
+      setListingUrl: vi.fn(async () => undefined),
     },
     genDb: {
       // Real implementation, not a stub: the routes' malformed-id guard
@@ -93,6 +94,7 @@ import {
   directoryPublicRoutes,
   directoryAdminRoutes,
   clearDirectoryCache,
+  isAllowedListingUrl,
 } from '../src/routes/directory.js';
 import { generateRoutes } from '../src/routes/generate.js';
 
@@ -435,6 +437,92 @@ describe('the owner listing toggle stays INSIDE the authed router', () => {
     );
     expect(res.status).toBe(409);
     expect(dirDb.setListed).not.toHaveBeenCalled();
+  });
+});
+
+describe('the listing URL is a link we publish, so it is pinned', () => {
+  // The stable share link is only known CLIENT-side, so an attacker can
+  // supply one too. A directory entry is a name plus a link on a page
+  // other people read — an arbitrary URL lets anyone publish a phishing
+  // target under an innocuous name using this site's credibility.
+  const GOOD = 'https://fxfiles.top/w/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8';
+
+  it('accepts a real front-door link', () => {
+    expect(isAllowedListingUrl(GOOD)).toBe(true);
+  });
+
+  it('rejects any other host', () => {
+    expect(isAllowedListingUrl('https://evil.example/w/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8')).toBe(false);
+    expect(isAllowedListingUrl('https://fxfiles.top.evil.example/w/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8')).toBe(false);
+  });
+
+  it('rejects a userinfo trick that reads as the right host', () => {
+    // https://fxfiles.top@evil.example/... — hostname is evil.example.
+    expect(
+      isAllowedListingUrl('https://fxfiles.top@evil.example/w/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8')
+    ).toBe(false);
+  });
+
+  it('rejects non-https', () => {
+    expect(isAllowedListingUrl(GOOD.replace('https:', 'http:'))).toBe(false);
+    expect(isAllowedListingUrl('javascript:alert(1)')).toBe(false);
+    expect(isAllowedListingUrl('data:text/html,<script>')).toBe(false);
+  });
+
+  it('rejects query, fragment and port dressing', () => {
+    expect(isAllowedListingUrl(`${GOOD}?next=https://evil.example`)).toBe(false);
+    expect(isAllowedListingUrl(`${GOOD}#/../../evil`)).toBe(false);
+    expect(isAllowedListingUrl(GOOD.replace('fxfiles.top', 'fxfiles.top:8080'))).toBe(false);
+  });
+
+  it('rejects a wrong path on the right host', () => {
+    expect(isAllowedListingUrl('https://fxfiles.top/')).toBe(false);
+    expect(isAllowedListingUrl('https://fxfiles.top/w/')).toBe(false);
+    expect(isAllowedListingUrl('https://fxfiles.top/w/short')).toBe(false);
+    expect(isAllowedListingUrl(`${GOOD}/../admin`)).toBe(false);
+  });
+
+  it('rejects garbage without throwing', () => {
+    expect(isAllowedListingUrl('')).toBe(false);
+    expect(isAllowedListingUrl('not a url')).toBe(false);
+  });
+
+  it('stores a valid URL and reports it accepted', async () => {
+    genDb.getGeneration.mockResolvedValue({
+      id: GEN_ID,
+      user_id: OWNER,
+      status: 'completed',
+      delisted_by_admin: false,
+    } as any);
+    const res = await post(
+      `/api/v1/generations/${GEN_ID}/listing`,
+      { listed: true, url: GOOD },
+      { authorization: `Bearer ${OWNER}` }
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).urlAccepted).toBe(true);
+    expect(dirDb.setListingUrl).toHaveBeenCalledWith(GEN_ID, GOOD);
+  });
+
+  it('drops a bad URL WITHOUT failing the toggle', async () => {
+    // The link is best-effort enrichment — the IPNS publish may not have
+    // landed. Failing the whole toggle over it would be worse than
+    // listing with the raw gateway URL.
+    genDb.getGeneration.mockResolvedValue({
+      id: GEN_ID,
+      user_id: OWNER,
+      status: 'completed',
+      delisted_by_admin: false,
+    } as any);
+    const res = await post(
+      `/api/v1/generations/${GEN_ID}/listing`,
+      { listed: true, url: 'https://evil.example/phish' },
+      { authorization: `Bearer ${OWNER}` }
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).urlAccepted).toBe(false);
+    expect(dirDb.setListingUrl).not.toHaveBeenCalled();
+    expect(dirDb.setListed).toHaveBeenCalled();
   });
 });
 

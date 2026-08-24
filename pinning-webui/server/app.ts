@@ -805,6 +805,12 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
           "https://api.cloud.fx.land",
           "https://ipfs.cloud.fx.land",
           "https://s3.cloud.fx.land",
+          // AI service — the public yellow-pages directory reads
+          // /api/v1/directory + /directory/categories from here, the same
+          // way /stats reads public-stats from api.cloud.fx.land. Without
+          // this the directory page is blocked by CSP before it sends a
+          // single request.
+          "https://ai.cloud.fx.land",
           // Blockchain RPC endpoints
           "https://mainnet.base.org",
           "https://*.base.org",

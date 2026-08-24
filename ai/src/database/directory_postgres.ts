@@ -89,7 +89,11 @@ export async function listDirectory(opts: {
               listing_name        AS name,
               listing_description AS description,
               listing_category    AS category,
-              gateway_url,
+              -- The stable IPNS front door when the client supplied one,
+              -- else the raw per-generation gateway URL. The front door
+              -- survives regeneration; gateway_url points at ONE build
+              -- and goes stale as soon as the site is regenerated.
+              COALESCE(listing_url, gateway_url) AS gateway_url,
               result_cid,
               completed_at
          FROM ai_generations
@@ -146,9 +150,29 @@ export async function setListingName(
   id: string,
   name: string | null
 ): Promise<void> {
+  if (!isGenerationId(id)) return;
   await query(
     `UPDATE ai_generations SET listing_name = $1 WHERE id = $2`,
     [name, id]
+  );
+}
+
+/**
+ * Stable share link for the listing — the group's IPNS front door.
+ *
+ * The caller MUST validate the URL first (`isAllowedListingUrl` in
+ * routes/directory.ts). This value is published verbatim on a public
+ * page, so storing an unvalidated one would turn the directory into
+ * somebody else's redirector.
+ */
+export async function setListingUrl(
+  id: string,
+  url: string | null
+): Promise<void> {
+  if (!isGenerationId(id)) return;
+  await query(
+    `UPDATE ai_generations SET listing_url = $1 WHERE id = $2`,
+    [url, id]
   );
 }
 

@@ -21,7 +21,9 @@ import {
 import {
   setListed,
   setListingName,
+  setListingUrl,
 } from '../database/directory_postgres.js';
+import { isAllowedListingUrl } from './directory.js';
 import { deductCredits, refundCredits } from '../services/creditService.js';
 import { ensureListingSummary } from '../services/directoryListing.js';
 import { startGeneration } from '../services/generationService.js';
@@ -276,6 +278,14 @@ const listingToggleSchema = z.object({
   listed: z.boolean(),
   /** Optional rename of the directory entry (the group's display name). */
   name: z.string().max(200).optional(),
+  /**
+   * The group's stable IPNS front door (https://fxfiles.top/w/<k51…>).
+   * Only the client knows it — the pointer lives in the user's own
+   * encrypted manifest — so it is sent here and VALIDATED before
+   * storage. A rejected URL is dropped and the entry keeps its raw
+   * per-generation gateway link.
+   */
+  url: z.string().max(500).optional(),
 });
 
 /**
@@ -320,6 +330,22 @@ generateRoutes.post('/generations/:id/listing', async (c) => {
   if (!ok) return c.json({ error: 'Not found', code: 'NOT_FOUND' }, 404);
   if (body.name !== undefined) await setListingName(id, body.name);
 
+  // The stable share link. Rejected silently rather than 400: the link
+  // is a best-effort enrichment (the IPNS publish may not have landed
+  // yet), and failing the whole toggle because of it would be worse
+  // than listing with the raw gateway URL.
+  let urlAccepted = false;
+  if (body.url !== undefined) {
+    if (isAllowedListingUrl(body.url)) {
+      await setListingUrl(id, body.url);
+      urlAccepted = true;
+    } else {
+      console.warn(
+        `[directory] Rejected listing URL for ${id}: not a front-door link`
+      );
+    }
+  }
+
   // First time it goes public, describe + categorise it. Guarded by
   // `listing_generated_at` inside, so off -> on -> off -> on never bills
   // a second AI call. Fire-and-forget: the toggle must not wait on it,
@@ -328,7 +354,7 @@ generateRoutes.post('/generations/:id/listing', async (c) => {
     void ensureListingSummary(id);
   }
 
-  return c.json({ ok: true, listed: body.listed });
+  return c.json({ ok: true, listed: body.listed, urlAccepted });
 });
 
 export default generateRoutes;

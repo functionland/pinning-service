@@ -41,6 +41,39 @@ export const directoryPublicRoutes = new Hono();
 /** Reports allowed from one IP per day. */
 const MAX_REPORTS_PER_IP_PER_DAY = 20;
 
+/**
+ * Is this a link we are willing to publish on the public directory?
+ *
+ * The stable share link is the website group's IPNS front door, which
+ * only the CLIENT knows — the pointer lives in the user's own encrypted
+ * manifest and is published to w3name client-side. So the client
+ * supplies it, which means an attacker can supply it too.
+ *
+ * A directory entry is a name plus a link on a page other people read.
+ * Accepting an arbitrary URL would let anyone publish a phishing target
+ * under an innocuous name and borrow this site's credibility to do it.
+ * So the shape is pinned exactly rather than sanity-checked: https, the
+ * known host, and the front door's own `/w/<name>` path. Anything else is
+ * ignored and the entry keeps its gateway URL.
+ */
+export function isAllowedListingUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'https:') return false;
+  // No credentials, no port, no query, no fragment — the front door has
+  // none of those, and each is a way to dress a link up as something it
+  // is not (`https://fxfiles.top@evil.example`, `?next=…`, and so on).
+  if (url.username || url.password || url.port) return false;
+  if (url.search || url.hash) return false;
+  if (url.hostname !== 'fxfiles.top') return false;
+  // /w/<ipns-name>, e.g. k51qzi5uqu5d… — nothing after it.
+  return /^\/w\/[A-Za-z0-9]{40,80}$/.test(url.pathname);
+}
+
 /** 60s cache on the public listing, mirroring the Go public-stats
  *  endpoint's shape: a directory page is not worth a DB round-trip per
  *  visitor, and the data changes at human speed. */

@@ -268,6 +268,8 @@ export const en: Translations = {
     save: 'Save',
     saving: 'Saving...',
     clear: 'Clear',
+    previous: 'Previous',
+    next: 'Next',
   },
   referrals: {
     title: 'Referrals',

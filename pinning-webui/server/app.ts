@@ -16,7 +16,7 @@ import {
   getUserWallets,
   linkWallet,
   unlinkWallet,
-  getCreditHistory,
+  getCreditHistoryPage,
   creditUser,
   getSuspendedUsers,
   unsuspendUser,
@@ -3981,9 +3981,29 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // Get credit history
   app.get('/api/credits/history', requireAuth, async (req: Request, res: Response) => {
     try {
-      const limit = parseInt(req.query.limit as string) || 50;
-      const history = await getCreditHistory(req.session.user!.userId, Math.min(limit, 100));
-      res.json({ history });
+      // Paginated so the billing page can walk back through older
+      // transactions instead of only ever showing the latest slice.
+      // `page` is clamped at both ends; `limit` is capped so one request
+      // cannot pull an entire history.
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const offset = (page - 1) * limit;
+
+      const { history, total } = await getCreditHistoryPage(
+        req.session.user!.userId,
+        limit,
+        offset
+      );
+
+      // `history` stays top-level so older clients that read only that
+      // field keep working unchanged.
+      res.json({
+        history,
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      });
     } catch (error) {
       console.error('[webui] Error getting credit history:', error);
       res.status(500).json({ error: 'Failed to get credit history' });

@@ -512,17 +512,35 @@ export async function unlinkWallet(userId: string, addressOrHash: string): Promi
   return (result.rowCount || 0) > 0;
 }
 
-// Get user's credit history
-export async function getCreditHistory(
-  userId: string,
-  limit: number = 50
-): Promise<Array<{
+export interface CreditHistoryRow {
   txType: string;
   amountFula: number;
   balanceAfter: number;
   referenceId: string | null;
   createdAt: string;
-}>> {
+}
+
+/// One page of a user's credit history, plus the total so the caller can
+/// render page controls.
+///
+/// `created_at DESC, id DESC` rather than `created_at DESC` alone: rows
+/// written in the same transaction can share a timestamp, and Postgres
+/// gives no ordering guarantee among ties. With a bare timestamp sort,
+/// two pages of an OFFSET walk can return the same row twice — or skip
+/// one entirely — which is exactly the bug a user notices when paging
+/// back through history. `id` is the tiebreaker that makes the order
+/// total.
+export async function getCreditHistoryPage(
+  userId: string,
+  limit: number = 20,
+  offset: number = 0
+): Promise<{ history: CreditHistoryRow[]; total: number }> {
+  const countResult = await query<{ total: string }>(
+    `SELECT COUNT(*)::text as total FROM credit_history WHERE user_id = $1`,
+    [userId]
+  );
+  const total = parseInt(countResult.rows[0]?.total || '0', 10);
+
   const result = await query<{
     txtype: string;
     amountfula: number;
@@ -534,18 +552,31 @@ export async function getCreditHistory(
             reference_id as referenceid, created_at as createdat
      FROM credit_history
      WHERE user_id = $1
-     ORDER BY created_at DESC
-     LIMIT $2`,
-    [userId, limit]
+     ORDER BY created_at DESC, id DESC
+     LIMIT $2 OFFSET $3`,
+    [userId, limit, offset]
   );
 
-  return result.rows.map(row => ({
-    txType: row.txtype,
-    amountFula: row.amountfula,
-    balanceAfter: row.balanceafter,
-    referenceId: row.referenceid,
-    createdAt: row.createdat,
-  }));
+  return {
+    total,
+    history: result.rows.map(row => ({
+      txType: row.txtype,
+      amountFula: row.amountfula,
+      balanceAfter: row.balanceafter,
+      referenceId: row.referenceid,
+      createdAt: row.createdat,
+    })),
+  };
+}
+
+/// Back-compat wrapper: first page only. Kept so existing callers that
+/// only ever wanted "the latest N" do not have to change.
+export async function getCreditHistory(
+  userId: string,
+  limit: number = 50
+): Promise<CreditHistoryRow[]> {
+  const { history } = await getCreditHistoryPage(userId, limit, 0);
+  return history;
 }
 
 // Check if email is admin

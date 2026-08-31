@@ -3,6 +3,7 @@ import request from 'supertest';
 import type { Express } from 'express';
 import { createApp, createDbOps, type AppConfig, type DbOps } from '../server/app.js';
 import { createPostgresPool, closePool, query } from '../server/database/postgres.js';
+import { getDeductedFulaWithinMonths } from '../server/services/creditService.js';
 
 // Test configuration - uses PostgreSQL via environment variables
 // Set: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
@@ -134,6 +135,82 @@ describe.runIf(pgAvailable)('API Endpoints', () => {
 
       expect(res.body.totalPins).toBe(1);
       expect(res.body.totalSize).toBe(1000);
+    });
+  });
+
+  describe('Trailing-window spend (getDeductedFulaWithinMonths)', () => {
+    // This aggregate decides a user's published status tier, so the two
+    // ways it can be quietly wrong — counting the wrong rows, or counting
+    // the wrong window — are pinned down here rather than trusted.
+    const userId = 'user-window-test';
+
+    async function insertHistory(
+      txType: string,
+      amount: number,
+      monthsAgo: number
+    ): Promise<void> {
+      await query(
+        `INSERT INTO credit_history
+           (user_id, tx_type, amount_fula, balance_after, created_at)
+         VALUES ($1, $2, $3, 0, NOW() - ($4::int * INTERVAL '1 month'))`,
+        [userId, txType, amount, monthsAgo]
+      );
+    }
+
+    it('returns 0 for a user with no history', async () => {
+      expect(await getDeductedFulaWithinMonths(userId, 12)).toBe(0);
+    });
+
+    it('sums deductions inside the window, as a positive number', async () => {
+      await insertHistory('hourly_deduction', -10, 1);
+      await insertHistory('hourly_deduction', -20, 11);
+
+      expect(await getDeductedFulaWithinMonths(userId, 12)).toBeCloseTo(30, 5);
+    });
+
+    it('excludes deductions older than the window', async () => {
+      await insertHistory('hourly_deduction', -10, 1);
+      await insertHistory('hourly_deduction', -500, 13);
+
+      // The whole point of the window: last year's spend ages out, so a
+      // tier reflects a user who is active NOW.
+      expect(await getDeductedFulaWithinMonths(userId, 12)).toBeCloseTo(10, 5);
+    });
+
+    it('ignores deposits and other credits', async () => {
+      await insertHistory('deposit', 5000, 1);
+      await insertHistory('hourly_deduction', -10, 1);
+
+      expect(await getDeductedFulaWithinMonths(userId, 12)).toBeCloseTo(10, 5);
+    });
+
+    it('ignores a NEGATIVE adjustment — a clawback is not consumption', async () => {
+      // If this counted, an admin clawback would RAISE the user's status
+      // score, which is backwards. It also keeps the windowed figure
+      // meaning exactly what lifetime total_deducted_fula means.
+      await insertHistory('adjustment', -1000, 1);
+      await insertHistory('hourly_deduction', -10, 1);
+
+      expect(await getDeductedFulaWithinMonths(userId, 12)).toBeCloseTo(10, 5);
+    });
+
+    it('does not leak another user\'s spend', async () => {
+      await insertHistory('hourly_deduction', -10, 1);
+      await query(
+        `INSERT INTO credit_history
+           (user_id, tx_type, amount_fula, balance_after, created_at)
+         VALUES ('someone-else', 'hourly_deduction', -9999, 0, NOW())`
+      );
+
+      expect(await getDeductedFulaWithinMonths(userId, 12)).toBeCloseTo(10, 5);
+    });
+
+    it('honours a shorter window', async () => {
+      await insertHistory('hourly_deduction', -10, 1);
+      await insertHistory('hourly_deduction', -20, 5);
+
+      expect(await getDeductedFulaWithinMonths(userId, 3)).toBeCloseTo(10, 5);
+      expect(await getDeductedFulaWithinMonths(userId, 12)).toBeCloseTo(30, 5);
     });
   });
 

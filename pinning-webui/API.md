@@ -36,7 +36,12 @@ Get storage usage and credit information.
 Authorization: Bearer YOUR_API_KEY
 ```
 
-**Response:**
+**Query parameters:**
+| Param | Description |
+|-------|-------------|
+| `include` | Comma-separated list of optional, more expensive fields. `usage` adds `deductedFulaLast12Months`. Omitted by default because this endpoint is on the storage gateway's upload path, where that aggregate would be paid for on every write. |
+
+**Response** (shown as returned with `?include=usage`):
 ```json
 {
   "currentStorageBytes": 524288000,
@@ -44,6 +49,9 @@ Authorization: Bearer YOUR_API_KEY
   "paidStorageBytes": 1073741824,
   "totalAvailableBytes": 1598029824,
   "balanceFula": 8.0,
+  "totalDeposited": 120.0,
+  "totalDeducted": 112.0,
+  "deductedFulaLast12Months": 34.5,
   "monthlyBurnRate": 0,
   "isConsuming": false,
   "canUpload": true,
@@ -59,6 +67,9 @@ Authorization: Bearer YOUR_API_KEY
 | `paidStorageBytes` | number | Additional storage from FULA balance |
 | `totalAvailableBytes` | number | Total available storage (free + paid) |
 | `balanceFula` | number | Current FULA token balance |
+| `totalDeposited` | number | Lifetime FULA deposited from the blockchain. Excludes referral bonuses, which accrue to `total_bonus_received_fula` |
+| `totalDeducted` | number | Lifetime FULA consumed by storage, as a positive number |
+| `deductedFulaLast12Months` | number | **Only present with `?include=usage`.** FULA consumed by storage in the trailing 12 months, as a positive number. Counts `hourly_deduction` rows only — a negative `adjustment` is an admin correction, not consumption |
 | `monthlyBurnRate` | number | FULA tokens consumed per month (if over free tier) |
 | `isConsuming` | boolean | Whether credits are being consumed |
 | `canUpload` | boolean | Whether user can upload new content |

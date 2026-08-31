@@ -146,6 +146,68 @@ export async function getUserCreditStatus(userId: string): Promise<UserCreditSta
   };
 }
 
+/**
+ * FULA a user has SPENT on storage over a trailing window, as a POSITIVE
+ * number. Returns 0 for a user with no deductions.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * `user_credits.total_deducted_fula` is an all-time counter, so it cannot
+ * answer "how much in the last year". This is the same quantity, windowed.
+ *
+ * WHY `tx_type = 'hourly_deduction'` RATHER THAN `amount_fula < 0`
+ * ---------------------------------------------------------------
+ * Only the deduction job represents consumption (deductionJob.ts). A
+ * NEGATIVE `adjustment` is an admin correction or clawback — counting one
+ * as "used" would let a clawback RAISE the user's standing, which is
+ * backwards. This also keeps the windowed figure semantically identical to
+ * the lifetime `total_deducted_fula`, which the same job is the only writer
+ * of, so the two never disagree about what "deducted" means.
+ *
+ * COST, honestly stated. The only usable index is the single-column
+ * `idx_credit_history_user_id`, so Postgres finds the user's rows by index
+ * and then heap-fetches ALL of them to apply the tx_type and created_at
+ * filters — about 8,760 rows per year the account has existed, not per year
+ * of the window. That is why the caller makes this OPT-IN and keeps it off
+ * the storage gateway's upload path. If badge latency ever becomes visible
+ * for long-lived accounts, the fix is a composite index:
+ *
+ *     CREATE INDEX CONCURRENTLY idx_credit_history_usage
+ *       ON credit_history (user_id, tx_type, created_at);
+ *
+ * Deliberately NOT added here: this is a hot, cron-written table, and taking
+ * that lock is a production decision rather than a code one.
+ */
+export async function getDeductedFulaWithinMonths(
+  userId: string,
+  months = 12
+): Promise<number> {
+  const result = await query<{ used: string | null }>(
+    // `-amount_fula::numeric`, NOT `-amount_fula`: amount_fula is REAL, and
+    // Postgres accumulates sum(float4) in 32-bit float. Summing a year of
+    // small hourly deductions into a growing total is exactly the shape
+    // that loses low-order bits. numeric accumulates exactly, and the
+    // ::text below then hands JS an exact decimal rather than a float
+    // whose last digits are noise.
+    //
+    // `$2::int * INTERVAL '1 month'` rather than make_interval(months => $2):
+    // the named-argument form needs PG12+ and relies on Postgres resolving
+    // an untyped node-pg parameter through the named signature. This form
+    // works on every version and types the parameter explicitly.
+    `SELECT COALESCE(SUM(-amount_fula::numeric), 0)::text AS used
+       FROM credit_history
+      WHERE user_id = $1
+        AND tx_type = 'hourly_deduction'
+        AND created_at >= NOW() - ($2::int * INTERVAL '1 month')`,
+    [userId, months]
+  );
+
+  const used = Number(result.rows[0]?.used ?? 0);
+  // A NaN here (unparseable aggregate) must not propagate into a tier
+  // calculation as a silent NaN — clamp to 0, the "no usage" answer.
+  return Number.isFinite(used) && used > 0 ? used : 0;
+}
+
 // ============================================================
 // Internal types & helpers for creditUser + referral bonuses
 // ============================================================

@@ -13,6 +13,7 @@ import { emailToUserId, hashWalletAddress, getUserId } from './utils/hash.js';
 import { verifyServiceAuth, SERVICE_AUTH_HEADER } from './serviceAuth.js';
 import {
   getUserCreditStatus,
+  getDeductedFulaWithinMonths,
   getUserWallets,
   linkWallet,
   unlinkWallet,
@@ -5685,7 +5686,29 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
   // GET /api/v1/storage - Storage usage and credit info
   app.get('/api/v1/storage', requireApiAuth, async (req: Request, res: Response) => {
     try {
-      const status = await getUserCreditStatus(req.apiUser!.userId);
+      // OPT-IN, and deliberately so. This route is on the Fula S3 gateway's
+      // WRITE path — it calls it before storing data to read `canUpload`
+      // (see fula-api crates/fula-mcp/src/quota.rs, and the service-auth
+      // carve-out above, which exists for exactly this caller). The
+      // trailing-window aggregate is the one part of this response that
+      // scans rows rather than reading a single user_credits row, so
+      // charging every upload for a number only the status badge wants
+      // would be the wrong trade. Callers that want it ask for it.
+      //
+      // Absent, the field is simply missing and clients default it to 0 —
+      // the same degradation as an older server.
+      const includeUsage = String(req.query.include ?? '')
+        .split(',')
+        .includes('usage');
+
+      // Parallel: the aggregate is independent of the status fetch, so when
+      // it IS requested it adds no latency over the fetch it rides with.
+      const [status, deductedFulaLast12Months] = await Promise.all([
+        getUserCreditStatus(req.apiUser!.userId),
+        includeUsage
+          ? getDeductedFulaWithinMonths(req.apiUser!.userId, 12)
+          : Promise.resolve(null),
+      ]);
 
       // Calculate paid storage from FULA balance
       const paidStorageBytes = Math.floor((status.balanceFula / FULA_PER_GB_MONTH) * 1024 * 1024 * 1024);
@@ -5703,6 +5726,22 @@ export function createApp(config: AppConfig, options?: { skipRateLimit?: boolean
         paidStorageBytes,
         totalAvailableBytes,
         balanceFula: status.balanceFula,
+        // LIFETIME counters, as against balanceFula's current balance.
+        // FREE — they come off the same user_credits row getUserCreditStatus
+        // already read — so unlike the windowed figure below they are
+        // returned unconditionally.
+        //
+        // Exposed because a client CANNOT derive them: the only other
+        // source is /api/v1/credits/history, whose OFFSET walk orders by
+        // created_at with no id tiebreaker, so a cross-page SUM can double
+        // count or skip rows — and an hourly-deducted account accrues a row
+        // per hour, thousands of pages a year.
+        //
+        // Purely additive: existing clients ignore the new keys.
+        totalDeposited: status.totalDeposited,
+        totalDeducted: status.totalDeducted,
+        // Only when ?include=usage — see the note above.
+        ...(deductedFulaLast12Months !== null ? { deductedFulaLast12Months } : {}),
         monthlyBurnRate,
         isConsuming,
         canUpload: status.canUpload,

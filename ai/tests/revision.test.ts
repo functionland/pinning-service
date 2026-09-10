@@ -278,6 +278,19 @@ describe('applyRevisionPatch', () => {
     );
   });
 
+  it('keeps the existing file when the model returns it EMPTY', () => {
+    // Blanking is not how removal is expressed — deleted_files is — so an
+    // empty body reads as a truncated/dropped file, not an erasure.
+    const merged = applyRevisionPatch(
+      BASE_FILES,
+      [{ path: 'styles.css', content: '   \n ' }],
+      [],
+    );
+    expect(merged.find((f) => f.path === 'styles.css')!.content).toBe(
+      BASE_FILES[1].content,
+    );
+  });
+
   it('adds genuinely new files', () => {
     const merged = applyRevisionPatch(
       BASE_FILES,

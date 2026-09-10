@@ -974,7 +974,19 @@ export function applyRevisionPatch(
   if (toDelete.size > 0) {
     console.log(`[claude] Revision removed: ${[...toDelete].join(', ')}`);
   }
-  return mergeFiles(kept, patch);
+  // Blanking a file is not how removal is expressed here — `deleted_files`
+  // is. An empty body is far more likely to be a truncated or dropped
+  // file than an intent to erase one, so the existing version stands.
+  // Filtered here rather than in mergeFiles so the log names the pass it
+  // actually came from.
+  const written = patch.filter((f) => {
+    if (f.content.trim().length > 0) return true;
+    console.warn(
+      `[claude] Revision returned ${f.path} empty — keeping the existing file (use deleted_files to remove)`,
+    );
+    return false;
+  });
+  return mergeFiles(kept, written);
 }
 
 /**

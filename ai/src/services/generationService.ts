@@ -11,11 +11,14 @@ import path from 'path';
 import { config } from '../config/index.js';
 import {
   getGeneration,
+  getRevisionBaseById,
   updateGenerationStatus,
   completeGeneration,
   failGeneration,
+  saveGenerationFiles,
 } from '../database/postgres.js';
-import { generateWebsite } from './claudeService.js';
+import { generateWebsite, reviseWebsite } from './claudeService.js';
+import { describeSettingsDelta, isNoOpRevision } from './revisionPlan.js';
 import { ensureListingSummary } from './directoryListing.js';
 import { publishWebsite } from './ipfsService.js';
 import { refundCredits } from './creditService.js';
@@ -23,6 +26,15 @@ import { refundCredits } from './creditService.js';
 // Active jobs tracker
 const activeJobs = new Map<string, AbortController>();
 const jobQueue: Array<{ jobId: string; userToken: string }> = [];
+
+/**
+ * Cap on the source we keep for a later revision. Typical generated sites
+ * are 50-300KB; this leaves generous room while keeping one pathological
+ * job from parking megabytes in Postgres. Over the cap the row is simply
+ * not written — revision then falls back to the published copy, which is
+ * the same path legacy generations take.
+ */
+const MAX_STORED_SOURCE_BYTES = 2_000_000;
 
 /**
  * Get count of currently active jobs
@@ -108,7 +120,6 @@ async function executeJob(jobId: string, userToken: string, signal: AbortSignal)
 
     // Phase 1: Generate website with Claude
     await updateGenerationStatus(jobId, 'generating', 'Generating website with AI...');
-    console.log(`[generation] Job ${jobId}: calling Claude API`);
 
     const assets = (job.assets || []).map((a: any) => ({
       fileName: a.fileName,
@@ -117,13 +128,61 @@ async function executeJob(jobId: string, userToken: string, signal: AbortSignal)
       content: a.content || a.parsedContent || '',
     }));
 
-    const files = await generateWebsite(job.prompt, assets, {
-      signal,
-      tmpDir,
-      pipelineVersion: job.pipeline_version ?? undefined,
-      onProgress: (message) =>
-        updateGenerationStatus(jobId, 'generating', message),
-    });
+    // A job with a base EDITS that site. The base was resolved and
+    // ownership-checked when the request was accepted; this only loads it.
+    const base = job.base_generation_id
+      ? await getRevisionBaseById(job.base_generation_id)
+      : null;
+
+    let files: Array<{ path: string; content: string }>;
+    if (base && base.files.length > 0) {
+      const noOp = isNoOpRevision({
+        basePrompt: base.prompt,
+        baseAssets: base.assets,
+        newPrompt: job.prompt,
+        newAssets: job.assets || [],
+        revisionRequest: job.revision_request,
+      });
+
+      if (noOp) {
+        // Nothing was asked for. Republishing the stored source is the
+        // only way to return the SAME site — a model call, however well
+        // instructed, cannot promise byte-identical output. The publish
+        // step still runs, so a changed tracking setting is applied.
+        console.log(`[generation] Job ${jobId}: no-op revision — republishing source`);
+        await updateGenerationStatus(jobId, 'generating', 'Rebuilding the same site...');
+        files = base.files;
+      } else {
+        console.log(`[generation] Job ${jobId}: revising ${base.id}`);
+        files = await reviseWebsite(job.prompt, assets, {
+          signal,
+          tmpDir,
+          baseFiles: base.files,
+          revisionRequest: job.revision_request ?? '',
+          settingsDelta: describeSettingsDelta(base.prompt, job.prompt),
+          onProgress: (message) =>
+            updateGenerationStatus(jobId, 'generating', message),
+        });
+      }
+    } else {
+      if (job.base_generation_id) {
+        // Accepted as a revision but the source is gone (pruned, or over
+        // the store cap). Failing is the honest answer: the alternative
+        // is charging for the surprise redesign this feature exists to
+        // prevent.
+        throw new Error(
+          'The source of the site you are editing is no longer available. Create a new website instead.'
+        );
+      }
+      console.log(`[generation] Job ${jobId}: calling Claude API`);
+      files = await generateWebsite(job.prompt, assets, {
+        signal,
+        tmpDir,
+        pipelineVersion: job.pipeline_version ?? undefined,
+        onProgress: (message) =>
+          updateGenerationStatus(jobId, 'generating', message),
+      });
+    }
 
     if (signal.aborted) {
       throw new Error('Generation timed out');
@@ -172,6 +231,25 @@ async function executeJob(jobId: string, userToken: string, signal: AbortSignal)
       userToken,
       { enableTracking: job.enable_tracking === true }
     );
+
+    // Keep the RAW files (what the model wrote, not what publish rewrote)
+    // so a later "Recreate" can edit this site instead of inventing a new
+    // one. Written before the row flips to 'completed' so the source is
+    // durable by the time the client can ask to revise it. Best-effort:
+    // losing it costs a fallback, never the generation.
+    if (totalSize <= MAX_STORED_SOURCE_BYTES) {
+      try {
+        await saveGenerationFiles(jobId, files);
+      } catch (err) {
+        console.warn(
+          `[generation] Job ${jobId}: could not store source for revision: ${(err as Error).message}`
+        );
+      }
+    } else {
+      console.warn(
+        `[generation] Job ${jobId}: source ${totalSize}B over the ${MAX_STORED_SOURCE_BYTES}B store cap — revision will fall back to the published copy`
+      );
+    }
 
     // Phase 3: Complete
     await completeGeneration(jobId, cid, gatewayUrl);

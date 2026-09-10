@@ -13,6 +13,7 @@ import { config } from '../config/index.js';
 import { jwtValidatorMiddleware } from '../middleware/jwtValidator.js';
 import {
   createGeneration,
+  findRevisionBase,
   getGeneration,
   getGenerationsByUser,
   countRecentJobsByUser,
@@ -30,6 +31,7 @@ import { clearDirectoryCache, isAllowedListingUrl } from './directory.js';
 import { deductCredits, refundCredits } from '../services/creditService.js';
 import { ensureListingSummary } from '../services/directoryListing.js';
 import { startGeneration } from '../services/generationService.js';
+import { isNoOpRevision } from '../services/revisionPlan.js';
 
 interface Env {
   Variables: {
@@ -86,6 +88,16 @@ const generateRequestSchema = z.object({
   // Opaque per-website key (the client's tag id) so the directory shows
   // ONE entry per website rather than one per regeneration.
   listing_group: z.string().max(200).optional(),
+  // ---- Revision ("Recreate") ----
+  // The `result_cid` of the site being edited. When present, this job
+  // EDITS that site rather than designing a new one. Absent = ordinary
+  // from-scratch generation, which is what every older client sends.
+  base_cid: z.string().max(200).optional(),
+  // What the user asked to change, in their own words. May be empty —
+  // an empty change request against an unchanged base is a deliberate
+  // "rebuild the same site" and is honored literally (no model call).
+  // Bounded well under `prompt` because it rides on every status poll.
+  revision_request: z.string().max(8000).optional(),
 });
 
 // ============================================
@@ -120,6 +132,78 @@ generateRoutes.post('/generate', async (c) => {
       },
       429
     );
+  }
+
+  // Revision: resolve the base BEFORE any credit is taken.
+  //
+  // A base that cannot be used is refused rather than quietly downgraded
+  // to a from-scratch build. Silently designing a brand-new site when the
+  // user asked to change an existing one is the exact behaviour this
+  // feature exists to end — and it would be charged for.
+  let baseGenerationId: string | null = null;
+  if (body.base_cid) {
+    const base = await findRevisionBase(body.base_cid, userId);
+    if (!base) {
+      return c.json(
+        {
+          error: 'The site you are editing could not be found',
+          code: 'BASE_NOT_FOUND',
+        },
+        409
+      );
+    }
+    // Nothing to do: no change request, same settings, same assets — and
+    // the same publish flags, so even the bytes would be identical.
+    // Answering with the site the user already has is free, instant, and
+    // literally correct; running the pipeline could only make it differ.
+    //
+    // Checked BEFORE the stored-source requirement below, because it does
+    // not need the source: a site that predates migration 010 can still
+    // answer "nothing changed" from its own published copy. Otherwise
+    // every site a user owns today would refuse the one request that is
+    // trivially satisfiable.
+    if (
+      base.resultCid &&
+      body.enable_tracking === base.enableTracking &&
+      isNoOpRevision({
+        basePrompt: base.prompt,
+        baseAssets: base.assets,
+        newPrompt: body.prompt,
+        newAssets: body.assets,
+        revisionRequest: body.revision_request,
+      })
+    ) {
+      console.log(
+        `[generate] Unchanged revision for user ${userId.slice(0, 8)}... — returning existing site`
+      );
+      return c.json(
+        {
+          mode: 'unchanged',
+          resultCid: base.resultCid,
+          gatewayUrl: base.gatewayUrl,
+        },
+        200
+      );
+    }
+
+    if (base.files.length === 0) {
+      // A real change was asked for, but this site was generated before
+      // the source was kept (or it was over the store cap). The published
+      // copy is NOT a substitute: publishing inlines CSS/JS, rewrites
+      // asset URLs and injects the analytics script, so editing it would
+      // compound those transforms on every pass. The client asks the user
+      // whether to design a new site instead.
+      return c.json(
+        {
+          error:
+            'This site was created before editing was supported, so its source is not available',
+          code: 'BASE_SOURCE_UNAVAILABLE',
+        },
+        409
+      );
+    }
+
+    baseGenerationId = base.id;
   }
 
   // Generate job ID
@@ -180,7 +264,9 @@ generateRoutes.post('/generate', async (c) => {
       body.pipeline_version ?? null,
       body.listed,
       body.listing_name ?? null,
-      body.listing_group ?? null
+      body.listing_group ?? null,
+      baseGenerationId,
+      body.revision_request ?? null
     );
 
     // Queue the job (pass user token for S3 uploads)
@@ -204,9 +290,18 @@ generateRoutes.post('/generate', async (c) => {
     );
   }
 
-  console.log(`[generate] Job ${jobId} accepted for user ${userId.slice(0, 8)}...`);
+  console.log(
+    `[generate] Job ${jobId} accepted for user ${userId.slice(0, 8)}... (${baseGenerationId ? 'revision' : 'fresh'})`
+  );
 
-  return c.json({ jobId, status: 'accepted' }, 202);
+  // `mode` is echoed so a client that asked to EDIT can tell whether the
+  // server understood. zod's object schema is non-strict: a server that
+  // predates this feature drops `base_cid` without complaint and would
+  // otherwise silently return a redesigned site.
+  return c.json(
+    { jobId, status: 'accepted', mode: baseGenerationId ? 'revision' : 'fresh' },
+    202
+  );
 });
 
 // ============================================

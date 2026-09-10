@@ -40,6 +40,13 @@ import {
   hasLegacyConstraintsBlock,
   stripLegacyConstraintsBlock,
 } from '../prompts/promptCompat.js';
+import {
+  REVISION_INSTRUCTION,
+  REVISION_JSON_SCHEMA,
+  REVISION_TRUNCATION_RETRY_INSTRUCTION,
+  buildRevisionUserText,
+  renderExistingFiles,
+} from '../prompts/revisionPrompts.js';
 import { fetchToFile } from '../utils/fetchFile.js';
 
 export interface WebsiteFile {
@@ -420,6 +427,108 @@ async function attachAsset(
   // every staged file on both success and failure.
 }
 
+type AttachedAsset = { asset: Asset; result: AssetAttach };
+
+/**
+ * Download and attach every asset, under the cumulative wire budget.
+ *
+ * Errors are captured per-asset so a single bad file doesn't fail the
+ * whole job — Claude still has the URL+description line as a fallback.
+ *
+ * `skipAttach` marks assets whose bytes need not be sent: on a revision,
+ * an image already placed in the existing HTML has been art-directed once
+ * already, and re-attaching it costs the whole budget for nothing. Skipped
+ * assets keep their URL line, so the model can still reference them.
+ */
+async function attachAllAssets(
+  assets: Asset[],
+  tmpDir: string | undefined,
+  signal: AbortSignal | undefined,
+  skipAttach?: (asset: Asset) => boolean,
+): Promise<AttachedAsset[]> {
+  const attached: AttachedAsset[] = [];
+  if (assets.length === 0) return attached;
+
+  if (!tmpDir) {
+    console.warn('[claude] no tmpDir provided — skipping asset attachment');
+    for (const asset of assets) {
+      attached.push({ asset, result: { error: 'backend tmp dir unavailable' } });
+    }
+    return attached;
+  }
+
+  // Defensive: tmpDir should already exist (executeJob created it).
+  try {
+    fs.mkdirSync(tmpDir, { recursive: true });
+  } catch {
+    /* ignore — already exists */
+  }
+
+  let attachedBytes = 0;
+  for (const asset of assets) {
+    if (signal?.aborted) {
+      attached.push({ asset, result: { error: 'job aborted' } });
+      continue;
+    }
+    if (skipAttach?.(asset)) {
+      attached.push({
+        asset,
+        result: {
+          note:
+            'already used in the existing site — its content is unchanged, ' +
+            'so it was not re-attached; keep using the URL above',
+        },
+      });
+      continue;
+    }
+    let result = await attachAsset(asset, tmpDir, signal);
+    if (result.block) {
+      const size = blockWireBytes(result.block);
+      if (attachedBytes + size > MAX_TOTAL_ATTACH_BYTES) {
+        // Keep the request under the API's 32MB cap: reference-only.
+        result = {
+          note:
+            'not attached inline (attachment budget reached) — use the ' +
+            'URL above to place it in the site',
+        };
+        console.warn(
+          `[claude] asset ${asset.fileName} over attach budget (${attachedBytes + size} > ${MAX_TOTAL_ATTACH_BYTES}) — URL-only`,
+        );
+      } else {
+        attachedBytes += size;
+      }
+    }
+    attached.push({ asset, result });
+    if (result.error) {
+      console.warn(`[claude] asset ${asset.fileName} not attached: ${result.error}`);
+    }
+  }
+  return attached;
+}
+
+/** The "Available assets" section appended to a user message. */
+function renderAssetLines(attached: AttachedAsset[]): string {
+  if (attached.length === 0) return '';
+  let text = '\n\nAvailable assets (use these URLs directly in the HTML):';
+  for (const { asset, result } of attached) {
+    text += `\n- ${asset.fileName} (${asset.type}): ${asset.url}`;
+    if (asset.content) {
+      text += `\n  Content description: ${asset.content}`;
+    }
+    if (result.block) {
+      text += `\n  (also attached as a ${result.block.type} block titled "${asset.fileName}")`;
+      if (result.note) {
+        text += `\n  (${result.note})`;
+      }
+    } else if (result.note) {
+      text += `\n  (${result.note})`;
+    } else if (result.error) {
+      text += `\n  (note: file was NOT attached as a block — ${result.error}; use the URL above)`;
+    }
+  }
+  return text;
+}
+
 // =============================================================================
 // Main entry
 // =============================================================================
@@ -440,6 +549,65 @@ export interface GenerateWebsiteOptions {
 interface PassResult {
   text: string;
   stopReason: string | null;
+}
+
+interface CallPassParams {
+  anthropicClient: Anthropic;
+  signal?: AbortSignal;
+  messages: Anthropic.MessageParam[];
+  maxTokens: number;
+  effort: 'low' | 'medium' | 'high';
+  /** Log label for this pass. */
+  label: string;
+  /** Structured-output schema. Omitted for prose passes (the brief). */
+  schema?: object;
+}
+
+/**
+ * One Claude call over the shared cached system prefix.
+ *
+ * Every pass — generation and revision alike — goes through here so they
+ * share the same system blocks and therefore the same prompt cache.
+ */
+async function callPass(params: CallPassParams): Promise<PassResult> {
+  const { anthropicClient, signal, messages, maxTokens, effort, label, schema } =
+    params;
+  console.log(
+    `[claude] Pass ${label}: model ${config.claudeModel}, max_tokens ${maxTokens}, effort ${effort}${schema ? ', schema-constrained' : ''}`,
+  );
+  let response: Anthropic.Message;
+  try {
+    const stream = anthropicClient.messages.stream(
+      {
+        model: config.claudeModel,
+        max_tokens: maxTokens,
+        system: SYSTEM_BLOCKS,
+        thinking: { type: 'adaptive' },
+        output_config: {
+          effort,
+          ...(schema ? { format: { type: 'json_schema', schema } } : {}),
+        },
+        messages,
+      } as Anthropic.MessageStreamParams,
+      { signal },
+    );
+    response = await stream.finalMessage();
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Generation was cancelled');
+    }
+    throw error;
+  }
+  const textBlock = response.content.find((block) => block.type === 'text');
+  if (!textBlock || textBlock.type !== 'text') {
+    throw new Error('Claude returned no text response');
+  }
+  if (response.usage) {
+    console.log(
+      `[claude] Pass ${label}: out=${response.usage.output_tokens} cacheRead=${(response.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens ?? 0}`,
+    );
+  }
+  return { text: textBlock.text.trim(), stopReason: response.stop_reason };
 }
 
 /** JSON extraction + structural validation, shared by every parse site. */
@@ -521,52 +689,22 @@ export async function generateWebsite(
     }
   };
 
-  const runPass = async (
+  const runPass = (
     messages: Anthropic.MessageParam[],
     maxTokens: number,
     effort: 'low' | 'medium' | 'high',
     label: string,
     filesJson = false,
-  ): Promise<PassResult> => {
-    console.log(
-      `[claude] Pass ${label}: model ${config.claudeModel}, max_tokens ${maxTokens}, effort ${effort}${filesJson ? ', schema-constrained' : ''}`,
-    );
-    let response: Anthropic.Message;
-    try {
-      const stream = anthropicClient.messages.stream(
-        {
-          model: config.claudeModel,
-          max_tokens: maxTokens,
-          system: SYSTEM_BLOCKS,
-          thinking: { type: 'adaptive' },
-          output_config: {
-            effort,
-            ...(filesJson
-              ? { format: { type: 'json_schema', schema: FILES_JSON_SCHEMA } }
-              : {}),
-          },
-          messages,
-        } as Anthropic.MessageStreamParams,
-        { signal },
-      );
-      response = await stream.finalMessage();
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error('Generation was cancelled');
-      }
-      throw error;
-    }
-    const textBlock = response.content.find((block) => block.type === 'text');
-    if (!textBlock || textBlock.type !== 'text') {
-      throw new Error('Claude returned no text response');
-    }
-    if (response.usage) {
-      console.log(
-        `[claude] Pass ${label}: out=${response.usage.output_tokens} cacheRead=${(response.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens ?? 0}`,
-      );
-    }
-    return { text: textBlock.text.trim(), stopReason: response.stop_reason };
-  };
+  ): Promise<PassResult> =>
+    callPass({
+      anthropicClient,
+      signal,
+      messages,
+      maxTokens,
+      effort,
+      label,
+      schema: filesJson ? FILES_JSON_SCHEMA : undefined,
+    });
 
   /** Build pass with truncation retry + JSON repair retry. */
   const runFilesPass = async (
@@ -632,77 +770,14 @@ export async function generateWebsite(
       }
     }
   };
-  // Try to download + attach every asset. Errors are captured per-asset so
-  // a single bad file doesn't fail the whole generation — Claude still has
-  // the URL+description line as a fallback.
-  const attached: Array<{ asset: Asset; result: AssetAttach }> = [];
-  if (assets.length > 0) {
-    if (!tmpDir) {
-      console.warn('[claude] no tmpDir provided — skipping asset attachment');
-      for (const asset of assets) {
-        attached.push({ asset, result: { error: 'backend tmp dir unavailable' } });
-      }
-    } else {
-      // Defensive: tmpDir should already exist (executeJob created it).
-      try {
-        fs.mkdirSync(tmpDir, { recursive: true });
-      } catch {
-        /* ignore — already exists */
-      }
-      let attachedBytes = 0;
-      for (const asset of assets) {
-        if (signal?.aborted) {
-          attached.push({ asset, result: { error: 'job aborted' } });
-          continue;
-        }
-        let result = await attachAsset(asset, tmpDir, signal);
-        if (result.block) {
-          const size = blockWireBytes(result.block);
-          if (attachedBytes + size > MAX_TOTAL_ATTACH_BYTES) {
-            // Keep the request under the API's 32MB cap: reference-only.
-            result = {
-              note:
-                'not attached inline (attachment budget reached) — use the ' +
-                'URL above to place it in the site',
-            };
-            console.warn(
-              `[claude] asset ${asset.fileName} over attach budget (${attachedBytes + size} > ${MAX_TOTAL_ATTACH_BYTES}) — URL-only`,
-            );
-          } else {
-            attachedBytes += size;
-          }
-        }
-        attached.push({ asset, result });
-        if (result.error) {
-          console.warn(`[claude] asset ${asset.fileName} not attached: ${result.error}`);
-        }
-      }
-    }
-  }
+  const attached = await attachAllAssets(assets, tmpDir, signal);
 
   // Build the user-message text. URL+description lines are kept for ALL
   // assets (including successfully attached ones) as a backup reference, per
   // the project's preference.
-  let userMessage = `Create a website with the following requirements:\n\n${cleanPrompt}`;
-  if (attached.length > 0) {
-    userMessage += '\n\nAvailable assets (use these URLs directly in the HTML):';
-    for (const { asset, result } of attached) {
-      userMessage += `\n- ${asset.fileName} (${asset.type}): ${asset.url}`;
-      if (asset.content) {
-        userMessage += `\n  Content description: ${asset.content}`;
-      }
-      if (result.block) {
-        userMessage += `\n  (also attached as a ${result.block.type} block titled "${asset.fileName}")`;
-        if (result.note) {
-          userMessage += `\n  (${result.note})`;
-        }
-      } else if (result.note) {
-        userMessage += `\n  (${result.note})`;
-      } else if (result.error) {
-        userMessage += `\n  (note: file was NOT attached as a block — ${result.error}; use the URL above)`;
-      }
-    }
-  }
+  const userMessage =
+    `Create a website with the following requirements:\n\n${cleanPrompt}` +
+    renderAssetLines(attached);
 
   const messageContent: Array<TextBlockParam | AssetContentBlock> = [
     { type: 'text', text: userMessage },
@@ -839,6 +914,254 @@ export async function generateWebsite(
     );
     return build.files;
   }
+}
+
+// =============================================================================
+// Revision ("Recreate") — edit an existing site instead of designing one
+// =============================================================================
+
+/** Parse a revision response: files to write plus files to remove. */
+function parseRevisionJson(rawText: string): {
+  files: WebsiteFile[];
+  deleted: string[];
+} {
+  let jsonText = rawText.trim();
+  if (jsonText.startsWith('```')) {
+    jsonText = jsonText.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+  }
+  const parsed = JSON.parse(jsonText) as {
+    files?: unknown;
+    deleted_files?: unknown;
+  };
+  // An EMPTY array is a valid answer here — "nothing needed to change" —
+  // unlike a generation, where it means the model produced no site.
+  if (!Array.isArray(parsed.files)) {
+    throw new Error('Revision response missing files array');
+  }
+  const files: WebsiteFile[] = [];
+  for (const entry of parsed.files as WebsiteFile[]) {
+    if (!entry?.path || typeof entry.content !== 'string') {
+      throw new Error(`Invalid file entry: ${JSON.stringify(entry).slice(0, 100)}`);
+    }
+    files.push({ path: entry.path, content: entry.content });
+  }
+  const deleted = Array.isArray(parsed.deleted_files)
+    ? (parsed.deleted_files as unknown[]).filter(
+        (p): p is string => typeof p === 'string' && p.length > 0,
+      )
+    : [];
+  return { files, deleted };
+}
+
+/**
+ * Apply a revision patch to the base file set: remove, then replace/add.
+ *
+ * Deletion runs FIRST so that a path appearing in both lists is treated as
+ * a rewrite rather than a removal — an explicit new version of a file is
+ * the more specific instruction. index.html can never be deleted; without
+ * it there is no site to publish.
+ */
+export function applyRevisionPatch(
+  base: WebsiteFile[],
+  patch: WebsiteFile[],
+  deleted: string[],
+): WebsiteFile[] {
+  const toDelete = new Set(deleted.filter((p) => p !== 'index.html'));
+  if (toDelete.size !== deleted.length) {
+    console.warn('[claude] Revision tried to delete index.html — refused');
+  }
+  const kept = base.filter((f) => !toDelete.has(f.path));
+  if (toDelete.size > 0) {
+    console.log(`[claude] Revision removed: ${[...toDelete].join(', ')}`);
+  }
+  return mergeFiles(kept, patch);
+}
+
+/**
+ * Report how much of each edited file actually changed.
+ *
+ * Observability only — nothing is rejected on these numbers. A guard that
+ * threw away an over-broad rewrite would also throw away the user's
+ * requested change (already paid for), which is a worse failure than the
+ * drift it prevents. If these lines show whole-file rewrites for small
+ * requests in production, that is the evidence for adding a real
+ * structural guard.
+ */
+function logRevisionDrift(base: WebsiteFile[], patch: WebsiteFile[]): void {
+  const byPath = new Map(base.map((f) => [f.path, f.content]));
+  for (const file of patch) {
+    const before = byPath.get(file.path);
+    if (before === undefined) {
+      console.log(`[claude] Revision added ${file.path} (${file.content.length}B)`);
+      continue;
+    }
+    if (before === file.content) {
+      console.log(`[claude] Revision returned ${file.path} unchanged`);
+      continue;
+    }
+    const delta = Math.abs(file.content.length - before.length);
+    const pct = before.length > 0 ? Math.round((delta / before.length) * 100) : 100;
+    console.log(
+      `[claude] Revision rewrote ${file.path}: ${before.length}B -> ${file.content.length}B (${pct}% size delta)`,
+    );
+  }
+}
+
+export interface ReviseWebsiteOptions extends GenerateWebsiteOptions {
+  /** The existing site's raw source — what the model edits. */
+  baseFiles: WebsiteFile[];
+  /** What the user asked to change. May be empty (settings-only edit). */
+  revisionRequest: string;
+  /** Generator-screen settings that moved, as plain sentences. */
+  settingsDelta: string[];
+}
+
+/**
+ * Revise an existing website.
+ *
+ * ONE pass, deliberately. The generation pipeline's brief pass invents a
+ * design and its polish pass pushes the result to be "MORE distinctive" —
+ * both are the opposite of what an edit needs. Everything the model is not
+ * asked to change is meant to come back untouched, and the cheapest way to
+ * guarantee that for most of the site is to never ask for those files at
+ * all: unreturned files are kept verbatim from the base.
+ */
+export async function reviseWebsite(
+  prompt: string,
+  assets: Asset[],
+  opts: ReviseWebsiteOptions,
+): Promise<WebsiteFile[]> {
+  const { signal, tmpDir, onProgress, baseFiles, revisionRequest, settingsDelta } =
+    opts;
+  const anthropicClient = opts.anthropicClient ?? client;
+  const cleanPrompt = stripLegacyConstraintsBlock(prompt);
+
+  if (baseFiles.length === 0) {
+    throw new Error('Revision requires the existing site source');
+  }
+
+  try {
+    await onProgress?.('Applying your changes...');
+  } catch (err) {
+    console.warn(`[claude] progress update failed: ${(err as Error).message}`);
+  }
+
+  // An asset already placed in the existing site has been art-directed
+  // once; re-sending its bytes would spend the whole attachment budget to
+  // tell the model something the HTML in front of it already says. New
+  // assets — the ones a revision is usually about — still get attached.
+  const existingSource = baseFiles.map((f) => f.content).join('\n');
+  const attached = await attachAllAssets(
+    assets,
+    tmpDir,
+    signal,
+    (asset) => !!asset.url && existingSource.includes(asset.url),
+  );
+
+  const userText =
+    renderExistingFiles(baseFiles) +
+    '\n\n' +
+    buildRevisionUserText({
+      revisionRequest,
+      settingsDelta,
+      requirements: cleanPrompt,
+    }) +
+    renderAssetLines(attached);
+
+  const messageContent: Array<TextBlockParam | AssetContentBlock> = [
+    { type: 'text', text: userText },
+    { type: 'text', text: REVISION_INSTRUCTION },
+  ];
+  for (const { result } of attached) {
+    if (result.block) {
+      messageContent.push(result.block);
+    }
+  }
+
+  const messages: Anthropic.MessageParam[] = [
+    { role: 'user', content: messageContent },
+  ];
+
+  console.log(
+    `[claude] Revising: ${baseFiles.length} base files, ${attached.filter((a) => a.result.block).length}/${assets.length} assets attached, request "${revisionRequest.slice(0, 80)}"`,
+  );
+
+  let attemptMessages = messages;
+  let result = await callPass({
+    anthropicClient,
+    signal,
+    messages: attemptMessages,
+    maxTokens: config.claudeRevisionMaxTokens,
+    effort: 'high',
+    label: 'revise',
+    schema: REVISION_JSON_SCHEMA,
+  });
+
+  if (result.stopReason === 'max_tokens') {
+    if (signal?.aborted) throw new Error('Generation was cancelled');
+    console.warn('[claude] Revision truncated — retrying with fewer files');
+    attemptMessages = [
+      ...attemptMessages,
+      { role: 'assistant', content: result.text },
+      { role: 'user', content: REVISION_TRUNCATION_RETRY_INSTRUCTION },
+    ];
+    result = await callPass({
+      anthropicClient,
+      signal,
+      messages: attemptMessages,
+      maxTokens: config.claudeRevisionMaxTokens,
+      effort: 'high',
+      label: 'revise-truncation-retry',
+      schema: REVISION_JSON_SCHEMA,
+    });
+    if (result.stopReason === 'max_tokens') {
+      throw new Error(
+        'That change was too large to apply in one edit — try asking for a smaller change',
+      );
+    }
+  }
+
+  let patch: { files: WebsiteFile[]; deleted: string[] };
+  try {
+    patch = parseRevisionJson(result.text);
+  } catch (parseError) {
+    if (signal?.aborted) throw new Error('Generation was cancelled');
+    console.warn(
+      `[claude] Revision JSON parse failed (${result.text.length} chars): ${(parseError as Error).message}`,
+    );
+    const repair = await callPass({
+      anthropicClient,
+      signal,
+      messages: [
+        ...attemptMessages,
+        { role: 'assistant', content: result.text },
+        {
+          role: 'user',
+          content:
+            'Your previous response was not valid JSON. Return ONLY a valid JSON object of the form { "files": [ { "path": "...", "content": "..." } ], "deleted_files": [] }, containing the same edit. No markdown, no explanation.',
+        },
+      ],
+      maxTokens: config.claudeRevisionMaxTokens,
+      effort: 'high',
+      label: 'revise-json-repair',
+      schema: REVISION_JSON_SCHEMA,
+    });
+    patch = parseRevisionJson(repair.text);
+  }
+
+  // "Nothing needed to change" is a legitimate outcome — the site stands
+  // as it is rather than being rebuilt to prove work happened.
+  if (patch.files.length === 0 && patch.deleted.length === 0) {
+    console.log('[claude] Revision returned no changes — keeping the site as-is');
+    return baseFiles;
+  }
+
+  logRevisionDrift(baseFiles, patch.files);
+  const merged = applyRevisionPatch(baseFiles, patch.files, patch.deleted);
+  console.log(
+    `[claude] Revised ${patch.files.length} file(s), removed ${patch.deleted.length}; site now ${merged.length} files`,
+  );
+  return merged;
 }
 
 export async function askAi(

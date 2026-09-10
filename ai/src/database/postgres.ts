@@ -111,6 +111,10 @@ export interface AiGeneration {
   listing_generated_at: string | null;
   delisted_by_admin: boolean;
   listing_group: string | null;
+  // Revision ("Recreate") — migration 010. Non-null means this job edits
+  // an existing site instead of designing a new one.
+  base_generation_id: string | null;
+  revision_request: string | null;
 }
 
 // Create a new generation record (stores userId hash, not plain-text email)
@@ -131,11 +135,15 @@ export async function createGeneration(
   listingName: string | null = null,
   // Per-WEBSITE key (the client's tag id). Every regeneration is its own
   // row; without this the directory would list one entry per version.
-  listingGroup: string | null = null
+  listingGroup: string | null = null,
+  // Revision: the generation this job EDITS, already resolved and
+  // ownership-checked by the route, plus what the user asked to change.
+  baseGenerationId: string | null = null,
+  revisionRequest: string | null = null
 ): Promise<string> {
   const result = await query(
-    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message, enable_tracking, pipeline_version, listed, listing_name, listing_group)
-     VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation', $6, $7, $8, $9, $10)
+    `INSERT INTO ai_generations (id, user_id, prompt, assets, credits_charged, status, status_message, enable_tracking, pipeline_version, listed, listing_name, listing_group, base_generation_id, revision_request)
+     VALUES ($1, $2, $3, $4, $5, 'pending', 'Queued for generation', $6, $7, $8, $9, $10, $11, $12)
      RETURNING id`,
     [
       id,
@@ -148,6 +156,8 @@ export async function createGeneration(
       listed,
       listingName,
       listingGroup,
+      baseGenerationId,
+      revisionRequest,
     ]
   );
   return result.rows[0].id;
@@ -276,6 +286,138 @@ export async function countFreeCompletedGenerations(
   return parseInt(result.rows[0].count, 10);
 }
 
+// ============================================
+// Revision base (migration 010)
+// ============================================
+//
+// The model's RAW output files, kept so "Recreate" can edit an existing
+// site instead of generating a new one. They live in their own table
+// because the reads above are `SELECT *` and the client polls status
+// every ~2s — see migrations/010_generation_files.sql.
+
+export interface GenerationFile {
+  path: string;
+  content: string;
+}
+
+/** The prior generation a revision builds on. */
+export interface RevisionBase {
+  id: string;
+  /** Enriched prompt the base was generated from — diffed against the new
+   *  one to tell the model which SETTINGS the user changed. */
+  prompt: string;
+  assets: any[];
+  files: GenerationFile[];
+  /** Where the base site is published. Lets a revision that turns out to
+   *  change nothing answer with the site the user already has. */
+  resultCid: string | null;
+  gatewayUrl: string | null;
+  /** Publish-time flag: the same source published with tracking flipped
+   *  is a different site, so it is NOT an unchanged revision. */
+  enableTracking: boolean;
+}
+
+/**
+ * Store a completed generation's raw files. Upsert rather than insert:
+ * migrations re-run and jobs can be retried, and a second write for the
+ * same generation is a correction, not a conflict.
+ */
+export async function saveGenerationFiles(
+  generationId: string,
+  files: GenerationFile[]
+): Promise<void> {
+  await query(
+    `INSERT INTO ai_generation_files (generation_id, files)
+     VALUES ($1, $2)
+     ON CONFLICT (generation_id)
+     DO UPDATE SET files = EXCLUDED.files, created_at = CURRENT_TIMESTAMP`,
+    [generationId, JSON.stringify(files)]
+  );
+}
+
+/**
+ * Load a revision base by its generation id.
+ *
+ * Used by the worker, which reads `base_generation_id` — a value the
+ * ROUTE resolved and ownership-checked before the job was created. No
+ * user scoping here on purpose: re-deriving it from client input is what
+ * would let a crafted request reach another account's source.
+ */
+export async function getRevisionBaseById(
+  generationId: string
+): Promise<RevisionBase | null> {
+  if (!isGenerationId(generationId)) return null;
+  const result = await query<RevisionBaseRow>(
+    `SELECT g.id, g.prompt, g.assets, g.result_cid, g.gateway_url,
+            g.enable_tracking, f.files
+       FROM ai_generations g
+       LEFT JOIN ai_generation_files f ON f.generation_id = g.id
+      WHERE g.id = $1`,
+    [generationId]
+  );
+  return toRevisionBase(result.rows[0]);
+}
+
+interface RevisionBaseRow {
+  id: string;
+  prompt: string;
+  assets: any[];
+  result_cid: string | null;
+  gateway_url: string | null;
+  enable_tracking: boolean | null;
+  files: GenerationFile[] | null;
+}
+
+function toRevisionBase(row: RevisionBaseRow | undefined): RevisionBase | null {
+  if (!row) return null;
+  return {
+    id: row.id,
+    prompt: row.prompt,
+    assets: row.assets || [],
+    // A row with no files is still a real base — the caller decides
+    // whether it can work without the source.
+    files: Array.isArray(row.files) ? row.files : [],
+    resultCid: row.result_cid,
+    gatewayUrl: row.gateway_url,
+    enableTracking: row.enable_tracking === true,
+  };
+}
+
+/**
+ * Resolve a client-supplied `base_cid` to the caller's own prior
+ * generation and its stored source.
+ *
+ * Scoped to the caller on BOTH the row and the files: a CID is derived
+ * from content, so two users who generate byte-identical sites share one
+ * — matching on the CID alone would hand one user another's source.
+ *
+ * `ORDER BY completed_at DESC LIMIT 1` because a CID legitimately repeats
+ * within one account: a no-op revision republishes identical bytes and so
+ * lands on the same CID as the generation it came from.
+ *
+ * Returns null when the CID is unknown to this user, or when the row
+ * predates migration 010 and has no stored source (the caller then falls
+ * back to the published copy, or to a fresh generation).
+ */
+export async function findRevisionBase(
+  resultCid: string,
+  userId: string
+): Promise<RevisionBase | null> {
+  const result = await query<RevisionBaseRow>(
+    `SELECT g.id, g.prompt, g.assets, g.result_cid, g.gateway_url,
+            g.enable_tracking, f.files
+       FROM ai_generations g
+       LEFT JOIN ai_generation_files f ON f.generation_id = g.id
+      WHERE g.result_cid = $1
+        AND (g.user_id = $2 OR g.user_email = $2)
+        AND g.status = 'completed'
+      ORDER BY g.completed_at DESC NULLS LAST
+      LIMIT 1`,
+    [resultCid, userId]
+  );
+  return toRevisionBase(result.rows[0]);
+}
+
 export default {
   createPostgresPool,
   getPool,
@@ -290,4 +432,7 @@ export default {
   getGenerationsByUser,
   countRecentJobsByUser,
   countFreeCompletedGenerations,
+  saveGenerationFiles,
+  findRevisionBase,
+  getRevisionBaseById,
 };

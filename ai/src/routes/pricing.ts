@@ -21,6 +21,13 @@ pricingRoutes.get('/pricing', (c) => {
     // Social post price; null when the feature is disabled (no Gemini key)
     // so the client can hide the button instead of offering a 503.
     socialPostPriceFula: config.geminiApiKey ? config.socialPostPriceFula : null,
+    // Capability probe for "Recreate" — whether this deployment can EDIT
+    // an existing site rather than design a new one. The client must know
+    // BEFORE it submits: the generate request schema is non-strict, so an
+    // older server drops `base_cid` without complaint and would charge
+    // for a surprise redesign. An older server also omits this field, and
+    // absent correctly reads as unsupported.
+    supportsRevision: true,
   });
 });
 

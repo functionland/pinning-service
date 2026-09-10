@@ -44,6 +44,10 @@ const configSchema = z.object({
   claudeBriefMaxTokens: z.coerce.number().int().positive().default(16000),
   claudeBuildMaxTokens: z.coerce.number().int().positive().default(96000),
   claudePolishMaxTokens: z.coerce.number().int().positive().default(64000),
+  // A revision returns only the files it changed, so it needs far less
+  // room than a build — but a single edit can still legitimately rewrite
+  // a large index.html, and thinking counts against this too.
+  claudeRevisionMaxTokens: z.coerce.number().int().positive().default(64000),
 
   // Generation
   generationCostFula: z.coerce.number().int().nonnegative().default(1000),
@@ -131,6 +135,7 @@ function loadConfig(): Config {
     claudeBriefMaxTokens: process.env.CLAUDE_BRIEF_MAX_TOKENS,
     claudeBuildMaxTokens: process.env.CLAUDE_BUILD_MAX_TOKENS,
     claudePolishMaxTokens: process.env.CLAUDE_POLISH_MAX_TOKENS,
+    claudeRevisionMaxTokens: process.env.CLAUDE_REVISION_MAX_TOKENS,
     generationCostFula: process.env.GENERATION_COST_FULA,
     generationCostFulaWithTracking: process.env.GENERATION_COST_FULA_WITH_TRACKING,
     freeGenerationsPerUser: process.env.FREE_GENERATIONS_PER_USER,
@@ -194,6 +199,7 @@ export function logConfig(): void {
   console.log(`  claudeBriefMaxTokens: ${config.claudeBriefMaxTokens}`);
   console.log(`  claudeBuildMaxTokens: ${config.claudeBuildMaxTokens}`);
   console.log(`  claudePolishMaxTokens: ${config.claudePolishMaxTokens}`);
+  console.log(`  claudeRevisionMaxTokens: ${config.claudeRevisionMaxTokens}`);
   console.log(`  generationCostFula: ${config.generationCostFula}`);
   console.log(`  generationCostFulaWithTracking: ${config.generationCostFulaWithTracking}`);
   console.log(`  freeGenerationsPerUser: ${config.freeGenerationsPerUser}`);

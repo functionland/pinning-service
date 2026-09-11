@@ -320,3 +320,20 @@ systemctl status fula-ai-service
 journalctl -u fula-ai-service -n 30 --no-pager | grep "Migration applied"
 # Public check (the app reads this to decide which features to offer):
 curl -s https://ai.cloud.fx.land/api/v1/pricing
+
+## nginx DNS hardening (run once per server; safe to re-run)
+# WHY: nginx resolves a literal hostname in `proxy_pass` at CONFIG-PARSE time.
+# If that name does not resolve during a restart, `nginx -t` fails and nginx
+# refuses to start -- taking EVERY vhost on the machine down, not just the one
+# with the bad upstream. On 2026-09-11 an unattended glibc upgrade restarted
+# nginx while a dynamic-DNS upstream was briefly unresolvable, and
+# cloud.fx.land + ai.cloud.fx.land + s3.cloud.fx.land were down ~12h.
+# The fix moves such hosts behind a variable + resolver so they resolve per
+# REQUEST; a DNS failure then degrades to a 502 on that one path.
+cd ~/pinning-service && git pull
+sudo bash scripts/nginx_hardening.sh --dry-run   # report only, changes nothing
+sudo bash scripts/nginx_hardening.sh             # detect + fix
+# It is idempotent (re-running reports "already hardened" and changes nothing),
+# backs every touched vhost up to /var/backups/nginx-hardening/<timestamp>/,
+# uses reload (never restart), and auto-rolls-back if nginx -t, the reload, or
+# the post-change endpoint checks fail. install.sh also runs it automatically.

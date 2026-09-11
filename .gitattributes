@@ -4,3 +4,7 @@
 # Keep vendored third-party prompt assets stable across Windows and Ubuntu.
 ai/skills/** text eol=lf
 ai/third_party/emilkowalski-skills/** text eol=lf
+
+# Shell scripts MUST stay LF. A CRLF shell script fails on Linux with the
+# opaque $'\r': command not found.
+*.sh text eol=lf

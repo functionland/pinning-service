@@ -586,7 +586,30 @@ start_services() {
     fi
 
     if [ -n "$DOMAIN" ]; then
-        systemctl restart nginx
+        # NEVER `systemctl restart nginx` here. This machine runs many
+        # services behind ONE nginx, so a restart drops :80/:443 for all of
+        # them — and if any UNRELATED vhost fails its config test in that
+        # instant, nginx stays down and takes the whole box with it. That is
+        # exactly how cloud.fx.land, ai.cloud.fx.land and s3.cloud.fx.land
+        # were lost for ~12h on 2026-09-11 (a DNS blip on one vhost's
+        # upstream during an unattended-upgrade restart).
+        #
+        # `reload` keeps the listening sockets and applies nothing if the
+        # config is bad, so the worst case is "nginx keeps serving the old
+        # config" rather than "nothing is served at all".
+        if nginx -t >/dev/null 2>&1; then
+            if systemctl is-active --quiet nginx; then
+                systemctl reload nginx
+                print_info "nginx reloaded"
+            else
+                systemctl start nginx
+                print_info "nginx started"
+            fi
+        else
+            print_warn "nginx config test FAILED — leaving nginx untouched."
+            print_warn "The AI service itself is deployed; fix nginx separately."
+            nginx -t 2>&1 | tail -5
+        fi
     fi
 
     # Verify service is running

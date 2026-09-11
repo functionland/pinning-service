@@ -1770,7 +1770,43 @@ setup_nginx_ssl() {
         print_warning "No email provided, skipping SSL setup"
         print_info "You can manually run: certbot --nginx -d $domain"
     fi
-    
+
+    # Run LAST, so it hardens whatever the final config looks like — certbot
+    # rewrites the vhost, so doing this earlier could be undone.
+    harden_nginx_dns
+
+    return 0
+}
+
+# Make nginx immune to a DNS failure taking the whole machine down.
+#
+# nginx resolves a literal hostname in `proxy_pass` at CONFIG-PARSE time, so
+# if that name does not resolve during a restart, `nginx -t` fails and the
+# entire server refuses to start — every vhost on the box, not just the one
+# with the bad upstream. This delegates to scripts/nginx_hardening.sh, which
+# detects such upstreams, moves them behind a variable + resolver (resolved
+# per request instead), verifies, and rolls itself back on any problem.
+#
+# Idempotent and safe to run on every install/update: with nothing to fix it
+# exits 0 having changed nothing.
+harden_nginx_dns() {
+    local script_dir hardening
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    hardening="$script_dir/scripts/nginx_hardening.sh"
+
+    if [ ! -f "$hardening" ]; then
+        print_warning "scripts/nginx_hardening.sh not found — skipping nginx DNS hardening"
+        return 0
+    fi
+
+    print_info "Hardening nginx against DNS-failure startup wedges..."
+    # Deliberately never fatal: the services are already installed and the
+    # hardening script restores its own backups if anything goes wrong.
+    if bash "$hardening"; then
+        print_success "nginx DNS hardening complete"
+    else
+        print_warning "nginx DNS hardening reported a problem (see output above)"
+    fi
     return 0
 }
 

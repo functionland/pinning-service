@@ -300,3 +300,23 @@ cd /home/root/pinning-service/ipfs-server
 npm install --production --ignore-scripts=false
 sudo systemctl start fula-upload-server
 sudo systemctl status fula-upload-server 
+
+
+## update ai service (fula-ai-service)
+# install.sh does BOTH the build and the systemd restart, but it copies from its
+# OWN directory and never fetches -- so `git pull` first is required or you will
+# rebuild and redeploy the same old code while it prints "Update Complete!".
+cd ~/pinning-service/ai && git pull
+sudo bash ./install.sh
+# It runs in UPDATE mode (detected via /opt/fula-ai-service/.env) and is INTERACTIVE:
+#   "Keep existing configuration? [Y/n]" -> answer Y
+# It then backs up .env and dist/, copies src/migrations/skills, npm install,
+# npm run build, rewrites the systemd unit and restarts the service. On a build
+# failure it rolls dist/ and .env back automatically.
+# Note: it runs under `set -e`, so a non-TTY `ssh host 'bash install.sh'` aborts at
+# the first prompt without deploying -- use a TTY or feed the answer on stdin.
+systemctl status fula-ai-service
+# Migrations run on service boot; confirm the newest one applied:
+journalctl -u fula-ai-service -n 30 --no-pager | grep "Migration applied"
+# Public check (the app reads this to decide which features to offer):
+curl -s https://ai.cloud.fx.land/api/v1/pricing

@@ -299,7 +299,9 @@ CLAUDE_MODEL=${CLAUDE_MODEL:-claude-opus-5}
 CLAUDE_DESIGN_SKILL_ENABLED=${CLAUDE_DESIGN_SKILL_ENABLED:-true}
 # Multi-pass website generation (brief -> build -> polish); false = single-pass.
 CLAUDE_MULTIPASS_ENABLED=${CLAUDE_MULTIPASS_ENABLED:-true}
-CLAUDE_BRIEF_MAX_TOKENS=${CLAUDE_BRIEF_MAX_TOKENS:-16000}
+# 32000, not 16000: thinking counts against this and at effort=high it ate the
+# entire 16000 in production (2026-09-12), truncating the art-direction brief.
+CLAUDE_BRIEF_MAX_TOKENS=${CLAUDE_BRIEF_MAX_TOKENS:-32000}
 CLAUDE_BUILD_MAX_TOKENS=${CLAUDE_BUILD_MAX_TOKENS:-96000}
 CLAUDE_POLISH_MAX_TOKENS=${CLAUDE_POLISH_MAX_TOKENS:-64000}
 

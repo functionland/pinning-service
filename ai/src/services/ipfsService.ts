@@ -2,11 +2,21 @@
  * IPFS Service
  *
  * Publishes generated website files via the S3 gateway (fula-api) for storage
- * and cluster pinning. HTML files are rewritten so relative asset references
- * point to absolute gateway CID URLs, eliminating the need for directory CIDs.
+ * and cluster pinning. Each file gets its own CID; HTML is rewritten so every
+ * asset reference is DOCUMENT-RELATIVE (`../<cid>`), which makes a published
+ * site gateway-agnostic — it renders wherever it is served from, and follows a
+ * gateway the app has not heard of yet. See utils/relativeAssets.ts.
  */
 
 import { config } from '../config/index.js';
+import {
+  absolutizeSocialMeta,
+  buildAssetFallbackScript,
+  injectIntoHead,
+  relativeAssetRef,
+  relativePageRef,
+  relativizeGatewayUrls,
+} from '../utils/relativeAssets.js';
 
 export interface PublishResult {
   cid: string;
@@ -16,6 +26,14 @@ export interface PublishResult {
 const MAX_RETRIES = 1;
 const UPLOAD_CONCURRENCY = 5;
 const OVERALL_TIMEOUT_MS = 120_000;
+
+/**
+ * First stop when a relative asset reference cannot resolve. Filebase is the
+ * app's default gateway and serves bare CIDs with correct content types; the
+ * service's own gateway follows it in the chain, so a site is never dependent
+ * on a single third party.
+ */
+const FALLBACK_GATEWAY = 'https://ipfs.filebase.io/ipfs';
 
 // Content-type map for common website file extensions
 const CONTENT_TYPES: Record<string, string> = {
@@ -283,7 +301,10 @@ function buildAnalyticsScript(endpoint: string): string {
     if (parts.length >= 3 && parts[1] === 'ipfs') {
       cid = parts[0];
     } else {
-      var m = location.pathname.match(/^\\/ipfs\\/([^\\/]+)/);
+      // Both path shapes: /ipfs/<cid> (filebase and most gateways) and
+      // /gateway/<cid> (ours). Missing the second meant a visitor served by
+      // our own gateway was silently never counted.
+      var m = location.pathname.match(/^\\/(?:ipfs|gateway)\\/([^\\/]+)/);
       if (m) cid = m[1];
     }
     if (!/^(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[ykz][a-z0-9]{40,80})$/.test(cid)) return;
@@ -411,7 +432,7 @@ export async function publishWebsite(
       const uploadTasks = uploadable.map((file) => () =>
         uploadFileToS3(file, jobId, userToken, controller.signal).then((result) => {
           uploadedKeys.push(result.s3Key);
-          cidMap[file.path] = `${gatewayBase}/${result.cid}`;
+          cidMap[file.path] = relativeAssetRef(result.cid);
           return result;
         })
       );
@@ -427,7 +448,14 @@ export async function publishWebsite(
     // Step 1.5: Rewrite + upload each subpage (its asset refs now resolve),
     // then add its CID to the map so index→subpage links resolve too.
     for (const page of subPagesInlined) {
-      const rewrittenPage = rewriteHtml(page.content, cidMap);
+      // Same treatment as index.html below, in the same order — a subpage is
+      // just as published and just as immutable.
+      let rewrittenPage = relativizeGatewayUrls(rewriteHtml(page.content, cidMap), [gatewayBase, FALLBACK_GATEWAY]);
+      rewrittenPage = absolutizeSocialMeta(rewrittenPage, gatewayBase);
+      rewrittenPage = injectIntoHead(
+        rewrittenPage,
+        buildAssetFallbackScript([FALLBACK_GATEWAY, gatewayBase]),
+      );
       const uploaded = await uploadFileToS3(
         { path: page.path, content: rewrittenPage },
         jobId,
@@ -435,12 +463,33 @@ export async function publishWebsite(
         controller.signal
       );
       uploadedKeys.push(uploaded.s3Key);
-      cidMap[page.path] = `${gatewayBase}/${uploaded.cid}`;
+      // A PAGE ref, not an asset ref — the trailing slash keeps the subpage's
+      // own relative references resolving against its gateway.
+      cidMap[page.path] = relativePageRef(uploaded.cid);
       console.log(`[ipfs] Subpage ${page.path} → ${uploaded.cid}`);
     }
 
-    // Step 2: Rewrite index.html with absolute gateway URLs
+    // Step 2: Rewrite index.html so every asset reference is relative
     let rewrittenHtml = rewriteHtml(indexHtmlInlined, cidMap);
+
+    // Step 2.1: Catch any absolute gateway URL the model emitted anyway.
+    //
+    // ORDER IS LOAD-BEARING — this MUST run before any script injection
+    // below. The fallback script's whole value is that its URLs are ABSOLUTE;
+    // relativising after injection would rewrite the chain inside the script
+    // and silently disable the safety net. Pinned by a test.
+    rewrittenHtml = relativizeGatewayUrls(rewrittenHtml, [gatewayBase, FALLBACK_GATEWAY]);
+
+    // Step 2.2: Social previews go back to absolute — crawlers do not run JS
+    // and do not resolve a relative og:image.
+    rewrittenHtml = absolutizeSocialMeta(rewrittenHtml, gatewayBase);
+
+    // Step 2.3: Recover images when the relative form cannot resolve (page
+    // opened without its trailing slash, or a subdomain-style gateway).
+    rewrittenHtml = injectIntoHead(
+      rewrittenHtml,
+      buildAssetFallbackScript([FALLBACK_GATEWAY, gatewayBase]),
+    );
 
     // Step 2.5 (optional): Inject the fxfiles-analytics ping script. The
     // user opted in via `enableTracking` at generate time; the script

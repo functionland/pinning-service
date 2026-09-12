@@ -48,7 +48,8 @@ import {
   renderExistingFiles,
 } from '../prompts/revisionPrompts.js';
 import { fetchToFile } from '../utils/fetchFile.js';
-import { assetFetchCandidates } from '../utils/ipfsUrl.js';
+import { assetFetchCandidates, cidFromGatewayUrl } from '../utils/ipfsUrl.js';
+import { relativeAssetRef } from '../utils/relativeAssets.js';
 
 export interface WebsiteFile {
   path: string;
@@ -517,12 +518,33 @@ async function attachAllAssets(
   return attached;
 }
 
-/** The "Available assets" section appended to a user message. */
+/**
+ * The "Available assets" section appended to a user message.
+ *
+ * The reference handed to the model is DOCUMENT-RELATIVE (`../<cid>`), not the
+ * absolute gateway URL the client sent. A published site is immutable, so an
+ * absolute URL freezes its gateway forever — when dweb.link was retired, every
+ * site pointing at it lost its images and no setting could repair them. A
+ * relative reference resolves against whichever gateway serves the page.
+ *
+ * `asset.url` stays absolute everywhere else on purpose: this service still has
+ * to FETCH it to show the model the picture. Only the reference written into
+ * the page changes. If a URL carries no recognisable CID (an unusual custom
+ * gateway), the absolute form is used — a working absolute link beats a
+ * relative one that resolves to nothing.
+ *
+ * A publish-time pass rewrites any absolute gateway URL that slips through, so
+ * the outcome does not depend on the model following this.
+ */
 function renderAssetLines(attached: AttachedAsset[]): string {
   if (attached.length === 0) return '';
-  let text = '\n\nAvailable assets (use these URLs directly in the HTML):';
+  let text =
+    '\n\nAvailable assets (use these paths EXACTLY as written — they are ' +
+    'relative on purpose, so the site works on any IPFS gateway):';
   for (const { asset, result } of attached) {
-    text += `\n- ${asset.fileName} (${asset.type}): ${asset.url}`;
+    const cid = cidFromGatewayUrl(asset.url);
+    const ref = cid ? relativeAssetRef(cid) : asset.url;
+    text += `\n- ${asset.fileName} (${asset.type}): ${ref}`;
     if (asset.content) {
       text += `\n  Content description: ${asset.content}`;
     }
@@ -1078,7 +1100,19 @@ export async function reviseWebsite(
     assets,
     tmpDir,
     signal,
-    (asset) => !!asset.url && existingSource.includes(asset.url),
+    // Match on the CID, NOT the whole URL. `asset.url` is absolute, while a
+    // site's source now references assets relatively (`../<cid>`), so a URL
+    // comparison would never match and every asset would be re-fetched and
+    // re-attached on every revision — burning the attachment budget to tell
+    // the model something the HTML in front of it already says. The CID string
+    // appears in BOTH forms, so one comparison covers sites from either era.
+    (asset) => {
+      if (!asset.url) return false;
+      const cid = cidFromGatewayUrl(asset.url);
+      return cid
+        ? existingSource.includes(cid)
+        : existingSource.includes(asset.url);
+    },
   );
 
   const userText =

@@ -1,3 +1,5 @@
+import os from 'os';
+
 import type Anthropic from '@anthropic-ai/sdk';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -346,6 +348,73 @@ describe('reviseWebsite', () => {
     expect(text).toContain('BYTE-IDENTICAL');
     // The original brief must be marked as context, not as a work order.
     expect(text).toContain('CONTEXT ONLY');
+  });
+
+  /**
+   * Assets are matched against the existing source by CID, not by URL.
+   *
+   * `asset.url` is absolute (the service must still fetch it to show the model
+   * the picture) while a published site now references assets relatively
+   * (`../<cid>`). A URL comparison would therefore never match, and every asset
+   * would be re-downloaded and re-attached on every single revision — spending
+   * the whole attachment budget to tell the model something the HTML in front
+   * of it already says. The CID appears in BOTH forms, so one comparison
+   * covers sites from either era.
+   */
+  describe('asset re-attachment', () => {
+    const CID = 'bafybeicqqub6psgupgkv7vq7gvtvl75qsugbjckmxrdttto4ol5jjxufxy';
+    const ASSET = {
+      fileName: 'hero.jpg',
+      type: 'image',
+      url: `https://ipfs.filebase.io/ipfs/${CID}`,
+    };
+    const SKIPPED = 'already used in the existing site';
+
+    const reviseWith = (
+      client: Anthropic,
+      baseFiles: Array<{ path: string; content: string }>,
+    ) =>
+      reviseWebsite(PROMPT, [ASSET], {
+        anthropicClient: client,
+        baseFiles,
+        revisionRequest: 'Tweak the headline.',
+        settingsDelta: [],
+        tmpDir: os.tmpdir(),
+      });
+
+    it('does NOT re-attach an asset the site already uses RELATIVELY', async () => {
+      const { client, stream } = fakeClient([message(JSON.stringify({ files: [] }))]);
+      await reviseWith(client, [
+        { path: 'index.html', content: `<img src="../${CID}">` },
+      ]);
+      expect(userText(stream)).toContain(SKIPPED);
+    });
+
+    it('does NOT re-attach one a LEGACY site uses absolutely', async () => {
+      const { client, stream } = fakeClient([message(JSON.stringify({ files: [] }))]);
+      await reviseWith(client, [
+        { path: 'index.html', content: `<img src="https://gw.old/ipfs/${CID}">` },
+      ]);
+      expect(userText(stream)).toContain(SKIPPED);
+    });
+
+    it('DOES attach an asset the site has never used', async () => {
+      const { client, stream } = fakeClient([message(JSON.stringify({ files: [] }))]);
+      await reviseWith(client, [
+        { path: 'index.html', content: '<h1>no images here</h1>' },
+      ]);
+      expect(userText(stream)).not.toContain(SKIPPED);
+    });
+
+    it('hands the model the RELATIVE reference, never the gateway URL', async () => {
+      const { client, stream } = fakeClient([message(JSON.stringify({ files: [] }))]);
+      await reviseWith(client, [
+        { path: 'index.html', content: `<img src="../${CID}">` },
+      ]);
+      const text = userText(stream);
+      expect(text).toContain(`../${CID}`);
+      expect(text).not.toContain(ASSET.url);
+    });
   });
 
   it('keeps the site exactly as it was when the model returns no changes', async () => {

@@ -41,7 +41,14 @@ const configSchema = z.object({
   // Thinking tokens count against max_tokens — at effort=high the model can
   // spend thousands thinking before writing the brief, so this needs real
   // headroom or the pass yields no text and gets skipped.
-  claudeBriefMaxTokens: z.coerce.number().int().positive().default(16000),
+  //
+  // 16000 was NOT enough: measured in production 2026-09-12, a real job logged
+  // `Pass brief: out=16000` followed by `Brief truncated at the token budget`,
+  // i.e. adaptive thinking consumed the entire budget and the art direction was
+  // cut off mid-way. The build pass then works from a partial brief — the site
+  // still ships, so this degrades quality silently rather than failing. 32000
+  // is still a third of the build pass's 96000.
+  claudeBriefMaxTokens: z.coerce.number().int().positive().default(32000),
   claudeBuildMaxTokens: z.coerce.number().int().positive().default(96000),
   claudePolishMaxTokens: z.coerce.number().int().positive().default(64000),
   // A revision returns only the files it changed, so it needs far less

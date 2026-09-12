@@ -26,10 +26,12 @@ function mockGateway() {
         const key = u.replace('http://s3.test/ai-websites/', '');
         const body = init.body as Uint8Array;
         uploads.set(key, new TextDecoder().decode(body));
-        return new Response('', {
-          status: 200,
-          headers: { ETag: `"baf${key.replace(/[^a-z0-9]/gi, '').toLowerCase()}"` },
-        });
+        // Padded to a realistic CIDv1-base32 length. Short stand-ins used to
+        // pass here while failing the CID patterns the publish path actually
+        // applies — the fixture has to look like the real thing to test it.
+        const stem = `baf${key.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
+        const cid = stem.padEnd(59, 'q').slice(0, 59);
+        return new Response('', { status: 200, headers: { ETag: `"${cid}"` } });
       }
       if (init?.method === 'DELETE') {
         return new Response('', { status: 204 });
@@ -76,16 +78,20 @@ describe('publishWebsite HTML rewriting', () => {
     expect(index).toContain('console.log');
     expect(index).not.toContain('src="./app.js"');
     expect(index).not.toContain('href="./styles.css"');
-    // Subpage link still rewritten to the uploaded subpage's URL.
+    // Subpage link still rewritten to the uploaded subpage — now RELATIVE, so
+    // the page resolves it against whichever gateway is serving it.
     expect(index).not.toContain('./about.html');
-    expect(index).toContain('https://gw.test/baf');
+    expect(index).toContain('"../baf');
+    expect(index).not.toContain('https://gw.test/baf');
 
-    // Subpage: stylesheet inlined there too; binary asset rewritten to URL.
+    // Subpage: stylesheet inlined there too; binary asset rewritten to a
+    // relative reference.
     const about = uploads.get('website-job1/about.html')!;
     expect(about).toContain('<style>');
     expect(about).not.toContain('./styles.css');
     expect(about).not.toContain('./hero.png');
-    expect(about).toContain('https://gw.test/baf');
+    expect(about).toContain('"../baf');
+    expect(about).not.toContain('https://gw.test/baf');
 
     expect(result.cid).toMatch(/^baf/);
     expect(result.gatewayUrl).toContain('https://gw.test/');
@@ -160,5 +166,142 @@ describe('publishWebsite HTML rewriting', () => {
     await publishWebsite(files, 'job3', 'token', { enableTracking: true });
     expect(uploads.get('website-job3/index.html')).toContain('/api/v1/track');
     expect(uploads.get('website-job3/about.html')).not.toContain('/api/v1/track');
+  });
+});
+
+/**
+ * A published site is immutable, so a gateway hostname baked into it is frozen
+ * for that site's life — which is how dweb.link's retirement broke the images
+ * of every site pointing at it. These run the WHOLE publish transform and
+ * assert the shipped bytes name no gateway.
+ */
+describe('publishWebsite — gateway-agnostic output', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const CID = 'bafybeicqqub6psgupgkv7vq7gvtvl75qsugbjckmxrdttto4ol5jjxufxy';
+
+  it('ships no gateway hostname in any asset position', async () => {
+    const uploads = mockGateway();
+    await publishWebsite(
+      [
+        {
+          path: 'index.html',
+          content:
+            '<html><head></head><body>' +
+            `<img src="https://gw.test/${CID}">` +
+            `<img src="https://ipfs.filebase.io/ipfs/${CID}">` +
+            '<img src="./hero.png">' +
+            '</body></html>',
+        },
+        { path: 'hero.png', content: 'PNG' },
+      ],
+      'rel1',
+      'token',
+      {},
+    );
+
+    const index = uploads.get('website-rel1/index.html')!;
+    // Model-authored absolutes are relativised too — the deterministic pass is
+    // what makes this independent of the model following instructions.
+    expect(index).toContain(`src="../${CID}"`);
+    expect(index).not.toContain('https://gw.test/baf');
+    expect(index).not.toContain('ipfs.filebase.io/ipfs/baf');
+    expect(index).toMatch(/src="\.\.\/baf/);
+  });
+
+  /**
+   * THE ORDERING GUARD. The fallback chain only works because its URLs are
+   * ABSOLUTE. If the relativising pass ever runs after the script injection it
+   * rewrites the chain inside the script and silently disables the safety net,
+   * with no visible symptom until a gateway fails.
+   */
+  it('keeps the fallback chain ABSOLUTE inside the injected script', async () => {
+    const uploads = mockGateway();
+    await publishWebsite(
+      [{ path: 'index.html', content: '<html><head></head><body><img src="./a.png"></body></html>' },
+       { path: 'a.png', content: 'PNG' }],
+      'rel2',
+      'token',
+      {},
+    );
+
+    const index = uploads.get('website-rel2/index.html')!;
+    expect(index).toContain('https://ipfs.filebase.io/ipfs/');
+    expect(index).toContain('https://gw.test/');
+    expect(index).toContain('data-fx-try');
+    // and the asset itself is still relative
+    expect(index).toMatch(/src="\.\.\/baf/);
+  });
+
+  it('injects the fallback script into <head>, ahead of any image', async () => {
+    const uploads = mockGateway();
+    await publishWebsite(
+      [{ path: 'index.html', content: '<html><head><title>t</title></head><body><img src="./a.png"></body></html>' },
+       { path: 'a.png', content: 'PNG' }],
+      'rel3',
+      'token',
+      {},
+    );
+
+    const index = uploads.get('website-rel3/index.html')!;
+    // An error listener registered after the images have parsed misses the
+    // failures it exists to catch — error events do not replay.
+    expect(index.indexOf('data-fx-try')).toBeLessThan(index.indexOf('<img'));
+    expect(index.indexOf('data-fx-try')).toBeLessThan(index.indexOf('</head>'));
+  });
+
+  it('keeps og:image absolute so crawlers can still fetch a preview', async () => {
+    const uploads = mockGateway();
+    await publishWebsite(
+      [
+        {
+          path: 'index.html',
+          content:
+            '<html><head>' +
+            '<meta property="og:image" content="./hero.png">' +
+            '</head><body><img src="./hero.png"></body></html>',
+        },
+        { path: 'hero.png', content: 'PNG' },
+      ],
+      'rel4',
+      'token',
+      {},
+    );
+
+    const index = uploads.get('website-rel4/index.html')!;
+    expect(index).toMatch(/property="og:image" content="https:\/\/gw\.test\/baf/);
+    // ...while the body image stays relative
+    expect(index).toMatch(/<img src="\.\.\/baf/);
+  });
+
+  it('subpages get the same treatment as index', async () => {
+    const uploads = mockGateway();
+    await publishWebsite(
+      [
+        { path: 'index.html', content: '<html><head></head><body><a href="./about.html">a</a></body></html>' },
+        { path: 'about.html', content: '<html><head></head><body><img src="./hero.png"></body></html>' },
+        { path: 'hero.png', content: 'PNG' },
+      ],
+      'rel5',
+      'token',
+      {},
+    );
+
+    const about = uploads.get('website-rel5/about.html')!;
+    expect(about).toMatch(/src="\.\.\/baf/);
+    expect(about).toContain('data-fx-try');
+    expect(about).not.toContain('https://gw.test/baf');
+
+    // A link to another PAGE carries a trailing slash; an ASSET does not.
+    // Every page is its own CID, so without the slash the visitor lands at
+    // `/ipfs/<cid>` and that page's own `../<asset>` refs resolve one level
+    // too high — the site still works, but stops following its gateway.
+    const index = uploads.get('website-rel5/index.html')!;
+    expect(index).toMatch(/href="\.\.\/baf[a-z0-9]+\/"/);
+    expect(about).toMatch(/src="\.\.\/baf[a-z0-9]+"/);
+    expect(about).not.toMatch(/src="\.\.\/baf[a-z0-9]+\/"/);
   });
 });

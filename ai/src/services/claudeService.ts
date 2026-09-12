@@ -48,6 +48,7 @@ import {
   renderExistingFiles,
 } from '../prompts/revisionPrompts.js';
 import { fetchToFile } from '../utils/fetchFile.js';
+import { assetFetchCandidates } from '../utils/ipfsUrl.js';
 
 export interface WebsiteFile {
   path: string;
@@ -271,7 +272,17 @@ async function attachAsset(
 
   const tmpPath = path.join(tmpDir, `${Date.now()}-${safeBasename(asset.fileName)}`);
   try {
-    await fetchToFile(asset.url, tmpPath, signal, { logTag: '[claude]' });
+    // Prefer OUR gateway over the public one the client labelled the asset
+    // with. Fetching a user's own images back through dweb.link earns an
+    // HTTP 429, and a 429 here is silent: the job still "succeeds" but the
+    // model never SEES the picture and writes the page blind. Falls back to
+    // the original URL, so this can never fetch less than it used to.
+    await fetchToFile(
+      assetFetchCandidates(asset.url, config.ipfsGatewayUrl),
+      tmpPath,
+      signal,
+      { logTag: '[claude]' },
+    );
   } catch (err) {
     return { error: `download failed: ${(err as Error).message}` };
   }

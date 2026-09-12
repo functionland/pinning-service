@@ -22,9 +22,17 @@ export interface FetchToFileOptions {
   redirect?: 'follow' | 'manual';
 }
 
-/** Fetch a URL into [destPath], with timeout, one retry, and a byte cap. */
+/**
+ * Fetch into [destPath], with timeout, one retry, and a byte cap.
+ *
+ * [url] may be a LIST of equivalent sources tried in order — used to fetch a
+ * user's own IPFS content from our gateway before falling back to the public
+ * one that rate-limits us (see utils/ipfsUrl.ts). Each candidate gets one
+ * attempt and the last gets a retry, so a single-URL call behaves exactly as
+ * it always has: two attempts.
+ */
 export async function fetchToFile(
-  url: string,
+  url: string | string[],
   destPath: string,
   signal?: AbortSignal,
   opts: FetchToFileOptions = {},
@@ -33,15 +41,23 @@ export async function fetchToFile(
   const maxBytes = opts.maxBytes ?? MAX_FETCH_BYTES;
   const logTag = opts.logTag ?? '[fetch]';
 
+  const candidates = (Array.isArray(url) ? url : [url]).filter(Boolean);
+  if (candidates.length === 0) {
+    throw new Error('fetch failed: no URL given');
+  }
+  // One attempt per candidate, plus a retry of the last.
+  const attempts = [...candidates, candidates[candidates.length - 1]];
+
   let lastErr: Error | undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < attempts.length; attempt++) {
+    const target = attempts[attempt];
     const ac = new AbortController();
     const onParentAbort = () => ac.abort();
     signal?.addEventListener('abort', onParentAbort);
     const timeoutId = setTimeout(() => ac.abort(), timeoutMs);
 
     try {
-      const res = await fetch(url, {
+      const res = await fetch(target, {
         signal: ac.signal,
         redirect: opts.redirect ?? 'follow',
       });
@@ -62,8 +78,13 @@ export async function fetchToFile(
       if (signal?.aborted) {
         throw lastErr;
       }
-      if (attempt === 0) {
-        console.warn(`${logTag} fetch retry for ${url}: ${lastErr.message}`);
+      if (attempt < attempts.length - 1) {
+        const next = attempts[attempt + 1];
+        console.warn(
+          next === target
+            ? `${logTag} fetch retry for ${target}: ${lastErr.message}`
+            : `${logTag} fetch failed for ${target} (${lastErr.message}) — falling back to ${next}`,
+        );
       }
     } finally {
       clearTimeout(timeoutId);

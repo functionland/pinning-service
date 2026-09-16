@@ -149,6 +149,28 @@ describe('public directory routes are NOT behind the JWT middleware', () => {
     expect(dirDb.listDirectory).toHaveBeenCalled();
   });
 
+  // A site's relative asset refs only resolve from the slashed page URL, and on
+  // Filebase nothing rescues an unslashed one (its CSP blocks the inline
+  // fallback). Every row published before the server slashed its URLs stores
+  // the bare form, so the directory normalises on read.
+  it('serves gateway page URLs with a trailing slash, leaving the front door alone', async () => {
+    const CID = 'bafkr4icktd4n2vmazsp7zv5qx5z5gcumnqr5il6yo7fjxubwtp2nizrikq';
+    const FRONT = 'https://fxfiles.top/w/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8';
+    dirDb.listDirectory.mockResolvedValue({
+      entries: [
+        { id: 'a', name: 'Legacy', gateway_url: `https://ipfs.cloud.fx.land/gateway/${CID}` },
+        { id: 'b', name: 'New', gateway_url: `https://ipfs.cloud.fx.land/gateway/${CID}/` },
+        { id: 'c', name: 'Front door', gateway_url: FRONT },
+      ],
+      total: 3,
+    } as any);
+    const body = await (await get('/api/v1/directory')).json();
+    const urls = body.entries.map((e: any) => e.url);
+    expect(urls[0]).toBe(`https://ipfs.cloud.fx.land/gateway/${CID}/`);
+    expect(urls[1]).toBe(`https://ipfs.cloud.fx.land/gateway/${CID}/`);
+    expect(urls[2]).toBe(FRONT);
+  });
+
   it('GET /api/v1/directory/categories serves anonymous visitors', async () => {
     const res = await get('/api/v1/directory/categories');
     expect(res.status).toBe(200);

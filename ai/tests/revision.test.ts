@@ -1,6 +1,7 @@
 import os from 'os';
 
 import type Anthropic from '@anthropic-ai/sdk';
+import sharp from 'sharp';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/config/index.js', () => ({
@@ -399,11 +400,29 @@ describe('reviseWebsite', () => {
     });
 
     it('DOES attach an asset the site has never used', async () => {
-      const { client, stream } = fakeClient([message(JSON.stringify({ files: [] }))]);
-      await reviseWith(client, [
-        { path: 'index.html', content: '<h1>no images here</h1>' },
-      ]);
-      expect(userText(stream)).not.toContain(SKIPPED);
+      // Served locally: downloading the real 1.7 MB image took ~4.3 s from
+      // Node, a coin flip against the 5 s test timeout.
+      const jpeg = await sharp({
+        create: { width: 1, height: 1, channels: 3, background: '#000' },
+      }).jpeg().toBuffer();
+      const fetchMock = vi.fn(
+        async () => new Response(new Uint8Array(jpeg), { status: 200, headers: { 'content-type': 'image/jpeg' } }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      try {
+        const { client, stream } = fakeClient([message(JSON.stringify({ files: [] }))]);
+        await reviseWith(client, [
+          { path: 'index.html', content: '<h1>no images here</h1>' },
+        ]);
+        expect(userText(stream)).not.toContain(SKIPPED);
+        // attached for real, not dropped with a fetch error
+        expect(fetchMock).toHaveBeenCalled();
+        const params = stream.mock.calls[0][0] as Anthropic.MessageStreamParams;
+        const content = params.messages[0].content as Array<{ type: string }>;
+        expect(content.some((b) => b.type === 'image')).toBe(true);
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     it('hands the model the RELATIVE reference, never the gateway URL', async () => {

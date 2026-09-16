@@ -23,6 +23,7 @@ import { z } from 'zod';
 import { createHash, randomUUID } from 'crypto';
 import { config } from '../config/index.js';
 import { isGenerationId } from '../database/postgres.js';
+import { sitePageUrl } from '../utils/ipfsUrl.js';
 import {
   countRecentReportsByIp,
   createReport,
@@ -191,7 +192,10 @@ directoryPublicRoutes.get('/directory', async (c) => {
       name: e.name,
       description: e.description,
       category: e.category,
-      url: e.gateway_url,
+      // Normalised on read, not only on write: every row published before
+      // this change stores the unslashed form, and a visitor following an
+      // unslashed page link gets broken images on Filebase.
+      url: sitePageUrl(e.gateway_url),
       cid: e.result_cid,
       publishedAt: e.completed_at,
     })),

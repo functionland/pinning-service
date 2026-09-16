@@ -58,6 +58,29 @@ export function cidFromGatewayUrl(url: string): string | null {
   return null;
 }
 
+/**
+ * A published site's PAGE URL, guaranteed to end in `/`.
+ *
+ * Sites reference their assets relatively (`../<cid>`), which resolves onto
+ * the gateway only from the slashed form: from `https://host/ipfs/<cid>` it
+ * lands on `/<asset>` and 404s. The inline fallback that could rescue that is
+ * blocked on Filebase by its `default-src 'self'` CSP, so a missing slash is a
+ * broken image there (measured 2026-09-16).
+ *
+ * Only gateway-shaped URLs are touched — one that carries a CID. Anything else
+ * (notably the `fxfiles.top/w/<ipns-name>` front door, whose resolver adds the
+ * slash itself) is returned unchanged, as are null/empty inputs.
+ */
+export function sitePageUrl(url: string | null | undefined): string | null {
+  if (!url) return url ?? null;
+  if (url.endsWith('/')) return url;
+  if (!cidFromGatewayUrl(url)) return url;
+  // Leave query/fragment-bearing URLs alone; a page link never has one, and
+  // appending after them would put the slash in the wrong component.
+  if (/[?#]/.test(url)) return url;
+  return `${url}/`;
+}
+
 /** Hostname of a base URL, or '' when it is unusable. */
 function hostOf(base: string): string {
   try {

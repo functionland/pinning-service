@@ -11,7 +11,7 @@ vi.mock('fs', async (importOriginal) => {
   };
 });
 
-import { assetFetchCandidates, cidFromGatewayUrl } from '../src/utils/ipfsUrl.js';
+import { assetFetchCandidates, cidFromGatewayUrl, sitePageUrl } from '../src/utils/ipfsUrl.js';
 import { fetchToFile } from '../src/utils/fetchFile.js';
 
 /**
@@ -27,6 +27,39 @@ import { fetchToFile } from '../src/utils/fetchFile.js';
 const CIDV1 = 'bafybeicqqub6psgupgkv7vq7gvtvl75qsugbjckmxrdttto4ol5jjxufxy';
 const CIDV0 = 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG';
 const OWN = 'https://ipfs.cloud.fx.land/gateway';
+
+// A site's relative asset refs (`../<cid>`) resolve onto the gateway only from
+// the slashed page URL; on Filebase nothing rescues an unslashed one.
+describe('sitePageUrl', () => {
+  it('slashes path-style gateway page URLs', () => {
+    expect(sitePageUrl(`${OWN}/${CIDV1}`)).toBe(`${OWN}/${CIDV1}/`);
+    expect(sitePageUrl(`https://ipfs.filebase.io/ipfs/${CIDV1}`)).toBe(
+      `https://ipfs.filebase.io/ipfs/${CIDV1}/`,
+    );
+  });
+
+  it('never doubles an existing slash', () => {
+    expect(sitePageUrl(`${OWN}/${CIDV1}/`)).toBe(`${OWN}/${CIDV1}/`);
+  });
+
+  it('from the result, the relative asset ref lands on the gateway', () => {
+    const page = sitePageUrl(`https://ipfs.filebase.io/ipfs/${CIDV1}`)!;
+    expect(new URL(`../${CIDV0}`, page).href).toBe(`https://ipfs.filebase.io/ipfs/${CIDV0}`);
+  });
+
+  it('leaves the fxfiles.top front door untouched — its resolver adds the slash', () => {
+    const front = 'https://fxfiles.top/w/k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8';
+    expect(sitePageUrl(front)).toBe(front);
+  });
+
+  it('leaves non-gateway, query-bearing and empty values alone', () => {
+    expect(sitePageUrl('https://example.com/about')).toBe('https://example.com/about');
+    expect(sitePageUrl(`${OWN}/${CIDV1}?x=1`)).toBe(`${OWN}/${CIDV1}?x=1`);
+    expect(sitePageUrl(null)).toBeNull();
+    expect(sitePageUrl(undefined)).toBeNull();
+    expect(sitePageUrl('')).toBe('');
+  });
+});
 
 describe('cidFromGatewayUrl', () => {
   it('reads a CID from the subdomain form the client actually sends', () => {

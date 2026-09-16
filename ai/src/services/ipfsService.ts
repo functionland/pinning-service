@@ -8,14 +8,19 @@
  * gateway the app has not heard of yet. See utils/relativeAssets.ts.
  */
 
+import { createHash } from 'crypto';
 import { config } from '../config/index.js';
 import {
   absolutizeSocialMeta,
+  buildAssetFallbackExternalTag,
+  buildAssetFallbackJs,
   buildAssetFallbackScript,
+  externalizeInlineScripts,
   injectIntoHead,
   relativeAssetRef,
   relativePageRef,
   relativizeGatewayUrls,
+  stripFxInjections,
 } from '../utils/relativeAssets.js';
 
 export interface PublishResult {
@@ -445,17 +450,82 @@ export async function publishWebsite(
       );
     }
 
+    // Upload a small JS file alongside the site and return its CID. Used for
+    // the external script copies below; they are ordinary IPFS content, so a
+    // published site never needs this service (or any fx server) to load them.
+    //
+    // Keyed by CONTENT, not by name: every page numbers its scripts from 0, so
+    // a name-only key is shared by the index and each subpage, and the later
+    // upload would overwrite the earlier page's copy — leaving it referenced
+    // by no object. Identical content is uploaded once, so no key is ever
+    // written twice.
+    //
+    // Each file also starts with a comment unique to this publish, so its CID
+    // belongs to this site alone. Unsalted, the fallback would be one CID for
+    // every site, and a revision's unchanged scripts the live site's CIDs; the
+    // failure cleanup above DELETEs uploads, and fula-api drops a pin by CID
+    // with no refcount across sites — one failed publish could unpin a copy
+    // that live sites load. A comment ahead of 'use strict' keeps it a
+    // directive. Derived from, not equal to, the job id.
+    const jsSalt = `/* fx ${createHash('sha256').update(jobId).digest('hex').slice(0, 16)} */\n`;
+    const jsUploads = new Map<string, Promise<string>>();
+    const uploadJs = (content: string, name: string): Promise<string> => {
+      const digest = createHash('sha256').update(content).digest('hex').slice(0, 16);
+      let pending = jsUploads.get(digest);
+      if (!pending) {
+        pending = uploadFileToS3(
+          { path: `_fx/${digest}-${name}`, content: jsSalt + content },
+          jobId,
+          userToken,
+          controller.signal,
+        ).then((r) => {
+          uploadedKeys.push(r.s3Key);
+          return r.cid;
+        });
+        jsUploads.set(digest, pending);
+      }
+      return pending;
+    };
+
+    // The asset fallback, uploaded ONCE per publish and shared by its pages.
+    const fallbackChain = [FALLBACK_GATEWAY, gatewayBase];
+    const fallbackCid = await uploadJs(buildAssetFallbackJs(fallbackChain), 'asset-fallback.js');
+    // No whitespace between the two tags — see injectIntoHead.
+    const fallbackSnippet =
+      buildAssetFallbackScript(fallbackChain) +
+      buildAssetFallbackExternalTag(`${FALLBACK_GATEWAY}/${fallbackCid}`);
+
+    /**
+     * Everything a published page goes through, in an ORDER that is
+     * load-bearing:
+     *
+     *  1. strip   — drop anything a previous publish injected (idempotency).
+     *  2. relativise — absolute gateway URLs -> `../<cid>`. MUST precede 4:
+     *     the fallback's URLs must stay absolute or the chain is dead.
+     *  3. externalise — give each inline script an IPFS-hosted copy, so a
+     *     gateway that blocks inline scripts (Filebase) still runs the page's
+     *     code. Runs before 4 so our own fallback is not externalised twice.
+     *  4. inject the fallback — inline copy plus an absolute external copy.
+     *
+     * og:image is absolutised onto FALLBACK_GATEWAY, a public IPFS gateway,
+     * NOT gatewayBase: that is this service's own gateway, and a preview must
+     * keep working when fx's servers are down.
+     */
+    const finishPage = async (html: string): Promise<string> => {
+      let out = stripFxInjections(html);
+      out = relativizeGatewayUrls(out, [gatewayBase, FALLBACK_GATEWAY]);
+      out = absolutizeSocialMeta(out, FALLBACK_GATEWAY);
+      out = await externalizeInlineScripts(out, uploadJs);
+      out = injectIntoHead(out, fallbackSnippet);
+      return out;
+    };
+
     // Step 1.5: Rewrite + upload each subpage (its asset refs now resolve),
     // then add its CID to the map so index→subpage links resolve too.
     for (const page of subPagesInlined) {
-      // Same treatment as index.html below, in the same order — a subpage is
-      // just as published and just as immutable.
-      let rewrittenPage = relativizeGatewayUrls(rewriteHtml(page.content, cidMap), [gatewayBase, FALLBACK_GATEWAY]);
-      rewrittenPage = absolutizeSocialMeta(rewrittenPage, gatewayBase);
-      rewrittenPage = injectIntoHead(
-        rewrittenPage,
-        buildAssetFallbackScript([FALLBACK_GATEWAY, gatewayBase]),
-      );
+      // Same treatment as index.html below — a subpage is just as published
+      // and just as immutable.
+      const rewrittenPage = await finishPage(rewriteHtml(page.content, cidMap));
       const uploaded = await uploadFileToS3(
         { path: page.path, content: rewrittenPage },
         jobId,
@@ -469,27 +539,10 @@ export async function publishWebsite(
       console.log(`[ipfs] Subpage ${page.path} → ${uploaded.cid}`);
     }
 
-    // Step 2: Rewrite index.html so every asset reference is relative
-    let rewrittenHtml = rewriteHtml(indexHtmlInlined, cidMap);
-
-    // Step 2.1: Catch any absolute gateway URL the model emitted anyway.
-    //
-    // ORDER IS LOAD-BEARING — this MUST run before any script injection
-    // below. The fallback script's whole value is that its URLs are ABSOLUTE;
-    // relativising after injection would rewrite the chain inside the script
-    // and silently disable the safety net. Pinned by a test.
-    rewrittenHtml = relativizeGatewayUrls(rewrittenHtml, [gatewayBase, FALLBACK_GATEWAY]);
-
-    // Step 2.2: Social previews go back to absolute — crawlers do not run JS
-    // and do not resolve a relative og:image.
-    rewrittenHtml = absolutizeSocialMeta(rewrittenHtml, gatewayBase);
-
-    // Step 2.3: Recover images when the relative form cannot resolve (page
-    // opened without its trailing slash, or a subdomain-style gateway).
-    rewrittenHtml = injectIntoHead(
-      rewrittenHtml,
-      buildAssetFallbackScript([FALLBACK_GATEWAY, gatewayBase]),
-    );
+    // Step 2: Rewrite index.html so every asset reference is relative, then the
+    // same page pipeline as the subpages (see finishPage for why the order of
+    // its steps is load-bearing).
+    let rewrittenHtml = await finishPage(rewriteHtml(indexHtmlInlined, cidMap));
 
     // Step 2.5 (optional): Inject the fxfiles-analytics ping script. The
     // user opted in via `enableTracking` at generate time; the script
@@ -510,7 +563,9 @@ export async function publishWebsite(
     );
     uploadedKeys.push(indexUploaded.s3Key);
 
-    const gatewayUrl = `${gatewayBase}/${indexUploaded.cid}`;
+    // Slashed: the site's relative asset refs only resolve from this form, and
+    // this URL is what the public directory shows when there is no front door.
+    const gatewayUrl = `${gatewayBase}/${indexUploaded.cid}/`;
 
     console.log(`[ipfs] Published HTML CID: ${indexUploaded.cid}`);
     console.log(`[ipfs] Gateway URL: ${gatewayUrl}`);

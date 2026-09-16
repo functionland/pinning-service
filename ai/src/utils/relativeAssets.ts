@@ -229,12 +229,29 @@ export function absolutizeSocialMeta(html: string, gatewayBase: string): string 
  * network and can lock the tab up.
  */
 export function buildAssetFallbackScript(chain: string[]): string {
+  return `<script data-fx>
+${buildAssetFallbackJs(chain)}
+</script>`;
+}
+
+/**
+ * The fallback's code, without a <script> wrapper — the same bytes serve as the
+ * inline copy and as the body of the external copy (see
+ * {@link buildAssetFallbackExternalTag}).
+ *
+ * It guards itself (`__fxAssetFallback`) because on some gateways BOTH copies
+ * run — measured 2026-09-16 on inbrowser.link, where the inline copy and the
+ * external Filebase copy both executed. Registering twice would double every
+ * retry and skip chain entries.
+ */
+export function buildAssetFallbackJs(chain: string[]): string {
   const bases = chain
     .map((base) => (base.endsWith('/') ? base : `${base}/`))
     .filter((base, i, all) => all.indexOf(base) === i);
 
-  return `<script>
-(function () {
+  return `(function () {
+  if (window.__fxAssetFallback) return;
+  window.__fxAssetFallback = 1;
   var CHAIN = ${JSON.stringify(bases)};
   var CID = /([A-Za-z0-9]{40,120})(?:[\\/?#]|$)/;
   function retry(el) {
@@ -253,8 +270,156 @@ export function buildAssetFallbackScript(chain: string[]): string {
       if (imgs[i].complete && imgs[i].naturalWidth === 0) retry(imgs[i]);
     }
   });
-})();
-</script>`;
+})();`;
+}
+
+/**
+ * External copy of the fallback, loaded from an ABSOLUTE IPFS gateway URL.
+ *
+ * Why it exists: Filebase — the app's default gateway — sends
+ * `Content-Security-Policy: default-src 'self'` with no `script-src`, so the
+ * INLINE copy never runs there (verified 2026-09-16: an inline script inserted
+ * into a Filebase page raised `script-src-elem` and did not execute). A script
+ * loaded from Filebase itself is `'self'` on a Filebase page and does run
+ * (verified the same day: a bare-CID script, served as `text/plain` with no
+ * `nosniff`, loaded and executed with zero violations).
+ *
+ * Why ABSOLUTE and not `../<cid>`: the fallback's job is rescuing a page opened
+ * without its trailing slash, which is exactly when a relative reference also
+ * resolves one level too high. Only an absolute URL still reaches the script.
+ *
+ * No server dependency: the URL is a public IPFS gateway and the file is
+ * content-addressed. The fallback's own retry list already names this gateway,
+ * so this adds no new host. `defer` keeps a cold gateway fetch from blocking
+ * rendering; deferred scripts still run before DOMContentLoaded, so the
+ * already-failed-image sweep still fires.
+ */
+export function buildAssetFallbackExternalTag(src: string): string {
+  return `<script data-fx defer src="${src}"></script>`;
+}
+
+/**
+ * Remove everything this pipeline injected on a previous publish (`data-fx`
+ * scripts), so publishing an already-published page is idempotent.
+ *
+ * Defence in depth: revisions edit the stored SOURCE, and generate.ts refuses a
+ * revision without it, so no path feeds published HTML back in today. If one
+ * ever does, without this a republish would externalise the flag-setters and
+ * add a second external copy of every script — and on Filebase both external
+ * copies would run.
+ */
+export function stripFxInjections(html: string): string {
+  return (
+    html
+      // Exactly the tags, no surrounding whitespace: every injection is
+      // written without whitespace, so stripping restores the original bytes
+      // and a republish is byte-identical.
+      .replace(/<script\s(?:[^>]*\s)?data-fx(?=[\s=>])[^>]*>[\s\S]*?<\/script\s*>/gi, '')
+      // The UNMARKED, UNGUARDED fallback injected by the first release of this
+      // pipeline (with the newline that release put before it). Left in place
+      // it would register alongside the new one and double every retry.
+      .replace(/\n<script>\n\(function \(\) \{\n {2}var CHAIN = [\s\S]*?<\/script>/g, '')
+  );
+}
+
+/**
+ * Whether a tag's attribute string has attribute [name]. Matched as a whole
+ * name — a plain `\b` would also match `data-src` for `src`.
+ */
+function hasAttr(attrs: string, name: string): boolean {
+  return new RegExp(`(?:^|\\s)${name}(?=[\\s=]|$)`, 'i').test(attrs);
+}
+
+/** Script types that are classic JavaScript — the only ones we externalise. */
+function isClassicScriptType(attrs: string): boolean {
+  const m = attrs.match(/(?:^|\s)type\s*=\s*["']?([^"'\s>]+)/i);
+  if (!m) return true;
+  return /^(text|application)\/(x-)?(java|ecma)script$/i.test(m[1]);
+}
+
+/**
+ * Give every inline script on the page an EXTERNAL copy, so the page's own
+ * behaviour survives gateways that block inline scripts.
+ *
+ * Filebase — the default gateway — blocks every inline script with its
+ * `default-src 'self'` CSP. That silently kills whatever a generated site does
+ * in JS, including the contact form: its <form> has no `action` and its fields
+ * no `name`, so without the submit handler "Send" just reloads the page and the
+ * visitor's message is lost.
+ *
+ * For each classic inline script, the output is:
+ *
+ *   <script data-fx>window.__fxsN=1</script>   runs wherever inline is allowed
+ *   <script>ORIGINAL</script>                  byte-identical, unchanged
+ *   <script data-fx defer src="../<cid>">       runs on Filebase-like gateways
+ *
+ * where the external file is ORIGINAL prefixed with a guard that aborts if the
+ * flag was set; the page's first injection also carries a listener that keeps
+ * that abort out of the site's error handlers. Measured 2026-09-16 which copy
+ * runs where:
+ *   Filebase      inline BLOCKED, relative external RUNS
+ *   inbrowser     inline runs,    relative external 404s (subdomain host)
+ *   fx            inline runs,    relative external refused (nosniff)
+ * so exactly one copy runs on each, and the guard covers any gateway that would
+ * allow both.
+ *
+ * The original is left untouched rather than wrapped, so nothing changes where
+ * it already worked: wrapping in a function or block would change top-level
+ * scoping and drop a leading 'use strict' directive. The guard goes AFTER any
+ * directive prologue for the same reason. A top-level `throw` aborts a classic
+ * script without wrapping it.
+ *
+ * `../<cid>` is relative on purpose — no gateway host in the page — and the
+ * script is on IPFS, so no server is involved when the site loads.
+ */
+export async function externalizeInlineScripts(
+  html: string,
+  upload: (content: string, name: string) => Promise<string>,
+): Promise<string> {
+  const SCRIPT_RE = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  const eligible = (attrs: string, code: string) =>
+    !hasAttr(attrs, 'src') &&
+    !hasAttr(attrs, 'data-fx') &&
+    // never runs in a modern browser; its copy, lacking the attribute, would
+    !hasAttr(attrs, 'nomodule') &&
+    isClassicScriptType(attrs) &&
+    code.trim().length > 0;
+
+  // The value every copy throws to abort, as a JS literal. Wherever inline
+  // runs — which is exactly where that throw happens — one listener ahead of
+  // all site scripts cancels this error and only this error, so the site's
+  // own error handlers and the console never see it (measured: without it a
+  // site-registered window 'error' listener fired once per script).
+  const ABORT = "'fx: this script already ran inline'";
+  const silencer =
+    `<script data-fx>window.addEventListener('error', function (e) { ` +
+    `if (e.error === ${ABORT}) { e.preventDefault(); e.stopImmediatePropagation(); } }, true)</script>`;
+
+  // Build each replacement in document order, keyed by POSITION — two inline
+  // scripts with identical source are still separate scripts with separate
+  // flags, and must not collapse into one entry.
+  const replacements: string[] = [];
+  for (const [match, attrs, code] of html.matchAll(SCRIPT_RE)) {
+    if (!eligible(attrs, code)) continue;
+    const n = replacements.length;
+    const flag = `__fxs${n}`;
+    const guard = `if (window.${flag}) throw ${ABORT};\n`;
+    const prologue = code.match(/^\s*(?:(['"])use strict\1\s*;?\s*)?/)![0];
+    const external = prologue + guard + code.slice(prologue.length);
+    const cid = await upload(external, `inline-${n}.js`);
+    replacements.push(
+      (n === 0 ? silencer : '') +
+        `<script data-fx>window.${flag}=1</script>` +
+        match +
+        `<script data-fx defer src="${relativeAssetRef(cid)}"></script>`,
+    );
+  }
+  if (replacements.length === 0) return html;
+
+  let i = 0;
+  return html.replace(SCRIPT_RE, (match, attrs: string, code: string) =>
+    eligible(attrs, code) ? replacements[i++] : match,
+  );
 }
 
 /**
@@ -262,13 +427,16 @@ export function buildAssetFallbackScript(chain: string[]): string {
  * parsed. Falls back to prepending when the document has no head.
  */
 export function injectIntoHead(html: string, snippet: string): string {
+  // No whitespace around the snippet: stripFxInjections removes exactly the
+  // injected tags, so anything added here beyond them would survive a strip
+  // and make republishing non-idempotent.
   const headOpen = /<head\b[^>]*>/i;
   if (headOpen.test(html)) {
-    return html.replace(headOpen, (tag) => `${tag}\n${snippet}`);
+    return html.replace(headOpen, (tag) => `${tag}${snippet}`);
   }
   const htmlOpen = /<html\b[^>]*>/i;
   if (htmlOpen.test(html)) {
-    return html.replace(htmlOpen, (tag) => `${tag}\n${snippet}`);
+    return html.replace(htmlOpen, (tag) => `${tag}${snippet}`);
   }
-  return `${snippet}\n${html}`;
+  return `${snippet}${html}`;
 }
